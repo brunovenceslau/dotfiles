@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Issue chooser configuration.
+#
+# Blank issues are OFF: the two forms ask for the details a report is useless
+# without (the macOS version and architecture, whether the gates were run), and
+# a blank issue is how those get skipped. A report that fits neither form goes
+# to the discussion-free contact link below rather than to an empty text box.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/brunovenceslau/dotfiles/security/advisories/new
+    about: >-
+      Never open a public issue for a vulnerability. This opens a private
+      advisory visible only to you and the maintainer. Scope and response time
+      are in SECURITY.md.
+  - name: Read the documentation first
+    url: https://github.com/brunovenceslau/dotfiles/blob/main/docs/troubleshooting.md
+    about: >-
+      Troubleshooting lists the framework's own messages with the cause and the
+      fix for each one. Check it before filing a bug.
+  - name: Ask about an ask-first change
+    url: https://github.com/brunovenceslau/dotfiles/blob/main/CONTRIBUTING.md#ask-before-you-build-any-of-these
+    about: >-
+      Some surfaces need a maintainer decision before the code is written.
+      CONTRIBUTING.md lists them and says what to do instead.

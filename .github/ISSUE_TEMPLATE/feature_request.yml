@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Feature request form. The first required field is the ask-first
+# acknowledgement: most rejected proposals are rejected on the surface they
+# touch, not on the idea, and finding that out before the code is written is
+# the whole point of the form.
+name: Feature request
+description: Propose a change to what the framework does.
+title: "feat: "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        This is one person's live configuration published as a framework. A
+        proposal that fixes a defect, closes a gap in a gate, or makes the
+        documentation match the code is welcome. A proposal that replaces the
+        author's own configuration choices is not. See "Who this is for" in the
+        README.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What does not work today, for whom, and what it costs them. Describe
+        the problem before the solution: a proposal that only describes a
+        solution cannot be evaluated against alternatives.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: >-
+        The change itself. Name the files it would touch, and what a user would
+        see differently afterwards.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you considered instead
+      description: >-
+        Including the `.local` layer. Every config surface loads an untracked
+        `.local` companion, so a machine-specific preference usually needs no
+        change to the repository at all.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Surfaces this would touch
+      description: >-
+        Tick every one that applies. These need a maintainer decision before
+        the code is written; see CONTRIBUTING.md.
+      options:
+        - label: The plugin pins, the `.gitmodules` entries, or the static plugin loader.
+        - label: The SSH signing setup, or `fsckObjects` on any fetch.
+        - label: The `install.sh` upgrade path, including the `vgit` wrapper.
+        - label: A link convention or the exceptions table in `lib/link.sh`.
+        - label: A new submodule, or any new binary dependency.
+        - label: An `install.sh` subcommand name.
+        - label: None of the above.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before filing
+      options:
+        - label: >-
+            I read "Who this is for" in the README and this is not a request to
+            change the maintainer's own configuration choices.
+          required: true
