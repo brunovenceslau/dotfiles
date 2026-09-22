@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# check-patterns - static-pattern lint gate over the dotfiles' own surface.
+#
+# The static-pattern component that `make check-patterns` runs and
+#   `make lint` includes. Seven checks across our OWN runtime surface
+#   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
+#   we police our code, not upstream's):
+#     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
+#         no-runtime-download rule (the startup-path half is the
+#         fast-syntax-highlighting neutralization in zsh/zshrc).
+#     (2) ad-hoc `uname -m` outside lib/os.sh - arch branching MUST go through
+#         the is-arm64 / is-amd64 helpers.
+#     (3) an unescaped `#` inside a Makefile `$(shell ...)` / `${shell ...}` - macOS's
+#         system make (3.81) reads a bare `#` in a function argument as a comment and
+#         aborts ("unterminated call to function shell"), which GNU make 4.x on Linux
+#         silently tolerates; it MUST be escaped `\#`. A targeted, heuristic
+#         check on the Makefile (excluded from the scan surface - its recipes legitimately
+#         hold the very literals rules 1-2 forbid); a `#` after a nested `$(...)` or on a
+#         `\`-continued line is not caught (the macOS CI leg's real make 3.81 backstops it).
+#     (4) a drifted pinned-plugin shim premise in the SHA-pinned zsh plugins - the one pinned
+#         `$(uname -a)` shape the startup fork-free path relies on; a bump that
+#         reshapes it must re-verify the shim. (The second premise, pure.zsh's
+#         `who -m`, retired with pure - see the note above the check itself.)
+#     (5) a LONE `/opt/homebrew` - the Homebrew prefix MUST be resolved by directory
+#         existence, so naming the Apple Silicon prefix without the Intel one on the
+#         same line is the shape of a hardcode that breaks the Intel mac silently.
+#     (6) a `brew shellenv` / `brew --prefix` fork - the other half of the same rule.
+#     (7) bash 4 syntax in the bash-3.2 surface (install.sh + lib/*.sh) - the class
+#         `make lint`'s `/bin/bash -n` pass cannot see in ANY bash, because
+#         `declare -A` and `mapfile` are ordinary command invocations and `${var,,}`
+#         fails at expansion, not at parse. This is their only gate.
+#
+# FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
+#   verbatim to grep, including the optional (and usually absent) `home/`. A
+#   missing path makes grep exit 2, and bash's `if grep ...; then fail` reads a
+#   non-zero exit as "no match" - so BOTH checks were silently disabled whenever
+#   any scan path was absent (fail-OPEN: a real curl|sh would pass). This tool
+#   fixes both halves: it scans only paths that EXIST (an absent optional dir is
+#   skipped, not an error), and it treats a real grep error (exit >= 2) as a hard
+#   failure, never a silent pass. Regression coverage: tests/check_patterns_test.sh.
+#
+# Bash 3.2 compatible (indexed arrays only; no assoc arrays, no
+#   mapfile) so the macOS CI legs behave identically.
+#
+# Usage: check-patterns [ROOT]   (ROOT default: current directory)
+#   Exit: 0 clean; 1 a forbidden pattern was found; 2 nothing to scan or a scan
+#         error (fail closed).
+
+set -euo pipefail
+
+root="${1:-.}"
+
+# Our own implementing surface. NEVER the Makefile itself (its recipes contain
+# the very patterns they forbid), and the self-exclude on each grep below
+# likewise skips THIS script, which necessarily spells out the forbidden literals
+# in its grep patterns and docs. `home/` is optional - absent = skipped, not an
+# error (that omission is the whole bug this tool fixes).
+want=(install.sh lib bin zsh config packages security home)
+scan=()
+for p in "${want[@]}"; do
+  [ -e "$root/$p" ] && scan+=("$root/$p")
+done
+if [ "${#scan[@]}" -eq 0 ]; then
+  echo "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan" >&2
+  exit 2
+fi
+
+bad=0
+
+# --- code/comment split, used by arms (5)-(7) ---------------------------------
+# The comments that STATE these constraints necessarily spell the forbidden
+# literals - install.sh's own "no associative arrays, no mapfile, no ${var,,}"
+# header, and every `# never hardcode /opt/homebrew` a reader deserves beside the
+# line it explains. CLAUDE.md REQUIRES those comments, so a gate that flagged
+# them would forbid the repo from documenting its own rules. These arms therefore
+# test CODE, not the raw line. Arms (1) and (2) deliberately do NOT: a `curl|sh`
+# or a `uname -m` spelled anywhere is still a pattern we want out of the tree.
+#
+# _code_of splits one `PATH:NN:CONTENT` hit and returns CONTENT with its comment
+# tail removed. A comment starts at a `#` that opens the line OR follows one of the
+# characters that end a word for the shell - whitespace and the metacharacters
+# `; & | ( )` - so `x=1;# note` is a comment too, and an earlier version that only
+# knew about whitespace both missed a dodge and flagged a legitimate comment.
+# `[^:]*` never crosses a colon, so the prefix strip lands on PATH:NN: exactly.
+# PREMISES: no `:` in the scan root's path; and a `#` INSIDE a quoted string
+# truncates the line early, which can cut a real violation (false negative) or cut
+# the `/usr/local` half of arm 5's exempting pair (false positive). Both need a `#`
+# inside a string on a line that also carries one of these patterns.
+_code_of() {  # $1 = one "PATH:NN:CONTENT" hit -> its CODE on stdout
+  printf '%s' "$1" | sed -E -e 's/^[^:]*:[0-9]+://' -e 's/(^|[[:space:];&|()])#.*$/\1/'
+}
+
+# _code_hits MATCH_ERE [EXEMPT_ERE] - read hits on stdin, re-test each hit's CODE,
+# and print back the hits that still match MATCH_ERE and do not match EXEMPT_ERE.
+# Both EREs see the CODE ALONE, never the PATH:NN: prefix: testing the whole line
+# would let a scan ROOT whose own path contains the exempt text disable the arm
+# for the entire tree, which is the fail-OPEN shape this tool exists to refuse.
+# FAILS CLOSED on a broken ERE: a grep exit >= 2 is not "no match". An unusable
+# pattern reports every hit instead of silently disabling the arm, and an unusable
+# EXEMPT pattern exempts nothing, because the caller's `|| true` would otherwise
+# swallow any status this function returned.
+_code_hits() {
+  local match="$1" exempt="${2:-}" hit code rc
+  while IFS= read -r hit; do
+    [ -n "$hit" ] || continue
+    code="$(_code_of "$hit")"
+    [ -n "$code" ] || continue
+    rc=0; printf '%s\n' "$code" | grep -qE -- "$match" || rc=$?
+    if [ "$rc" -ge 2 ]; then
+      echo "check-patterns: code re-test errored (exit $rc) on '$match' - failing closed" >&2
+      printf '%s\n' "$hit"; continue
+    fi
+    [ "$rc" -eq 0 ] || continue
+    if [ -n "$exempt" ]; then
+      rc=0; printf '%s\n' "$code" | grep -qE -- "$exempt" || rc=$?
+      if [ "$rc" -ge 2 ]; then
+        echo "check-patterns: exemption re-test errored (exit $rc) on '$exempt' - exempting nothing" >&2
+      elif [ "$rc" -eq 0 ]; then
+        continue
+      fi
+    fi
+    printf '%s\n' "$hit"
+  done
+  return 0
+}
+
+# (1) forbid curl|sh / wget|bash runtime fetches.
+# rc 0 = match (violation); rc 1 = clean; rc >= 2 = scan error (fail closed).
+# `-r`, NOT `-R`: -R follows symlinks, and a first-party link pointing into a
+# third-party tree would drag the scan straight back into the plugins directory the
+# exclusion below just skipped. Excluding by the precise directory NAME (not a path)
+# keeps a future FIRST-PARTY tree in scope.
+if out=$(grep -rInE --exclude-dir=plugins --exclude=check-patterns \
+    '(curl|wget)[^|]*\|[[:space:]]*(sh|bash|zsh)' "${scan[@]}" 2>&1); then
+  printf '%s\n' "$out"
+  echo "check-patterns: forbidden curl|sh runtime fetch" >&2
+  bad=1
+else
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: curl|sh scan errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
+# (2) forbid ad-hoc `uname -m` outside lib/os.sh (its sanctioned home). The grep
+# prints paths as "<root>/lib/os.sh:...", so anchor the allow-line on the tail.
+if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns 'uname -m' "${scan[@]}" 2>&1); then
+  viol=$(printf '%s\n' "$out" | grep -vE '(^|/)lib/os\.sh:' || true)
+  if [ -n "$viol" ]; then
+    printf '%s\n' "$viol" >&2
+    echo "check-patterns: ad-hoc 'uname -m' outside lib/os.sh - use is-arm64/is-amd64" >&2
+    bad=1
+  fi
+else
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: uname scan errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
+# (3) forbid an UNESCAPED `#` inside a Makefile `$(shell ...)` / `${shell ...}`. macOS's system
+# make (3.81) treats a bare `#` in a function argument as a comment, truncating the call
+# ("unterminated call to function shell") - a real macos-intel CI failure that GNU make 4.x on
+# Linux tolerates. The `#` MUST be escaped `\#` (make strips the backslash; the shell still
+# receives `#`). The regex flags an unescaped `#` before the call's first closing `)`/`}`; an
+# escaped `\#`, and a trailing `# comment` after the close (glued `)#` or spaced), are NOT
+# flagged. HEURISTIC, not a make parser - it does NOT catch a `#` that sits after a NESTED
+# `$(...)`'s `)`, nor one on a `\`-continued physical line (grep cannot paren-balance or join
+# lines); the macOS CI leg's real make 3.81 is the backstop for those. The repo's only
+# `$(shell)` (Makefile:20) is single-line, non-nested, and `\#`-escaped. Targeted at the
+# Makefile, which is absent from the `want` scan surface above.
+mk="$root/Makefile"
+if [ -f "$mk" ]; then
+  if out=$(grep -nE '\$[({]shell[^)}]*[^\\)}]#' "$mk" 2>&1); then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: unescaped '#' inside a Makefile \$(shell ...)/\${shell ...} - macOS make 3.81 reads it as a comment; escape it as '\\#'" >&2
+    bad=1
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      printf '%s\n' "$out" >&2
+      echo "check-patterns: Makefile \$(shell ...) scan errored (exit $rc) - failing closed" >&2
+      bad=1
+    fi
+  fi
+fi
+
+# (4) re-verify the pinned zsh-plugin startup fork the shim below neutralizes is STILL
+# PRESENT, so a submodule pin bump re-checks the shim's premise instead of silently regressing.
+# The forkgate measures EXECS, not the semantic shape a bump could change:
+# fast-syntax-highlighting.plugin.zsh forks `$(uname -a)` at source time, answered by the zshrc
+# `uname` function shim. If a bump removed or reshaped it, the shim would stop covering the real
+# fork with no gate to notice, regressing the fork-free startup path. (The second premise here
+# used to be pure.zsh's `who -m` guard; pure was replaced by starship, whose init is cached at
+# install time and forks nothing at startup, so there is no shim to re-verify.) This file lives
+# in a SHA-pinned submodule EXCLUDED from the shared scan above, so reference it by explicit
+# path; a present-but-missing shape fails closed, while an ABSENT file (uninitialized submodule)
+# is a loud skip, STRICT-escalated.
+_shim_shape() {  # $1=file  $2=fixed-string shape  $3=human description
+  if [ -r "$1" ]; then
+    if ! grep -qF -- "$2" "$1"; then
+      echo "check-patterns: $3 - the pinned '$2' shape is GONE from ${1#"$root"/}; a submodule bump changed the shim's premise (re-verify the shim)" >&2
+      bad=1
+    fi
+  elif [ -n "${STRICT:-}" ]; then
+    echo "check-patterns: cannot verify $3 - ${1#"$root"/} absent (uninitialized submodule) and STRICT=1 - init submodules" >&2
+    bad=1
+  else
+    echo "check-patterns: SKIP $3 - ${1#"$root"/} absent (uninitialized submodule); set STRICT=1 to fail closed" >&2
+  fi
+}
+# shellcheck disable=SC2016  # the shapes are FIXED-STRING grep patterns: they MUST stay literal, not expand
+_shim_shape "$root/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh" '$(uname -a)' "f-sy-h uname probe (pinned-plugin shim premise)"
+
+# (5) forbid a LONE `/opt/homebrew`. The prefix is /opt/homebrew on Apple Silicon and
+# /usr/local on Intel, and it MUST be resolved by directory existence - a hardcoded
+# arm64 prefix passes every gate on the Apple Silicon mac and breaks the Intel one
+# silently, which is exactly the failure no local run can surface. The ARM64/INTEL
+# PAIR ON ONE LINE is what distinguishes detection from a hardcode, so that is what
+# the gate looks for: naming /opt/homebrew obliges you to name /usr/local beside it
+# (zsh/zshrc's prefix loop and zsh/fzf.zsh's candidate list both already read that
+# way). The check is deliberately ASYMMETRIC: /usr/local ALONE is never flagged,
+# because it is a generic FHS path with non-Homebrew uses (zsh/zshenv's
+# /usr/local/go/bin), while /opt/homebrew can only ever mean Homebrew.
+# The pair must be two ADJACENT WORDS, which is what a candidate list or a detection
+# loop looks like (`for prefix in /opt/homebrew /usr/local`). Anything looser exempts
+# by coincidence: `PATH="/opt/homebrew/bin:/usr/local/bin"` names both inside ONE word
+# and is an unconditional hardcode, and `[ -d /usr/local/go ] && P=/opt/homebrew` names
+# both on one line while the /usr/local is about Go. The comment tail is removed before
+# the test, so `=/opt/homebrew  # /usr/local on Intel` buys no exemption either.
+# ALLOWLIST: config/gnupg/gpg-agent.conf, matched on the PATH field alone. gpg-agent.conf
+# has no include directive and no variable expansion, so its pinentry path MUST be
+# absolute and cannot be prefix-detected; that file's own header records how the Intel
+# mac overrides it.
+if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns \
+    -F '/opt/homebrew' "${scan[@]}" 2>&1); then
+  viol=$(printf '%s\n' "$out" \
+    | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)' \
+    | grep -vE '^([^:]*/)?config/gnupg/gpg-agent\.conf:' || true)
+  if [ -n "$viol" ]; then
+    printf '%s\n' "$viol" >&2
+    echo "check-patterns: hardcoded Homebrew prefix - '/opt/homebrew' with no '/usr/local' as the ADJACENT word; resolve the prefix by directory existence, and keep the arm64/Intel pair on one line" >&2
+    bad=1
+  fi
+else
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: Homebrew-prefix scan errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
+# (6) forbid asking `brew` where IT lives - the other half of the same rule, and the
+# form an internet snippet supplies. BOTH spellings: `brew shellenv` and a BARE
+# `brew --prefix`. It is a FORK, so on the zsh startup path it also costs a subprocess
+# on every prompt (make forkgate catches it there; this catches it in install.sh and
+# lib/ too, where no forkgate runs). `--prefix` must END the word: `brew --prefix
+# openssl@3` asks where a FORMULA lives, which is a different question this rule has
+# no answer for, and flagging it would offer a remedy that does not apply. Every other
+# brew call is untouched - lib/packages.sh's `brew bundle` is how packages install.
+if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns \
+    -E 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))' "${scan[@]}" 2>&1); then
+  viol=$(printf '%s\n' "$out" | _code_hits 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))')
+  if [ -n "$viol" ]; then
+    printf '%s\n' "$viol" >&2
+    echo "check-patterns: a 'brew shellenv' / 'brew --prefix' fork - resolve the Homebrew prefix by directory existence instead" >&2
+    bad=1
+  fi
+else
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: brew-shellenv scan errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
+# (7) forbid bash 4 syntax in the bash-3.2 surface. macOS ships /bin/bash 3.2 and the
+# installer runs under it. `make lint` parses this surface with the ABSOLUTE /bin/bash,
+# but that pass is not a backstop for these three: `declare -A` and `mapfile` are
+# ordinary command invocations and `${var,,}` fails at EXPANSION, so no bash of any
+# version reports a parse error for them. The break would first appear at runtime on a
+# real mac. This arm is their only gate, and it runs on every host.
+# SURFACE: install.sh + lib/*.sh, the same subset as the Makefile's BASH32_FILES -
+# bin/ is EXEMPT (its tools run only on a provisioned host or a CI runner). An absent
+# file is skipped, not an error, the way `home/` is above. `-H` forces the PATH: prefix
+# even for a single file, which _code_of's split depends on. The parameter class covers
+# POSITIONALS, `@`/`*` and the `!` indirection, not just names: `${1,,}` on a function
+# argument is the most idiomatic use of the construct and so the likeliest slip.
+b32=()
+[ -f "$root/install.sh" ] && b32+=("$root/install.sh")
+for f in "$root"/lib/*.sh; do
+  [ -f "$f" ] && b32+=("$f")
+done
+if [ "${#b32[@]}" -gt 0 ]; then
+  b4='(declare|typeset|local)[[:space:]]+-[A-Za-z]*A'
+  b4="$b4"'|(^|[^[:alnum:]_])(mapfile|readarray)([^[:alnum:]_]|$)'
+  b4="$b4"'|\$\{!?([A-Za-z_][A-Za-z0-9_]*|[0-9][0-9]*|[@*])(\[[^]]*\])?(,|\^)'
+  if out=$(grep -HnE "$b4" "${b32[@]}" 2>&1); then
+    viol=$(printf '%s\n' "$out" | _code_hits "$b4")
+    if [ -n "$viol" ]; then
+      printf '%s\n' "$viol" >&2
+      echo "check-patterns: bash 4 syntax in the bash-3.2 surface (install.sh, lib/) - no associative arrays, no mapfile/readarray, no \${var,,}" >&2
+      bad=1
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      printf '%s\n' "$out" >&2
+      echo "check-patterns: bash-3.2 scan errored (exit $rc) - failing closed" >&2
+      bad=1
+    fi
+  fi
+fi
+
+[ "$bad" -eq 0 ]
