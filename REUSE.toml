@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# REUSE.toml - licensing for the files that cannot carry a header.
+#
+# Every other tracked file states its copyright and licence in its own comment
+# syntax, which keeps the notice next to the code it covers. JSON has no
+# comment syntax at all, so the two JSON files are declared here instead. This
+# file is the ONLY place where that indirection is allowed: a new entry means a
+# new file that genuinely cannot hold a header, not a shortcut past one.
+#
+# precedence = "aggregate" means a header inside the file, if one ever became
+# possible, would be added to what is declared here rather than replaced by it.
+
+version = 1
+
+[[annotations]]
+# Rewritten wholesale by lazy.nvim on every plugin update, which drops anything
+# it did not write. A header here would not survive the next `:Lazy sync`.
+path = "config/nvim/lazy-lock.json"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+# Claude Code's settings file. Its empty attribution block is what keeps an
+# agent co-author out of this repo's commits, so it is tracked deliberately.
+path = ".claude/settings.json"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
+SPDX-License-Identifier = "GPL-3.0-or-later"

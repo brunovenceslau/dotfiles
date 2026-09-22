@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Generated shell state/cache and OS cruft.
+.DS_Store
+*.zwc
+*.bak
+
+# Python bytecode/cache. The repo ships no python tool today, but a scratch
+# script or an importing harness would leave these behind; keep them out of the
+# tree (and out of the Makefile's bin/* globs).
+__pycache__/
+*.pyc
+
+# `make smoke` / `make forkgate` hermetic scratch HOME/XDG trees (bin/smoke,
+# bin/startup-fork-gate) - in-repo so nothing is written outside
+# ~/.config/dotfiles; never tracked.
+.forkgate/
+.smoke/
+
+# Machine-only `.local` layers: never tracked, never published.
+# Covers `foo.local`, `gh-extensions.local.txt`, `alacritty.local.toml`, etc.
+# The `.example` templates that document each layer stay committable (last match
+# wins).
+*.local
+*.local.*
+!*.local*.example
+
+# rclone/restic hold secrets and are NEVER linked; the repo keeps
+# only README/*.example. Belt-and-suspenders: ignore everything in
+# those dirs so a real `rclone.conf` / restic password can never be committed by
+# accident, then re-include the README and templates. (Exclude the dir CONTENTS
+# with `/*`, not the dir itself, so the re-includes below still take effect.)
+config/rclone/*
+config/restic/*
+!config/rclone/README.md
+!config/rclone/*.example
+!config/restic/README.md
+!config/restic/*.example
