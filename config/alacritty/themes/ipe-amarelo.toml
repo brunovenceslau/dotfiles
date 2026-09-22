@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/themes/ipe-amarelo.toml - "Ipê Amarelo": the yellow-ipê
+# variant of the ipê theme family, and the tracked default of
+# the base alacritty.toml (yellow is the flowering season). Colour only - no
+# font, opacity, or behaviour keys - so it composes cleanly under the import
+# chain. Signature: gold cursor/accent (#f4b400) on a dark coffee base. The
+# palette is maintainer-fixed; not a secret; host-only (alacritty is macOS GUI).
+
+[colors.primary]
+background = "#15120a"
+foreground = "#e6ddc4"
+[colors.cursor]
+text = "#15120a"
+cursor = "#f4b400"
+[colors.selection]
+background = "#3c3316"
+text = "#f3ecd6"
+[colors.normal]
+black = "#2b2618"
+red = "#d0604a"
+green = "#93a94e"
+yellow = "#f4b400"
+blue = "#52a0c4"
+magenta = "#c67fa4"
+cyan = "#4fb39a"
+white = "#d6ccb2"
+[colors.bright]
+black = "#3f3826"
+red = "#e87d63"
+green = "#b0c86a"
+yellow = "#ffce55"
+blue = "#74c3e6"
+magenta = "#e09cbf"
+cyan = "#6ed3b7"
+white = "#f2ebd6"

@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/themes/ipe-branco.toml - "Ipê Branco": the white-ipê variant
+# of the ipê theme family. Colour only - no font, opacity, or
+# behaviour keys - so it composes cleanly under alacritty.toml's import chain.
+# Signature: cream cursor (#eee7d4) + sage foliage (#8bbf88) on a green-charcoal
+# base. Activate it by pointing the base import at this file (see alacritty.toml).
+# The palette is maintainer-fixed; not a secret; host-only (alacritty is macOS GUI).
+
+[colors.primary]
+background = "#10130f"
+foreground = "#e4e7dc"
+[colors.cursor]
+text = "#10130f"
+cursor = "#eee7d4"
+[colors.selection]
+background = "#2c3a2e"
+text = "#f6f7ee"
+[colors.normal]
+black = "#262b24"
+red = "#cf6f5c"
+green = "#8bbf88"
+yellow = "#d9bd6a"
+blue = "#66a7bf"
+magenta = "#bd94b8"
+cyan = "#6bc0a8"
+white = "#e4e7dc"
+[colors.bright]
+black = "#3a4034"
+red = "#e88a75"
+green = "#a8d9a2"
+yellow = "#f0d585"
+blue = "#86c6dd"
+magenta = "#d6afcf"
+cyan = "#88ddc3"
+white = "#f6f7ee"

@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/alacritty.toml - linked to ~/.config/alacritty/alacritty.toml.
+# This file only ORCHESTRATES imports; it carries no settings of
+# its own beyond the import wiring, and that is deliberate. Alacritty loads the
+# importing file LAST, so a key written directly here would beat every import - and
+# the per-host alacritty.local.toml could never override it. So all
+# tracked defaults live in imported files instead, and precedence is simply the
+# import order below (later wins):
+#
+#   1. defaults.toml           - portable tracked base: window/opacity, font size,
+#                                scrolling.
+#   2. themes/ipe-amarelo.toml - the ipê family's tracked default colours.
+#                                Repoint this to
+#                                themes/ipe-{roxo,rosa,branco}.toml and commit to
+#                                change the committed default - there is no runtime
+#                                switcher.
+#   3. alacritty.local.toml    - this host's untracked overrides, imported LAST so
+#                                it wins over everything above, the theme
+#                                included. A missing import is skipped
+#                                silently, so a host without a .local just gets the
+#                                tracked defaults.
+#
+# Relative paths resolve next to this file (through the ~/.config/alacritty dir
+# symlink into the repo, where the untracked alacritty.local.toml lives).
+# Alacritty replaces iTerm2 (minimal attack surface).
+
+[general]
+live_config_reload = true
+import = ["defaults.toml", "themes/ipe-amarelo.toml", "alacritty.local.toml"]

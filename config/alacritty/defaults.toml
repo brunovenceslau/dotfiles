@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/defaults.toml - the portable, tracked Alacritty defaults,
+# imported FIRST by alacritty.toml. These live in an imported file,
+# not inline in alacritty.toml, on purpose: Alacritty loads the *importing* file
+# LAST, so any key written directly in alacritty.toml would beat an import and the
+# per-host alacritty.local.toml could never override it. Keeping
+# every tracked default here - ahead of the theme and the .local in the import
+# chain - lets the .local, imported last, win over all of them. Colour is NOT here:
+# it lives in the ipê theme (themes/ipe-amarelo.toml). No absolute paths, no
+# host-specifics - those belong in the untracked alacritty.local.toml.
+
+[window]
+padding = { x = 8, y = 8 }
+dynamic_title = true
+# Slightly translucent so an ipê desktop wallpaper breathes behind the text.
+# A tracked default; raise it toward 1.0 in alacritty.local.toml
+# on a host where translucency hurts legibility.
+opacity = 0.94
+# macOS: treat both Option keys as Alt so Alt-based keybindings work.
+option_as_alt = "Both"
+
+[font]
+size = 13.0
+# family is intentionally NOT pinned - set it in alacritty.local.toml to a font
+# actually installed on this host (e.g. a Nerd Font for prompt glyphs).
+
+[scrolling]
+history = 10000

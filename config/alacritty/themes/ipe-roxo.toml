@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/themes/ipe-roxo.toml - "Ipê Roxo": the purple-ipê variant of
+# the ipê theme family. Colour only - no font, opacity, or
+# behaviour keys - so it composes cleanly under alacritty.toml's import chain.
+# Signature: magenta-violet cursor/accent (#c247a4) on a violet-charcoal base.
+# Activate it by pointing the base import at this file (see alacritty.toml). The
+# palette is maintainer-fixed; not a secret; host-only (alacritty is macOS GUI).
+
+[colors.primary]
+background = "#16101a"
+foreground = "#e4d9ea"
+[colors.cursor]
+text = "#16101a"
+cursor = "#c247a4"
+[colors.selection]
+background = "#3a2540"
+text = "#f2e9f5"
+[colors.normal]
+black = "#292231"
+red = "#d75f76"
+green = "#82ab7f"
+yellow = "#d3a557"
+blue = "#7b74d6"
+magenta = "#c247a4"
+cyan = "#56aeb0"
+white = "#ddd2e4"
+[colors.bright]
+black = "#3c3247"
+red = "#ef7a8f"
+green = "#9fc99a"
+yellow = "#eec072"
+blue = "#9a94ee"
+magenta = "#df6ac1"
+cyan = "#74ccce"
+white = "#f2e9f5"

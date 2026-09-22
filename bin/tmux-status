@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# tmux-status - the cheap dynamic segments for the tmux status line.
+# tmux invokes this once per `status-interval` via `#(...)` in
+# config/tmux/tmux.conf, so it MUST stay O(cheap): one or two local `git` ref reads
+# (`symbolic-ref`, plus `rev-parse` on a detached HEAD - fast, no network, so no
+# timeout wrapper is needed), a cheap load read (`sysctl`, macOS only - see below), and one
+# `tmux display-message` socket query for the pane path. It never runs a sampling
+# command. It degrades to fewer segments and NEVER errors the status line: `set -u`
+# but deliberately NOT `-e`, and every external call is guarded, so an absent input
+# just drops its segment. Bash 3.2 compatible (no assoc arrays).
+#
+# SECURITY: the pane path is fetched FROM tmux over the socket (as data), NOT passed
+# as a `#(...)` argument. tmux interpolates a `#{...}` format into the shell command
+# by raw text, and its `#{q:...}` shell-quote modifier does NOT escape newline or tab
+# (measured on tmux 3.6), so ANY directory name on the command line is
+# command-injectable on the timer. Fetching the path here keeps every byte of it out
+# of the shell parser; it reaches only `git -C "$path"` as a quoted operand.
+#
+# Usage: tmux-status [PANE_PATH]   (default: the tmux pane path via the socket, else $PWD)
+
+set -u
+
+DOTFILES="${DOTFILES:-}"
+if [ -z "$DOTFILES" ]; then
+  DOTFILES="$( unset CDPATH; cd -- "$(dirname -- "$0")/.." 2>/dev/null && pwd )"
+fi
+if [ -r "$DOTFILES/lib/os.sh" ]; then
+  # shellcheck source=lib/os.sh
+  . "$DOTFILES/lib/os.sh"
+fi
+
+# _bar PCT -> a 5-cell block bar for an integer percentage 0..100.
+_bar() {
+  local pct="$1" cells=5 i filled out=""
+  case "$pct" in ''|*[!0-9]*) pct=0 ;; esac
+  filled=$(( pct * cells / 100 ))
+  [ "$filled" -gt "$cells" ] && filled="$cells"
+  [ "$filled" -lt 0 ] && filled=0
+  i=0
+  while [ "$i" -lt "$cells" ]; do
+    if [ "$i" -lt "$filled" ]; then out="${out}\xe2\x96\x88"; else out="${out}\xe2\x96\x91"; fi
+    i=$(( i + 1 ))
+  done
+  printf '%b' "$out"
+}
+
+sep=" "
+out=""
+
+# --- resolve the pane path: an explicit arg (tests/CLI), else FROM tmux over the
+# --- socket (never via the shell command line - see SECURITY above), else $PWD ----
+path="${1:-}"
+if [ -z "$path" ] && [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
+  # a targeted query when the job carries $TMUX_PANE, else the active pane
+  if [ -n "${TMUX_PANE:-}" ]; then
+    path="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_current_path}' 2>/dev/null || true)"
+  fi
+  [ -n "$path" ] || path="$(tmux display-message -p '#{pane_current_path}' 2>/dev/null || true)"
+fi
+[ -n "$path" ] || path="$PWD"
+
+# --- git branch (a local ref read; degrades silently outside a repo) -----------
+branch=""
+if command -v git >/dev/null 2>&1; then
+  branch="$(git -C "$path" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+  if [ -z "$branch" ]; then
+    sha="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || true)"   # detached HEAD
+    [ -n "$sha" ] && branch="@$sha"
+  fi
+fi
+# The branch comes from `git symbolic-ref`; git's ref-name rules forbid C0 controls,
+# ESC, and DEL, so a branch name cannot introduce a 7-bit terminal control sequence.
+# The residual 8-bit C1 bytes are inert on the UTF-8 terminals this framework targets
+# (a lone C1 byte is invalid UTF-8), so the name is echoed as-is - byte-range
+# stripping is deliberately NOT done, as it would corrupt valid multibyte UTF-8 names.
+[ -n "$branch" ] && out="$(printf '\xe2\x8e\x87') $branch"   # U+2387 branch glyph
+
+# --- 1-minute load average, normalised per core -> percentage + bar ------------
+# sysctl is the macOS load source; macos/arm64 + macos/x86_64 is the whole matrix
+# (Linux was withdrawn 2026-09-13). The failure arms are not dead code: off a mac
+# these keys do not exist, sysctl fails, `load` stays empty and the segment drops
+# - the helper's degrade contract. _bar is therefore unreachable through this
+# block off a mac, which is why tests/tmux_status_test.sh drives it directly.
+load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' 2>/dev/null || true)"  # "{ 0.52 ... }"
+cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+case "$cores" in ''|*[!0-9]*) cores=1 ;; esac
+[ "$cores" -lt 1 ] && cores=1
+if [ -n "$load" ]; then
+  # integer percent = load / cores * 100, clamped 0..100 (awk handles the float
+  # load; a light fork, not a sampling command).
+  pct="$(awk -v l="$load" -v c="$cores" 'BEGIN{ p=int(l/c*100); if(p<0)p=0; if(p>100)p=100; print p }' 2>/dev/null || true)"
+  case "$pct" in ''|*[!0-9]*) pct="" ;; esac
+  if [ -n "$pct" ]; then
+    seg="$(_bar "$pct") ${pct}%"
+    if [ -n "$out" ]; then out="${out}${sep}${seg}"; else out="$seg"; fi
+  fi
+fi
+
+printf '%s' "$out"
