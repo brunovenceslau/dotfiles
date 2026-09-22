@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/git/config - the framework's portable, XDG git config, materialized at
+# ~/.config/git/config. Identical on every host; host identity, the per-host
+# signing key, and any absolute paths live in the untracked config.local (copy
+# from config.local.example). No absolute paths here.
+#
+# The global ignore list is NOT wired with core.excludesfile: git reads
+# $XDG_CONFIG_HOME/git/ignore natively, and the link engine puts our tracked
+# config/git/ignore exactly there. One less absolute path to get wrong.
+
+[init]
+	defaultBranch = main
+
+[gpg]
+	# SSH commit/tag signing. The key itself is per-host, so
+	# user.signingkey (and commit.gpgsign) live in config.local - a fresh clone
+	# with no key configured must still be able to commit.
+	format = ssh
+
+# Reject malformed/malicious git objects at the untrusted-input
+# boundary (the fetch's index-pack). dotfiles-upgrade re-asserts these on its
+# fetch even though it scrubs ambient config, so it never ingests objects under a
+# config that disabled fsck. (receive.fsckObjects is inert for a client fetch -
+# it governs the push-receiving side - but kept as harmless defense-in-depth.)
+[transfer]
+	fsckObjects = true
+[fetch]
+	fsckObjects = true
+	prune = true
+[receive]
+	fsckObjects = true
+
+[push]
+	autoSetupRemote = true
+	default = simple
+
+# Rebase on pull rather than creating a merge bubble on every divergence.
+[pull]
+	rebase = true
+
+# git-lfs. Inert in a repo with no LFS-tracked paths, and the filters degrade to a
+# loud error (never silent corruption) if the binary is missing, so this is safe to
+# carry for every repo rather than run `git lfs install` per host.
+[filter "lfs"]
+	required = true
+	process = git-lfs filter-process
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+
+# Readable diffs via diff-so-fancy (packages/Brewfile). The guard runs plain `less`
+# where the binary is absent, so `git diff` never breaks. config.local (included last)
+# can override core.pager to opt out on any host.
+[core]
+	pager = command -v diff-so-fancy >/dev/null 2>&1 && diff-so-fancy | less --tabs=4 -RF || less --tabs=4 -RF
+[interactive]
+	diffFilter = command -v diff-so-fancy >/dev/null 2>&1 && diff-so-fancy --patch || cat
+
+# Color slots diff-so-fancy / diff-highlight read; inert where the tool is absent.
+[color "diff-highlight"]
+	oldNormal = red bold
+	oldHighlight = red bold 52
+	newNormal = green bold
+	newHighlight = green bold 22
+[color "diff"]
+	meta = 11
+	frag = magenta bold
+	func = 146 bold
+	commit = yellow bold
+	old = red bold
+	new = green bold
+	whitespace = red reverse
+
+[alias]
+	# force-push with a lease: refuses to overwrite remote commits you have not
+	# fetched, so another machine's (or a teammate's) push is never silently clobbered.
+	pushf = push --force-with-lease
+
+# Host identity + signing key (untracked; copy config.local.example alongside this
+# file). A RELATIVE path resolves next to this config, and a missing include is
+# silently ignored - so a fresh clone works before config.local exists.
+[include]
+	path = config.local

@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/git/config.local.example - copy to config.local (same directory) and edit:
+#     cp ~/.config/git/config.local.example ~/.config/git/config.local
+# Untracked, never published, never uninstalled. Holds THIS host's
+# identity, its dedicated SSH signing key, and anything host-specific or secret.
+# The tracked config includes it with a relative path, so it belongs right here.
+
+[user]
+	name = Your Name
+	email = you@example.com
+	# The dedicated per-host SSH signing key's PUBLIC key. Host-
+	# specific and absolute, so it must not be tracked. git signs with the matching
+	# private key via ssh-agent or the file. Adjust the name to your key.
+	signingkey = ~/.ssh/id_ed25519_dotfiles.pub
+
+# Turn signing on once the key above exists. Kept in .local, not the
+# tracked config, so cloning on a machine without a key still lets you commit.
+[commit]
+	gpgsign = true
+[tag]
+	gpgsign = true
+	# Refuse to create an ANNOTATED tag unsigned. Per-host, not tracked: it would
+	# make `git tag -a` fail outright on a clone with no signing key.
+	forceSignAnnotated = true
+
+# To VERIFY SSH-signed commits - e.g. `git log
+# --show-signature` - git needs an allowed-signers file listing the keys you
+# trust, one `<email> <keytype> <key>` line each. It is untracked, like this file:
+[gpg "ssh"]
+	allowedSignersFile = ~/.config/git/allowed_signers
+
+# If this host fetches a PRIVATE repo over HTTPS, git needs a credential helper to
+# authenticate. dotfiles-upgrade scrubs ambient git config and re-injects ONLY the
+# credential.helper it reads from THIS file, so it must live here, not
+# in ~/.gitconfig. The gh CLI provides one. Uncomment if you clone/fetch over HTTPS
+# (a mac that authenticates via its SSH key does NOT need this):
+# [credential "https://github.com"]
+# 	helper =
+# 	helper = !gh auth git-credential
+# [credential "https://gist.github.com"]
+# 	helper =
+# 	helper = !gh auth git-credential
