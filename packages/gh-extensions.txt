@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# packages/gh-extensions.txt - gh CLI extensions installed by `install.sh
+# packages` on every host, AFTER gh itself.
+#
+# One `owner/repo <pin>` per line, where <pin> is a REVIEWED `vX.Y.Z` release tag
+# (the canonical form - `gh extension install --pin` resolves a BINARY/Go extension
+# against its releases, so a bare commit SHA does NOT resolve to a downloadable
+# asset and the install fails; measured). A 40-hex commit SHA is also accepted by
+# the validator for a future source-checkout (interpreted) extension where it does
+# resolve. `#` comments (whole-line or trailing) and blank lines are ignored; an
+# untracked packages/gh-extensions.local.txt is honored too. Every
+# line is validated before it reaches `gh extension install --pin <pin> --
+# <owner/repo>`: the `owner/repo` cannot begin with a dash, dot, or slash and the
+# pin must be a tag or SHA, so a `.local` line can neither inject a flag/path/URL
+# nor install an UNPINNED (floating) extension.
+#
+# Provenance note (honest): pinning to a reviewed release tag stops a floating
+# `latest` - a re-provisioned host installs the reviewed revision, not
+# whatever HEAD is that day. It is NOT the content-addressed immutability of a
+# SHA-pinned git submodule: gh downloads a mutable release ASSET, so a maintainer
+# who re-uploads the tag's asset could change the executed bytes. Accepted residual
+# for a dev-tooling CLI from GitHub's own org, guarded on `command -v gh` and
+# best-effort. Installation is idempotent by extension NAME (an already-installed
+# gh-stack is skipped - a pin BUMP is applied on a fresh install; existing installs
+# re-pin only on re-provision or an explicit upgrade, tracked as a follow-up).
+#
+# gh-stack: GitHub's native stacked-PR CLI (github org). It is the workflow every
+# host uses to open large PR stacks and land them bottom-up with
+# minimal blocking (see docs/stacked-prs.md). Pin bump = review + edit here.
+github/gh-stack v0.1.0  # 2026-07-29; commit a1b4a3d4d0bcde9ec3a78ab99b2d63af121857a9

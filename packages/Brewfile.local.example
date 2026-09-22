@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# packages/Brewfile.local.example - copy to Brewfile.local (same directory) and edit:
+#     cp packages/Brewfile.local.example packages/Brewfile.local
+# Untracked and never committed. It is bundled AFTER the tracked
+# packages/Brewfile (`brew bundle`), for THIS host's extra picks.
+#
+# The split is deliberate: the tracked Brewfile carries the tools the framework's
+# own tracked config depends on (each noted with its `# config/<prog>`), plus the
+# CLI floor every host should always have. GUI casks, Mac App Store apps, language
+# toolchains and one-off experiments belong HERE - they are personal, they churn,
+# and a cask that fails to install should never break another machine's provisioning.
+
+# brew "go"
+# brew "awscli"
+# cask "visual-studio-code"
+# cask "1password-cli"
+# mas "Amphetamine", id: 937984704
+
+# Arch-specific formulae use on_arm / on_intel blocks:
+# on_arm do
+#   brew "an-apple-silicon-only-tool"
+# end
