@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Dependabot - automated update proposals for ONE ecosystem.
+#
+# `github-actions` only, deliberately. The workflow pins every action to a
+# commit SHA, which is what makes a bump reviewable; without Dependabot those
+# pins would silently rot and a pinned-but-vulnerable action is worse than an
+# unpinned one, because nothing ever revisits it.
+#
+# The `gitsubmodule` ecosystem is NOT enabled, and must not be added here. The
+# three zsh plugins under zsh/plugins/ are pinned submodules, and that pinning
+# is a security-model surface: CLAUDE.md puts any change to it behind an
+# ask-first gate, and `bin/check-patterns` encodes premises about the shapes
+# the startup shims assume inside each plugin, which a bump can invalidate
+# without failing any test. docs/development.md, "Bump a plugin pin", is the
+# procedure: read the upstream diff for source-time curl/wget/git-fetch/dev-tcp
+# use, then update the pin, the architecture table and the gates together, by
+# hand. An automated pin bump would be a supply-chain change nobody reviewed.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    open-pull-requests-limit: 5
