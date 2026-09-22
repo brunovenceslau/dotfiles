@@ -1,0 +1,417 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# zsh/zshrc - interactive shell configuration. Linked to $ZDOTDIR/.zshrc.
+#
+# The interactive startup path is sacred - no synchronous
+#   subprocess and no network here or in anything this sources. Everything below
+#   is a zsh builtin or a glob; the one mkdir uses the zsh/files builtin so even
+#   the rare state-dir repair never forks.
+# Optional external tools are integrated only behind
+#   (( $+commands[<tool>] )) so a missing one costs nothing (most such guards
+#   live in aliases.zsh and functions.zsh).
+
+# Fork-free mkdir for the case the user wipes XDG cache/state between launches;
+# install.sh pre-creates these dirs, so on a normal launch mkdir never runs.
+zmodload -F zsh/files b:mkdir 2>/dev/null
+[[ -d $XDG_STATE_HOME/zsh ]] || mkdir -p "$XDG_STATE_HOME/zsh"
+[[ -d $XDG_CACHE_HOME/zsh ]] || mkdir -p "$XDG_CACHE_HOME/zsh"
+
+# --- Terminfo fallback -----------------------------------------
+# Reaching a box over SSH from a terminal whose terminfo it lacks (e.g.
+# xterm-ghostty from a Ghostty client, before ssh-terminfo has seeded it) leaves
+# $TERM pointing at an entry with no local definition: the zsh line editor
+# redraws with the wrong capabilities and echoes typed input DOUBLED, and tmux
+# refuses to start ("missing or unsuitable terminal"). Detect an unresolvable
+# $TERM in-process via the zsh/terminfo module - its $terminfo array is empty
+# when the entry is missing - and fall back to a near-universal 256-colour entry.
+# Zmodload is a builtin, so the startup path takes no subprocess.
+# Ghostty's ssh-terminfo still installs the exact xterm-ghostty when it can; this
+# is the destination-side floor for every case that never reaches.
+if zmodload zsh/terminfo 2>/dev/null && (( ! ${#terminfo} )); then
+  export TERM=xterm-256color
+fi
+
+# --- PATH ---------------------------------------------------------------------
+# Resolve the Homebrew prefix by directory existence - /opt/homebrew
+#   on Apple Silicon, /usr/local on Intel - never hardcoded and never via a
+#   `brew shellenv` fork on the startup path. The `-x bin/brew` test is a
+#   builtin. The
+#   anonymous function keeps $prefix out of the shell namespace.
+() {
+  local prefix
+  for prefix in /opt/homebrew /usr/local; do
+    if [[ -x $prefix/bin/brew ]]; then
+      path=("$prefix/bin" "$prefix/sbin" $path)
+      break
+    fi
+  done
+}
+# User binaries first (the link engine puts the bin/* links here); -U drops
+# duplicates and keeps the leftmost occurrence, so this stays stable across
+# re-sourced rc files.
+path=("$HOME/.local/bin" $path)
+typeset -gU path
+
+# --- History ---------------------------------------------------
+HISTFILE="$XDG_STATE_HOME/zsh/history"
+# 1M, deliberately: history is the cheapest form of documentation this setup has,
+# and the file is plain text a few tens of MB at worst. install.sh carries a
+# pre-XDG ~/.zsh_history over on a fresh install (never overwriting).
+HISTSIZE=1000000
+SAVEHIST=1000000
+setopt EXTENDED_HISTORY          # record a timestamp per entry
+setopt INC_APPEND_HISTORY        # append as commands run, not only on exit
+setopt SHARE_HISTORY             # share live history across concurrent shells
+setopt HIST_IGNORE_ALL_DUPS      # keep only the most recent copy of a duplicate
+setopt HIST_IGNORE_SPACE         # a leading space keeps a command out of history
+setopt HIST_REDUCE_BLANKS        # normalize whitespace before saving
+setopt HIST_VERIFY               # put history expansion on the line, don't run it
+
+# --- Interactive options ------------------------------------------------------
+setopt AUTO_CD                   # `foo` == `cd foo` when foo is a directory
+# The directory STACK, from prezto's `directory` module. Every `cd` pushes, which
+# is what makes the `d` / `1`..`9` aliases in aliases.zsh able to walk back to a
+# dir visited several jumps ago. AUTO_PUSHD and those ten aliases MUST stay
+# together: with an empty stack `d` prints one line (index 0, the cwd) and
+# `1`..`9` fail with "no such entry in dir stack".
+# NOT taken from that module: `unsetopt CLOBBER` (a safety opinion about `>`,
+# unrelated to navigation) and MULTIOS (already a zsh default).
+setopt AUTO_PUSHD                # `cd` pushes the old dir onto the stack
+setopt PUSHD_IGNORE_DUPS         # a revisited dir moves in the stack, never duplicates
+setopt PUSHD_SILENT              # pushd/popd stay quiet - `d` is how you look
+setopt PUSHD_TO_HOME             # bare `pushd` goes home, like bare `cd`
+setopt CDABLE_VARS               # `cd DOTFILES` when a variable holds the path
+setopt EXTENDED_GLOB             # #, ~, ^ glob operators
+setopt INTERACTIVE_COMMENTS      # allow `#` comments at the interactive prompt
+setopt NO_BEEP
+setopt NO_FLOW_CONTROL           # reclaim ^S / ^Q
+setopt RM_STAR_WAIT              # pause 10s before running `rm *` - the one that saves you
+setopt NOTIFY                    # report a finished background job at once, not at the next prompt
+
+# --- Terminal window / tab titles ---------------------------------------------
+# prezto's `terminal` module used to do this; nothing replaced it, and outside
+# Ghostty (whose own shell integration sets a title) a tmux pane or another
+# terminal shows a static title. Pure zsh, no fork: `print -Pn` expands the same
+# %-escapes the prompt does, straight to the terminal.
+#   window: user@host: <cwd>        tab: <cwd>  (or the running command)
+# Guarded on a terminal that understands the xterm OSC sequences.
+case "$TERM" in
+  xterm* | rxvt* | screen* | tmux* | alacritty | ghostty | *256color)
+    _dotfiles_set_title() { print -Pn "\e]2;%n@%m: %~\a\e]1;%1~\a" }
+    _dotfiles_title_precmd() { _dotfiles_set_title }
+    # preexec gets the command line in $1; show the running command in the tab so a
+    # long build is identifiable from the tab bar alone.
+    _dotfiles_title_preexec() { print -Pn "\e]2;%n@%m: %~\a\e]1;"; print -rn -- "${1%% *}"; print -n "\a" }
+    autoload -Uz add-zsh-hook
+    add-zsh-hook precmd  _dotfiles_title_precmd
+    add-zsh-hook preexec _dotfiles_title_preexec
+    ;;
+esac
+
+# --- Plugins: fpath half ----------------------------------------
+# zsh plugins are SHA-pinned git submodules under zsh/plugins (see .gitmodules),
+# loaded by a static loader - no plugin manager, no runtime download. The loader
+# is split in two: the fpath-only plugins go in place HERE, before compinit, so
+# the cached dump indexes them - zsh-completions' extra completions. The source
+# half runs after completion setup, below.
+fpath=(
+  "$DOTFILES/zsh/plugins/zsh-completions/src"
+  $fpath
+)
+
+# --- Completion ------------------------------------------------
+# compinit against a cached, byte-compiled compdump. A full rebuild + insecure-
+# directory audit runs at most once per 24h; between audits, `compinit -C` reuses
+# the dump and skips the audit. The 24h clock is a dedicated stamp we reset with
+# a builtin redirection - NOT the dump's own mtime: compinit does not rewrite an
+# unchanged dump, so keying the gate on the dump's mtime would peg every shell to
+# the slow audited path from 24h after install onward. All builtins - no fork.
+# The stamp is generated cache and lives under XDG.
+autoload -Uz compinit
+_zcompdump="$XDG_CACHE_HOME/zsh/zcompdump"
+_zcompstamp="$_zcompdump.stamp"
+_zfresh=($_zcompstamp(N.mh-24))            # nullglob, regular file, mtime < 24h
+# The compdump helper (compdump:138, autoloaded by compinit's rebuild path)
+# renames the freshly written dump with an EXTERNAL PLAIN `mv -f`, a fork the
+# startup-fork-gate caught on every cold/24h audit run (surfaced
+# by). Enable the zsh/files `mv` builtin for JUST this block: a
+# plain `mv` resolves function > builtin > external, so the builtin shadows the
+# external for that call (no mv function/alias can exist yet - functions.zsh/
+# aliases.zsh load later). NOTE the measured zsh semantics: `command mv` would
+# force EXTERNAL resolution, BYPASSING the builtin - if compdump ever adds that
+# prefix this fix stops working and the forkgate goes red, which is the
+# detection. Disable right after: the module's mv cannot cross filesystems -
+# fine for a same-dir dump swap, wrong as a user-facing shadow.
+zmodload -F zsh/files b:mv 2>/dev/null
+if (( $#_zfresh )); then
+  compinit -C -d "$_zcompdump"
+else
+  compinit -d "$_zcompdump"
+  : > "$_zcompstamp"                       # reset the 24h clock (builtin, no fork)
+fi
+zmodload -F zsh/files -b:mv 2>/dev/null    # interactive mv is the real binary again
+# Byte-compile the dump when it changed (or the .zwc is absent), so later shells
+# mmap the compiled form. zcompile is a builtin - no fork.
+if [[ ! -s $_zcompdump.zwc || $_zcompdump -nt $_zcompdump.zwc ]]; then
+  zcompile -R -- "$_zcompdump.zwc" "$_zcompdump" 2>/dev/null
+fi
+unset _zcompdump _zcompstamp _zfresh       # keep the interactive namespace clean
+
+# --- Completion styling -------------------------------------------------------
+# The compsys surface prezto's `completion` module carried, which this framework
+# had thinned to four lines. Every line here is a zstyle or a setopt - no fork.
+#
+# Options first, because no zstyle can turn these on. AUTO_MENU, AUTO_LIST and
+# AUTO_PARAM_SLASH are already zsh defaults and are deliberately NOT re-set (this
+# block relies on them; setting a default reads as a decision that was never
+# made). The three below are OFF by default, which is why they are here.
+setopt COMPLETE_IN_WORD          # complete from both ends of a word, not just its tail
+setopt ALWAYS_TO_END             # a completion leaves the cursor at the end of the word
+setopt PATH_DIRS                 # path-search command names that contain a slash
+
+# SPDX-SnippetBegin
+# SPDX-SnippetCopyrightText: 2009-2011 Robby Russell and contributors
+# SPDX-SnippetCopyrightText: 2011-2017 Sorin Ionescu and contributors
+# SPDX-License-Identifier: MIT
+# Snippet source: sorin-ionescu/prezto, modules/completion/init.zsh, at commit
+# cff2d01871425b1b80710f8ec6a475c5a53145b4. 13 of the 23 code lines between
+# here and SPDX-SnippetEnd are prezto's verbatim; the rest (matcher-list,
+# max-errors, the -e list-colors form, the messages/warnings formats and the
+# options description) is this repo's, and the comments are all this repo's.
+zstyle ':completion:*' menu select
+# The 5-level form as well as the bare one: prezto used ':completion:*:*:*:*:*',
+# which reaches contexts (function/command/argument/tag chains) that a single-
+# level ':completion:*' pattern does not match. Both, so neither class is missed.
+zstyle ':completion:*:*:*:*:*' menu select
+
+# Four matchers, tried in order, and the reason `cd ~/s/g/b<Tab>` works:
+#   1-2 case-insensitive both ways
+#   3   partial word - `c.z` completes `config.zsh` on any of . _ -
+#   4   substring - match anywhere in the word, not just at its start
+# The framework previously had only the first, which is why an abbreviated path
+# stopped completing after the migration off prezto.
+zstyle ':completion:*' matcher-list \
+  'm:{[:lower:]}={[:upper:]}' 'm:{[:upper:]}={[:lower:]}' \
+  'r:|[._-]=* r:|=*' 'l:|=* r:|=*'
+
+# Typo tolerance, on <Tab> ONLY: _approximate runs last, so it costs nothing
+# while the word still matches exactly, and it only ever OFFERS a correction -
+# nothing is rewritten or executed. The tolerance grows with the word (one error
+# per three characters) and is capped at 7 so a long word cannot hang the shell.
+# Deliberately NOT paired with `setopt CORRECT` (prezto's `utility` module): that
+# one intercepts ENTER, and needs the ~15 `nocorrect` aliases to stay usable.
+zstyle ':completion:*' completer _complete _match _approximate
+zstyle ':completion:*:match:*' original only
+zstyle -e ':completion:*:approximate:*' max-errors \
+  'reply=($((($#PREFIX+$#SUFFIX)/3>7?7:($#PREFIX+$#SUFFIX)/3))numeric)'
+
+# The Tab list wears the same colours as `ls`. This MUST be the `-e` (evaluated
+# on lookup) form, not a plain value: $LS_COLORS is exported by aliases.zsh,
+# which zshrc sources BELOW this block, so a `${(s.:.)LS_COLORS}` expanded here
+# would capture an empty value and silently leave the list monochrome.
+zstyle -e ':completion:*:default' list-colors 'reply=(${(s.:.)LS_COLORS})'
+zstyle ':completion:*:default' list-prompt '%S%M matches%s'
+
+# Grouped and labelled matches: without group-name the list is one flat block,
+# which is most of why a large directory listing became hard to read.
+zstyle ':completion:*' group-name ''
+zstyle ':completion:*' verbose yes
+zstyle ':completion:*' format ' %F{yellow}-- %d --%f'
+zstyle ':completion:*:descriptions' format ' %F{yellow}-- %d --%f'
+zstyle ':completion:*:corrections' format ' %F{green}-- %d (errors: %e) --%f'
+zstyle ':completion:*:messages'    format ' %F{purple} -- %d --%f'
+zstyle ':completion:*:warnings'    format ' %F{red}-- no matches found --%f'
+zstyle ':completion:*:options' description yes
+zstyle ':completion:*:options' auto-description '%d'
+
+# Paths and `cd`: collapse typed `//`, and offer the directory STACK (the
+# AUTO_PUSHD history above) as a `cd` source alongside real subdirectories.
+zstyle ':completion:*' squeeze-slashes true
+zstyle ':completion:*:*:cd:*' tag-order local-directories directory-stack path-directories
+zstyle ':completion:*:*:cd:*:directory-stack' menu yes select
+# SPDX-SnippetEnd
+# Not from prezto: the Tab-list counterpart of `ls --group-directories-first`,
+# so a listing reads the same way in both places.
+zstyle ':completion:*' list-dirs-first true
+
+zstyle ':completion:*' use-cache on
+zstyle ':completion:*' cache-path "$XDG_CACHE_HOME/zsh/zcompcache"
+
+# --- Functions and aliases ----------------------------------------------------
+# lib/os.sh first: nothing tracked branches on it any more, but the arch helpers
+# stay available to functions, later modules and a host's own .local files. It reads the $OSTYPE /
+# $MACHTYPE builtins, so sourcing it forks nothing on the startup path.
+# functions.zsh loads before aliases.zsh so a host
+# extending aliases.zsh.local can already call the helpers (an alias wrapping a
+# helper is the common case; the reverse is not). Each file sources its own
+# untracked `.local` pair; cross-cutting setup that needs everything belongs in
+# .zshrc.local, sourced last.
+source "$DOTFILES/lib/os.sh"
+source "$DOTFILES/zsh/functions.zsh"
+source "$DOTFILES/zsh/aliases.zsh"
+source "$DOTFILES/zsh/restic.zsh"
+
+# --- Prompt: starship, from a PRE-COMPILED init ------------------
+# `starship init zsh` is a SUBPROCESS, and the startup path takes none (the
+# forkgate proves it). So install.sh runs it ONCE and caches the output; here we
+# only source the cache, which is a plain file read. install.sh regenerates the
+# cache on every install and upgrade, so a starship version bump is picked up
+# without a manual step.
+#
+# Guarded on the file, not on the binary: when the cache is absent (starship not
+# installed, or install.sh never ran) the shell silently keeps zsh's default
+# prompt rather than forking to build one. STARSHIP_CONFIG is exported in
+# zsh/zshenv so `starship` and this cache agree on which config they mean.
+if [[ -r $XDG_CACHE_HOME/zsh/starship-init.zsh ]]; then
+  source "$XDG_CACHE_HOME/zsh/starship-init.zsh"
+fi
+
+# --- zoxide (`z`), from the same PRE-COMPILED init ------------------------------
+# install.sh's _cache_shell_inits has always generated this file next to
+# starship's, but nothing ever sourced it - so `z` did not exist in this shell at
+# all, while docs and Brewfile both advertised it. Same contract as starship
+# above: `zoxide init zsh` is a SUBPROCESS the startup path must not take, so the
+# cache is a plain file read, and the guard is on the FILE, not the binary (no
+# cache = no `z`, silently, instead of a fork to build one).
+# MUST stay after compinit: the init registers zoxide's own completion through
+# `compdef`, which does not exist until the completion system is loaded.
+if [[ -r $XDG_CACHE_HOME/zsh/zoxide-init.zsh ]]; then
+  source "$XDG_CACHE_HOME/zsh/zoxide-init.zsh"
+fi
+
+# --- canga completion, from a PRE-GENERATED script -----------------------------
+# `canga completion zsh` is a SUBPROCESS, so install.sh's _cache_shell_inits
+# writes it once and this only sources the file - same contract as the two blocks
+# above, guarded on the FILE (no cache = no completion, never a fork to build one).
+# The script is cobra's dynamic completion: the fork to `canga __complete`
+# happens on TAB, not at startup.
+# MUST stay after compinit: the script's first command is `compdef _canga canga`.
+if [[ -r $XDG_CACHE_HOME/zsh/canga-completion.zsh ]]; then
+  source "$XDG_CACHE_HOME/zsh/canga-completion.zsh"
+fi
+
+# --- Plugins: source half ---------------------------------------
+# fast-syntax-highlighting, at load time,
+# fetches share/free_theme.zsh from a MOVING `master` ref and later sources it - a
+# runtime third-party download on the sacred startup path that would defeat the
+# SHA pin. This neutralization is the concrete startup-path enforcement of the
+# general no-runtime-download rule (the static CI gate is
+# `make check-patterns`). Pin FAST_WORK_DIR under $XDG_CACHE_HOME/zsh (NOT a sibling of it) so
+# `dotfiles-uninstall --purge` sweeps it away with the rest of the zsh cache
+# - it is framework-generated and must leave no trace. Pre-seed the
+# guard file so that fetch branch is never taken; an empty secondary_theme.zsh
+# sources as a no-op (f-sy-h only falls back to it when no theme is set). mkdir is
+# the zsh/files builtin loaded at the top of this file - no fork.
+export FAST_WORK_DIR="$XDG_CACHE_HOME/zsh/fast-syntax-highlighting"
+[[ -d $FAST_WORK_DIR ]] || mkdir -p "$FAST_WORK_DIR"
+[[ -e $FAST_WORK_DIR/secondary_theme.zsh ]] || : > "$FAST_WORK_DIR/secondary_theme.zsh"
+
+# Source autosuggestions then f-sy-h (LAST, so it wraps every ZLE widget defined
+# above it). Each is byte-compiled in place when stale (zcompile is a builtin -
+# no fork); `source x.zsh` then loads the co-located x.zsh.zwc transparently while
+# $0 still resolves to the real path f-sy-h needs for its chroma files. The .zwc
+# is a derived artifact - the pinned .zsh is authoritative; the submodules carry
+# `ignore = untracked` in .gitmodules so it never dirties git status.
+# f-sy-h's source path runs `$(uname -a)`
+# top-level (plugin.zsh:379) to probe for Darwin - gratuitous (the same pin
+# checks $OSTYPE fork-free elsewhere) but inline, so unlike its download branch
+# there is nothing to pre-seed. Shim `uname` as a function answering from
+# $OSTYPE for the duration of the loader: the EXTERNAL invocation disappears
+# (what the startup-fork-gate measures and what dominates the cost), the probe
+# stays result-identical ($OSTYPE is darwin* exactly on macOS, matching the
+# plugin's (#i)*darwin* pattern), and the $(...) subshell that remains is the
+# accepted fork-without-exec residual (invisible to the startup-fork-gate BY
+# CONSTRUCTION, see bin/startup-fork-gate). zsh-autosuggestions (same block) invokes nothing at
+# source time, so the shim's scope is safe; unfunction restores the real uname
+# before anything interactive runs.
+uname() { print -r -- "$OSTYPE" }
+# The pre-seed above normally keeps f-sy-h's fetch branch
+# (plugin.zsh:365) from firing, but an UNWRITABLE $XDG_CACHE_HOME defeats it - the
+# seed write fails, f-sy-h RELOCATES its work dir (plugin.zsh:59) to an unseeded
+# path, and then issues a `curl`/`wget` download of a moving-`master` theme on the
+# sacred startup path (measured live: a real network fetch). Neutralize it
+# unconditionally: shim curl/wget as no-op functions for the loader's duration, so
+# the fetch branch - if ever entered - makes no network call (f-sy-h then `touch`es
+# an empty seed that sources as a no-op). Fork-free (shell functions), same scope as
+# the uname shim; unfunction restores the real binaries before anything interactive runs.
+curl() { return 1 }
+wget() { return 1 }
+() {
+  local f
+  for f in \
+    "$DOTFILES/zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh" \
+    "$DOTFILES/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"; do
+    [[ -r $f ]] || continue
+    [[ -s $f.zwc && $f.zwc -nt $f ]] || zcompile -R -- "$f.zwc" "$f" 2>/dev/null
+    source "$f"
+  done
+}
+unfunction uname curl wget
+
+# Path highlighting, back to the prezto semantics. That setup ran zsh-syntax-
+# highlighting, whose default is ZSH_HIGHLIGHT_STYLES[path]=underline: an
+# underline meant "this path exists", with no colour of its own. f-sy-h instead
+# defaults to fg=magenta for every path and underlines ONLY directories
+# (fast-highlight:70-71), which is why the old "it exists" cue disappeared.
+# Set AFTER the loader: f-sy-h assigns its defaults with `: ${...:=}`, so a value
+# placed here wins without this block having to precede the source.
+# The keys are UNPREFIXED on purpose - f-sy-h looks styles up as
+# ${FAST_HIGHLIGHT_STYLES[${FAST_THEME_NAME}path]} and $FAST_THEME_NAME is empty
+# while no theme is loaded; a `fast-theme <name>` call would prefix the lookups
+# and strand these two lines silently.
+# Guarded on the array: with the submodule uninitialized the loader above skips
+# f-sy-h entirely, and `X[path]=` on an undeclared parameter is a NUMERIC
+# subscript - zsh then evaluates `path` as math against the $path array and
+# errors out on the startup path.
+if (( $+FAST_HIGHLIGHT_STYLES )); then
+  FAST_HIGHLIGHT_STYLES[path]=underline
+  FAST_HIGHLIGHT_STYLES[path-to-dir]=underline
+fi
+
+# --- fzf integration -------------------------------------------
+# After the plugins/f-sy-h above so its ZLE widgets bind cleanly; guarded on the
+# fzf binary, so it is zero-cost when fzf is absent (no fork on that path).
+source "$DOTFILES/zsh/fzf.zsh"
+
+# --- Ghostty shell integration --------------------------------
+# Ghostty's automatic injection works by driving $ZDOTDIR, which this framework
+# already owns (zshenv), so auto-injection can't chain into our config. We source
+# the integration MANUALLY instead (the tracked config sets `shell-integration =
+# none` to stop the auto attempt). $GHOSTTY_RESOURCES_DIR is exported ONLY by
+# Ghostty, so this is a pure no-op under any other terminal - the
+# bench never enters it.
+#
+# Catch: `shell-integration = none` also makes Ghostty fill the feature list
+# ($GHOSTTY_SHELL_FEATURES) from its built-in DEFAULTS (cursor/path/title) and
+# ignore our tracked `shell-integration-features` line - so the ssh- flags never
+# reach the script, which arms the `ssh` wrapper only when that list holds
+# `ssh-`. Append them here so ssh-env/ssh-terminfo actually arm: the wrapper's
+# `ghostty +ssh` then installs the xterm-ghostty terminfo on the remote (no more
+# "missing or unsuitable terminal"). cursor/title/path stay as Ghostty set them.
+# `builtin source` avoids a user function shadowing `source`; -r guards the path.
+if [[ -n ${GHOSTTY_RESOURCES_DIR:-} \
+      && -r $GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration ]]; then
+  export GHOSTTY_SHELL_FEATURES="${GHOSTTY_SHELL_FEATURES:+$GHOSTTY_SHELL_FEATURES,}ssh-env,ssh-terminfo"
+  builtin source "$GHOSTTY_RESOURCES_DIR/shell-integration/zsh/ghostty-integration"
+fi
+
+# --- Machine-local layer --------------------------------------
+# The global rc hook, sourced last so it can override anything above (aliases,
+# functions, options). Sourced when present, silent when absent; untracked and
+# never published. An `if` (not a bare `[[ ... ]] &&`) so the rc's final status
+# is 0 when the file is absent - the default - instead of the `[[` test's 1,
+# which would otherwise leave `zsh -i -c exit` non-zero and trip the smoke check.
+if [[ -r $ZDOTDIR/.zshrc.local ]]; then
+  source "$ZDOTDIR/.zshrc.local"
+fi
+
+# --- Update-check sentinel -------------------------------------
+# Sourced LAST - after .zshrc.local so a host can tune (DOTFILES_UPDATE_CADENCE_
+# DAYS / _STALENESS_DAYS) or disable (DOTFILES_UPDATE_DISABLE=1) it first. Past
+# its cadence it spawns a fully-detached background `git fetch` - the ONE async
+# spawn sanctions on this path - and surfaces a next-prompt notice;
+# the cadence check itself is a glob (no fork, no network) so a fresh sentinel
+# adds nothing to startup (relies on that for a clean bench).
+source "$DOTFILES/zsh/update-check.zsh"

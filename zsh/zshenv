@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# zsh/zshenv - sourced for every zsh (login, interactive, scripts).
+# Linked to ~/.zshenv, the ONLY framework-managed file in $HOME.
+# Keep it tiny and fork-free: it runs even for non-interactive scripts.
+#
+# Export the XDG base dirs, ZDOTDIR, skip_global_compinit=1, and a
+#   self-resolving $DOTFILES so the rest of the config can live under $ZDOTDIR
+#   (XDG) instead of cluttering $HOME.
+
+# XDG base directories - honor a pre-set value, otherwise the spec default.
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+# The framework's zsh config lives under $ZDOTDIR (so ~/.zshrc et al. never
+# touch $HOME); install.sh links zshrc to $ZDOTDIR/.zshrc.
+export ZDOTDIR="$XDG_CONFIG_HOME/zsh"
+
+# Suppress a distro's /etc/zsh/zshrc global compinit - we run our own
+# cached, byte-compiled compinit in zshrc, and a duplicate on the
+# startup path is pure waste.
+skip_global_compinit=1
+
+# --- Interactive-program defaults --------------------------------------------
+# All plain exports: no fork, and they must hold for non-interactive shells too
+# (a git hook's $EDITOR, a script's $PAGER), which is why they live here and not
+# in zshrc. Each honors a pre-set value so a calling environment still wins.
+#
+# nvim is the editor (config/nvim), with vim as the fallback so a host without it
+# is not left with `ed`. `$+commands` is a zsh builtin view, NOT a subprocess.
+if [[ -z ${EDITOR:-} ]]; then
+  if (( $+commands[nvim] )); then export EDITOR=nvim; else export EDITOR=vim; fi
+fi
+export VISUAL="${VISUAL:-$EDITOR}"
+export PAGER="${PAGER:-less}"
+export LANG="${LANG:-en_US.UTF-8}"
+
+# less: -g highlight only the current match, -i smart case, -M long prompt,
+# -R pass colour through, -w highlight the first new line after a jump.
+# Deliberately WITHOUT the old setup's -X and -S: -X left the pager output in the
+# scrollback but broke mouse scrolling, and -S truncated long lines instead of
+# wrapping them, which silently hides the end of a diff line.
+export LESS="${LESS:--g -i -M -R -w}"
+
+# Homebrew: no usage analytics.
+export HOMEBREW_NO_ANALYTICS=1
+
+# Go, when it is installed. Pure `-d` tests, no fork.
+if [[ -d /usr/local/go/bin ]]; then path=(/usr/local/go/bin $path); fi
+if [[ -d $HOME/go ]]; then
+  export GOPATH="$HOME/go"
+  [[ -d $GOPATH/bin ]] && path=("$GOPATH/bin" $path)
+fi
+
+# starship reads ~/.config/starship.toml by default - a loose FILE, which the
+# link engine's config/<prog>/ -> ~/.config/<prog> convention cannot produce. So
+# the config is a normal linked DIR (~/.config/starship) and this points starship
+# at the file inside it. A plain export: no fork, and it is needed by
+# non-interactive `starship` invocations too, which is why it lives here rather
+# than in zshrc.
+export STARSHIP_CONFIG="$XDG_CONFIG_HOME/starship/starship.toml"
+
+# Self-resolving repo root. %N is the path of the file being sourced; :A
+# canonicalizes it (following the ~/.zshenv symlink into the repo), and :h:h
+# strips the trailing zsh/zshenv. No fork - pure zsh modifiers.
+export DOTFILES="${${(%):-%N}:A:h:h}"
+
+# BROWSER is macOS-only (`open` is not a portable command name).
+[[ -z ${BROWSER:-} && $OSTYPE == darwin* ]] && export BROWSER=open
+
+# lesspipe, when installed, teaches less to page archives and PDFs. `$commands`
+# is a zsh builtin view - reading it costs nothing and never forks.
+if [[ -z ${LESSOPEN:-} ]] && (( ${+commands[lesspipe.sh]} )); then
+  export LESSOPEN="| ${commands[lesspipe.sh]} %s 2>&-"
+elif [[ -z ${LESSOPEN:-} ]] && (( ${+commands[lesspipe]} )); then
+  export LESSOPEN="| ${commands[lesspipe]} %s 2>&-"
+fi
