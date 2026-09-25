@@ -1,0 +1,75 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# packages/Brewfile - host (macOS) package manifest.
+#
+# `brew bundle --file` installs these; a machine-local packages/Brewfile.local
+# (untracked) is bundled AFTER, for per-host extras. Arch-specific
+# formulae would use on_arm/on_intel
+# blocks; none are needed yet. This is the baseline toolset every
+# host installs: some formulae are wired to tracked config under config/ (noted
+# inline); the rest are standard CLI tools a host should always have. Strictly
+# one-off, per-host picks belong in Brewfile.local, not here. zsh is intentionally
+# omitted - macOS ships a recent zsh as the login shell, and relying on it avoids
+# a second copy shadowing the system one on $PATH.
+
+# Prompt & shell integrations. Both ship their zsh wiring as a `<tool> init zsh`
+# command to eval, which is a SUBPROCESS - so install.sh runs it once and caches
+# the output, and zshrc only sources the cache. Missing binary = no cache = the
+# shell degrades silently (zsh's default prompt, no `z`).
+brew "starship"        # config/starship
+brew "zoxide"          # the `z` directory jumper, fork-free via the cached init
+
+# Editor
+brew "neovim"          # config/nvim
+
+# Secrets & signing
+brew "gnupg"           # config/gnupg
+brew "pinentry-mac"    # the pinentry gpg-agent.conf points at
+
+# Version control
+brew "git"
+brew "gh"              # GitHub CLI - PRs, auth, releases
+brew "git-lfs"
+brew "git-filter-repo"
+brew "diff-so-fancy"   # human-readable diff pager
+
+# Shell & terminal tools
+brew "fzf"             # fuzzy finder - zsh/fzf.zsh
+brew "fd"              # fzf's fast file source
+# GNU coreutils, for its `gls` ONLY: BSD ls has no --group-directories-first
+# and no per-extension colour, which zsh/aliases.zsh wants for $LS_COLORS.
+# Its gnubin dir is deliberately NOT put on $PATH (the old prezto setup did,
+# shadowing ~100 BSD tools to get one better ls); the `g`-prefixed names are
+# enough, and aliases.zsh guards on `gls` so a host without this degrades.
+brew "coreutils"
+brew "tmux"            # config/tmux
+brew "lazygit"         # config/lazygit
+brew "shellcheck"      # shell linter - used by `make lint` / CI
+brew "python3"         # general-purpose tool; no repo gate depends on it
+brew "jq"              # general-purpose JSON tool; no repo gate depends on it
+brew "trash"           # rm to the macOS Trash instead of unlinking
+
+# Containers & Kubernetes
+brew "docker"
+brew "lazydocker"
+brew "kubectl"
+
+# Sync & backup
+brew "rclone"          # config/rclone
+brew "restic"          # config/restic
+brew "rsync"
+
+# System monitoring
+brew "glances"
+brew "nload"
+brew "htop"
+
+# Certificates
+brew "mkcert"          # local-dev TLS certificates
+
+# Terminals - macOS GUI casks
+cask "ghostty"         # config/ghostty
+# cask "alacritty"     # config/alacritty (ipê themes wired) - config still
+                       # links, but the app is not installed; uncomment to install it.
