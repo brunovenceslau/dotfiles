@@ -5,7 +5,8 @@
 # Dependabot - automated update proposals for ONE ecosystem.
 #
 # `github-actions` only, deliberately. The workflow pins every action to a
-# commit SHA, which is what makes a bump reviewable; without Dependabot those
+# full-length commit SHA (the repository's Actions settings enforce it, so a
+# tag reference fails to run), which is what makes a bump reviewable; without Dependabot those
 # pins would silently rot and a pinned-but-vulnerable action is worse than an
 # unpinned one, because nothing ever revisits it.
 #

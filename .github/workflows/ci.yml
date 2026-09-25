@@ -79,7 +79,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           missing=''
-          for tool in make shellcheck zsh tmux fzf jq reuse gitleaks; do
+          for tool in make shellcheck zsh tmux fzf jq xz reuse gitleaks; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
@@ -92,11 +92,26 @@ jobs:
             || { echo "python3 missing from the runner image" >&2; exit 1; }
           # openssh (ssh-keygen) is part of the macOS base. PyYAML is a Python module,
           # not a brew formula: install it into the image's python3 if not already
-          # importable. PINNED (PyPI versions are immutable, so an upgrade cannot be
-          # trojaned under us; matches the repo's pin-everything ethos). A full
-          # per-wheel --require-hashes lock is a further-hardening follow-up.
+          # importable. PINNED and HASH-LOCKED: .github/ci-requirements.txt lists
+          # the sha256 of every file pip may pick, and --require-hashes refuses
+          # anything else.
           python3 -c 'import yaml' >/dev/null 2>&1 \
-            || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.3'
+            || python3 -m pip install --quiet --break-system-packages \
+                 --require-hashes -r .github/ci-requirements.txt
+
+      # Record, not a gate: the gate tools are an input to the gates, and the brew
+      # step above installs whatever homebrew-core ships that day. Printing each
+      # version into the job log makes a gate regression traceable to a tool bump.
+      - name: Gate tool versions
+        run: |
+          shellcheck --version | sed -n 2p
+          zsh --version
+          tmux -V
+          jq --version
+          xz --version | head -1
+          reuse --version | head -1
+          gitleaks version
+          python3 -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
 
       # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
       # can never report green on a gate it did not actually run. local-ci =
