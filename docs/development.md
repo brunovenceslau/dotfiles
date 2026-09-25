@@ -422,3 +422,64 @@ later change can drop.
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack
 targets `main`.
+
+## Cutting a release
+
+A release is a signed tag on a merge commit of `main`. Everything after the tag
+push is done by
+[`.github/workflows/release.yml`](../.github/workflows/release.yml).
+
+1. Land the change as a pull request against `main` and merge it with the merge
+   button.
+2. Fetch, then tag that merge commit, signed:
+
+   ```sh
+   git fetch origin
+   git tag -s v0.2.0 -m v0.2.0 <merge commit>
+   ```
+
+3. Push the tag:
+
+   ```sh
+   git push origin v0.2.0
+   ```
+
+Those two commands are the whole procedure. The tag push starts the release
+workflow, which checks out the full history, installs a version-pinned and
+sha256-verified `git-cliff`, renders the notes for the commits since the
+previous tag (the whole history for the first tag) through
+[`cliff.toml`](../cliff.toml), and publishes the release with
+`gh release create --verify-tag`. Nothing on the success path is manual.
+
+Check the merge commit before you push. A tag that is already published is not
+something to take back quietly.
+
+The notes are built from conventional-commit subjects, so a subject that does
+not follow the convention is left out of them. Merge commits are dropped too:
+the branch's own commits carry the content.
+
+There is no tracked `CHANGELOG.md`. The release page is where the notes live,
+so the tree has no second copy to drift.
+
+### Which number to bump
+
+The first tag is `v0.1.0`.
+
+A break means one of four things changed: an `install.sh` subcommand, a link
+convention, a `.local` surface, or a documented variable.
+
+- Before 1.0, a break is a MINOR bump, `0.y+1.0`, and it is named in the
+  release notes. SemVer gives `0.y.z` no compatibility guarantee, so the
+  version number by itself warns nobody: the notes are the warning.
+- From 1.0 on, a break is a MAJOR bump.
+- Everything else is a PATCH bump, or a MINOR one when it adds a surface
+  without changing an existing one.
+
+`v0.1.0` says the public surface is not frozen yet. It relaxes no rule that
+already holds. In particular, the `install.sh` subcommand ABI applies at 0.x
+exactly as it does at 1.x: the previous release's installer invokes those names
+on the new tree, so an arm is retired by making it a no-op and never by
+deleting it (see [Change something on the upgrade
+path](#change-something-on-the-upgrade-path)).
+
+Cut `v1.0.0` when the surface is declared stable.
