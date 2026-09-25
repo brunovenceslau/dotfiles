@@ -52,21 +52,39 @@ fi
 # === Part A: the file, ci.yml and the docs agree =============================
 
 # --- A1. shape ---------------------------------------------------------------
+# .rulesets is an ARRAY (this repo runs a branch ruleset on main and a tag
+# ruleset on release tags); exactly one entry may target "branch" - that is
+# the one check_branch attributes the default branch's effective rules to,
+# and bin/repo-settings-check refuses to start without it (see its own die()).
+# A ruleset entry only states the fields its OWN rules need (a tag ruleset has
+# no required_status_checks or pull_request policy), so those three are
+# checked only when present, not required on every entry.
 [ -f "$settings" ] || fail "missing .github/repo-settings.json"
 jq -e '
   (.repository | type == "string" and test("^[^/]+/[^/]+$"))
   and (.repo.default_branch | type == "string" and length > 0)
   and (.private_vulnerability_reporting.enabled | type == "boolean")
+  and (.vulnerability_alerts.enabled | type == "boolean")
+  and (.actions_permissions.enabled | type == "boolean")
+  and (.actions_permissions.allowed_actions | type == "string")
   and (.actions_permissions.sha_pinning_required | type == "boolean")
+  and (.actions_selected_actions.github_owned_allowed | type == "boolean")
+  and (.actions_workflow.default_workflow_permissions | type == "string")
   and (.fork_pr_contributor_approval.approval_policy
        | IN("first_time_contributors_new_to_github", "first_time_contributors", "all_external_contributors"))
-  and (.ruleset.name | type == "string" and length > 0)
-  and (.ruleset.enforcement | IN("disabled", "active", "evaluate"))
-  and ([.ruleset.include, .ruleset.exclude, .ruleset.bypass_actors, .ruleset.rules]
-       | all(type == "array"))
-  and (.ruleset.required_status_checks | type == "array" and length > 0
-       and all(type == "object" and (.context | type == "string")))
-  and (.ruleset.status_check_policy | type == "object")
+  and (.rulesets | type == "array" and length > 0)
+  and ([.rulesets[] | select(.target == "branch")] | length == 1)
+  and (.rulesets | all(.[];
+        (.name | type == "string" and length > 0)
+        and (.target | IN("branch", "tag"))
+        and (.enforcement | IN("disabled", "active", "evaluate"))
+        and ([.include, .exclude, .bypass_actors, .rules] | all(type == "array"))
+        and ((has("required_status_checks") | not) or
+             (.required_status_checks | type == "array" and length > 0
+              and all(.[]; type == "object" and (.context | type == "string"))))
+        and ((has("status_check_policy") | not) or (.status_check_policy | type == "object"))
+        and ((has("pull_request") | not) or (.pull_request | type == "object"))
+      ))
 ' "$settings" >/dev/null || fail ".github/repo-settings.json is malformed or misses a section (see A1 in this test)"
 ok "settings file is well-formed (approval_policy and enforcement are documented enum values)"
 
@@ -96,7 +114,7 @@ for jid, job in jobs.items():
 PY
 )" || fail "could not derive the check names from ci.yml"
   generated="$(sort <<<"$generated")"
-  required="$(jq -r '.ruleset.required_status_checks[].context' "$settings" | sort)"
+  required="$(jq -r '(.rulesets[] | select(.target == "branch") | .required_status_checks[]?.context)' "$settings" | sort)"
   if [ "$generated" != "$required" ]; then
     printf 'ci.yml generates:\n%s\nrepo-settings.json requires:\n%s\n' "$generated" "$required" >&2
     fail "required status checks disagree with the job names ci.yml generates"
@@ -111,12 +129,16 @@ fi
 # One row per claim: FILE | PHRASE (whitespace-normalized) | jq predicate over
 # the settings file. Reword a claim and its row must move with it; change the
 # file and every sentence claiming the old value fails here.
-prelude='def rule($r): .ruleset.rules | index($r) != null;
-def on_main: .ruleset.enforcement == "active"
-  and ((.ruleset.include | index("refs/heads/main") != null)
-       or (.ruleset.include | index("~DEFAULT_BRANCH") != null));
+# branch_ruleset is the one .rulesets[] entry with target == "branch" (A1
+# already proved there is exactly one) - every doc claim below is about main,
+# so every rule()/on_main call reads that entry, never the tag ruleset.
+prelude='def branch_ruleset: .rulesets[] | select(.target == "branch");
+def rule($r): [branch_ruleset.rules[]] | index($r) != null;
+def on_main: (branch_ruleset.enforcement == "active")
+  and ((branch_ruleset.include | index("refs/heads/main") != null)
+       or (branch_ruleset.include | index("~DEFAULT_BRANCH") != null));
 def pvr: .private_vulnerability_reporting.enabled == true;'
-anchors='CONTRIBUTING.md|Every commit on `main` must carry a valid signature. A branch ruleset on `main` enforces it on the server, with no bypass actors|on_main and rule("required_signatures") and .ruleset.bypass_actors == []
+anchors='CONTRIBUTING.md|Every commit on `main` must carry a valid signature. A branch ruleset on `main` enforces it on the server, with no bypass actors|on_main and rule("required_signatures") and branch_ruleset.bypass_actors == []
 CONTRIBUTING.md|The same ruleset blocks force pushes to `main` and blocks deleting it|on_main and rule("non_fast_forward") and rule("deletion")
 CONTRIBUTING.md|are required status checks in the `main` ruleset.|on_main and rule("required_status_checks")
 CONTRIBUTING.md|Merges use a merge commit.** Squash and rebase merging are off|.repo.allow_merge_commit == true and .repo.allow_squash_merge == false and .repo.allow_rebase_merge == false
@@ -129,7 +151,7 @@ README.md|use the private advisory form linked from|pvr
 .github/ISSUE_TEMPLATE/bug_report.yml|Use the private advisory|pvr
 docs/stacked-prs.md|With `delete_branch_on_merge` on, merging the parent deletes its head branch|.repo.delete_branch_on_merge == true
 docs/development.md|the repository'"'"'s Actions settings require SHA pinning|.actions_permissions.sha_pinning_required == true
-docs/development.md|Both legs are required status checks on `main`|on_main and rule("required_status_checks") and (.ruleset.required_status_checks | length) == 2
+docs/development.md|Both legs are required status checks on `main`|on_main and rule("required_status_checks") and (branch_ruleset.required_status_checks | length) == 2
 docs/development.md|the requirement lives in the branch ruleset rather than in the workflow|rule("required_status_checks")'
 n=0
 while IFS='|' read -r file phrase pred; do
@@ -146,7 +168,7 @@ ok "$n doc claims anchored and consistent with the settings file"
 # --- A4. check names quoted in docs --------------------------------------------
 docs="$(cd "$repo_root" && git ls-files '*.md' '.github/ISSUE_TEMPLATE/*')"
 [ -n "$docs" ] || fail "git ls-files found no docs (not a git checkout?)"
-required="$(jq -r '.ruleset.required_status_checks[].context' "$settings")"
+required="$(jq -r '(.rulesets[] | select(.target == "branch") | .required_status_checks[]?.context)' "$settings")"
 quoted="$(cd "$repo_root" && grep -ohE '`local-ci \([A-Za-z0-9._-]+\)`' $docs | tr -d '`' | sort -u || true)"
 while IFS= read -r c; do
   [ -n "$c" ] || continue
@@ -203,44 +225,84 @@ SH
 chmod u+x "$work/bin/gh"
 
 # A fixed expected file, independent of the real one, so a legitimate settings
-# change never breaks the diff-logic cases below. 19 rows: repo 4, three
-# single-key endpoints, ruleset name + 8 fields, branch 3.
+# change never breaks the diff-logic cases below. It carries every SECTION the
+# tool knows about (repo, the three actions/permissions endpoints,
+# vulnerability_alerts, fork_pr_contributor_approval) and TWO rulesets - a
+# branch one (main-protection, with all of required_status_checks,
+# status_check_policy and pull_request) and a tag one (release-tags, with
+# neither) - so the multi-ruleset and per-entry-field-selection logic is
+# exercised, not just the single-ruleset case. 32 rows: repo 5, five
+# single-section endpoints (private-vulnerability-reporting,
+# vulnerability_alerts, actions_permissions x2 keys, actions_selected_actions,
+# actions_workflow) = 7, fork_pr_contributor_approval 1, main-protection
+# name + 9 fields = 10, release-tags name + 6 fields = 7, branch 3.
 cat >"$work/settings.json" <<'JSON'
 {
   "repository": "o/r",
-  "repo": {"default_branch": "main", "allow_merge_commit": true, "allow_squash_merge": false, "has_wiki": false},
+  "repo": {"default_branch": "main", "allow_merge_commit": true, "allow_squash_merge": false, "has_wiki": false, "has_projects": false},
   "private_vulnerability_reporting": {"enabled": true},
-  "actions_permissions": {"sha_pinning_required": true},
+  "vulnerability_alerts": {"enabled": true},
+  "actions_permissions": {"sha_pinning_required": true, "allowed_actions": "selected"},
+  "actions_selected_actions": {"github_owned_allowed": true},
+  "actions_workflow": {"default_workflow_permissions": "read"},
   "fork_pr_contributor_approval": {"approval_policy": "all_external_contributors"},
-  "ruleset": {
-    "name": "main-protection", "target": "branch", "enforcement": "active",
-    "include": ["refs/heads/main"], "exclude": [], "bypass_actors": [],
-    "rules": ["deletion", "non_fast_forward", "required_signatures", "required_status_checks"],
-    "required_status_checks": [{"context": "local-ci (b)"}, {"context": "local-ci (a)"}],
-    "status_check_policy": {"strict_required_status_checks_policy": false, "do_not_enforce_on_create": false}
-  }
+  "rulesets": [
+    {
+      "name": "main-protection", "target": "branch", "enforcement": "active",
+      "include": ["refs/heads/main"], "exclude": [], "bypass_actors": [],
+      "rules": ["deletion", "non_fast_forward", "pull_request", "required_signatures", "required_status_checks"],
+      "required_status_checks": [{"context": "local-ci (b)"}, {"context": "local-ci (a)"}],
+      "status_check_policy": {"strict_required_status_checks_policy": false, "do_not_enforce_on_create": false},
+      "pull_request": {"required_approving_review_count": 0, "dismiss_stale_reviews_on_push": false,
+        "require_code_owner_review": false, "require_last_push_approval": false,
+        "required_review_thread_resolution": true, "require_extra_approval_for_unattributed_changes": true,
+        "allowed_merge_methods": ["merge"]}
+    },
+    {
+      "name": "release-tags", "target": "tag", "enforcement": "active",
+      "include": ["refs/tags/v*"], "exclude": [], "bypass_actors": [],
+      "rules": ["deletion", "non_fast_forward"]
+    }
+  ]
 }
 JSON
 
 # Live-shaped responses (the shapes the real API returned on 2026-09-25),
 # with extra fields the tool must ignore. Rules and checks are out of order on
-# purpose: both are compared as sets.
+# purpose: both are compared as sets. pull_request also carries
+# required_reviewers, a real field the tool deliberately does not pin (see
+# rs_proj's comment in bin/repo-settings-check) - it must not cause drift.
 fixtures_match() {
   rm -f "$work/fx"/*
   cat >"$work/fx/repos_o_r.json" <<'JSON'
-{"full_name":"o/r","default_branch":"main","allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":false,"has_wiki":false,"permissions":{"admin":true}}
+{"full_name":"o/r","default_branch":"main","allow_merge_commit":true,"allow_squash_merge":false,"allow_rebase_merge":false,"has_wiki":false,"has_projects":false,"permissions":{"admin":true}}
 JSON
   echo '{"enabled":true}' >"$work/fx/repos_o_r_private-vulnerability-reporting.json"
-  echo '{"enabled":true,"allowed_actions":"all","sha_pinning_required":true}' >"$work/fx/repos_o_r_actions_permissions.json"
+  echo '{"enabled":true,"allowed_actions":"selected","sha_pinning_required":true}' >"$work/fx/repos_o_r_actions_permissions.json"
+  echo '{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":[]}' >"$work/fx/repos_o_r_actions_permissions_selected-actions.json"
+  echo '{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}' >"$work/fx/repos_o_r_actions_permissions_workflow.json"
   echo '{"approval_policy":"all_external_contributors"}' >"$work/fx/repos_o_r_actions_permissions_fork-pr-contributor-approval.json"
-  echo '[{"id":7,"name":"other"},{"id":42,"name":"main-protection","enforcement":"active"}]' >"$work/fx/repos_o_r_rulesets.json"
+  # vulnerability-alerts carries NO body; a 200/204 success (empty file, exit 0
+  # from the stub) is what "enabled" looks like on the wire.
+  : >"$work/fx/repos_o_r_vulnerability-alerts.json"
+  echo '[{"id":7,"name":"other"},{"id":42,"name":"main-protection","enforcement":"active"},{"id":43,"name":"release-tags"}]' >"$work/fx/repos_o_r_rulesets.json"
   cat >"$work/fx/repos_o_r_rulesets_42.json" <<'JSON'
 {"id":42,"name":"main-protection","target":"branch","enforcement":"active",
  "conditions":{"ref_name":{"exclude":[],"include":["refs/heads/main"]}},
  "rules":[{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,
    "do_not_enforce_on_create":false,
    "required_status_checks":[{"context":"local-ci (a)"},{"context":"local-ci (b)"}]}},
-   {"type":"required_signatures"},{"type":"deletion"},{"type":"non_fast_forward"}],
+   {"type":"required_signatures"},{"type":"deletion"},{"type":"non_fast_forward"},
+   {"type":"pull_request","parameters":{"required_approving_review_count":0,"dismiss_stale_reviews_on_push":false,
+     "required_reviewers":[],"require_code_owner_review":false,"require_last_push_approval":false,
+     "required_review_thread_resolution":true,"require_extra_approval_for_unattributed_changes":true,
+     "allowed_merge_methods":["merge"]}}],
+ "bypass_actors":[],"current_user_can_bypass":"never"}
+JSON
+  cat >"$work/fx/repos_o_r_rulesets_43.json" <<'JSON'
+{"id":43,"name":"release-tags","target":"tag","enforcement":"active",
+ "conditions":{"ref_name":{"exclude":[],"include":["refs/tags/v*"]}},
+ "rules":[{"type":"deletion"},{"type":"non_fast_forward"}],
  "bypass_actors":[],"current_user_can_bypass":"never"}
 JSON
   cat >"$work/fx/repos_o_r_rules_branches_main.json" <<'JSON'
@@ -248,7 +310,8 @@ JSON
  {"type":"required_status_checks","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":42,
   "parameters":{"required_status_checks":[{"context":"local-ci (a)"},{"context":"local-ci (b)"}]}},
  {"type":"non_fast_forward","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":42},
- {"type":"deletion","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":42}]
+ {"type":"deletion","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":42},
+ {"type":"pull_request","ruleset_source_type":"Repository","ruleset_source":"o/r","ruleset_id":42}]
 JSON
   # gh's exact wording for an unprotected branch (live, 2026-09-25).
   echo 'gh: Branch not protected (HTTP 404)' >"$work/fx/repos_o_r_branches_main_protection.err"
@@ -282,18 +345,24 @@ expect_run() {
 
 # B1. match -> exit 0, every row ok, and only plain GETs were issued.
 fixtures_match
-expect_run "match" 0 "19 ok, 0 drift, 0 unreadable"
+expect_run "match" 0 "32 ok, 0 drift, 0 unreadable"
 grep -vqE '^api (--paginate )?[^ ]+$' "$work/fx/calls.log" && fail "the tool issued a gh call other than a plain 'gh api [--paginate] PATH' GET"
 grep -qE '^api --paginate repos/o/r/rules/branches/main' "$work/fx/calls.log" || fail "the effective-rules list is not read with --paginate"
 grep -qE '^api --paginate repos/o/r/rulesets[?]' "$work/fx/calls.log" || fail "the rulesets list is not read with --paginate"
-ok "stubbed match: only plain GET calls"
+[ "$(grep -cE '^ok[[:space:]]+ruleset\[main-protection\]\.required_status_checks[[:space:]]' <<<"$out")" -eq 1 ] \
+  || fail "ruleset[main-protection].required_status_checks must be reported exactly once"
+[ "$(grep -cE '^ok[[:space:]]+ruleset\[[^]]*\]\.name[[:space:]]' <<<"$out")" -eq 2 ] \
+  || fail "both ruleset entries (main-protection, release-tags) must report their own ruleset[NAME].name row"
+row_is ok 'ruleset\[main-protection\]\.name' || fail "match: ruleset[main-protection].name row missing"
+row_is ok 'ruleset\[release-tags\]\.name' || fail "match: ruleset[release-tags].name row missing"
+ok "stubbed match: only plain GET calls, and per-entry fields are not cross-reported"
 
 # B2. drift -> exit 1, exactly the drifted rows are DRIFT.
 fixtures_match
-edit repos_o_r '.allow_squash_merge = true'
+edit repos_o_r '.allow_squash_merge = true | .has_projects = true'
 edit repos_o_r_rulesets_42 '.rules[0].parameters.required_status_checks |= map(select(.context != "local-ci (b)"))'
-expect_run "drift" 1 "17 ok, 2 drift, 0 unreadable" \
-  DRIFT 'repo\.allow_squash_merge' DRIFT 'ruleset\.required_status_checks'
+expect_run "drift" 1 "29 ok, 3 drift, 0 unreadable" \
+  DRIFT 'repo\.allow_squash_merge' DRIFT 'repo\.has_projects' DRIFT 'ruleset\[main-protection\]\.required_status_checks'
 
 # B3. unreadable -> exit 2, and the unreadable rows are never `ok`.
 fixtures_match
@@ -301,89 +370,119 @@ rm "$work/fx/repos_o_r_actions_permissions_fork-pr-contributor-approval.json"
 echo 'gh: Must have admin rights to Repository. (HTTP 403)' >"$work/fx/repos_o_r_actions_permissions_fork-pr-contributor-approval.err"
 edit repos_o_r_rulesets_42 'del(.bypass_actors)'
 edit repos_o_r 'del(.allow_squash_merge)'
-expect_run "unreadable" 2 "16 ok, 0 drift, 3 unreadable" \
-  UNREADABLE 'fork_pr_contributor_approval\.approval_policy' UNREADABLE 'ruleset\.bypass_actors' \
+expect_run "unreadable" 2 "29 ok, 0 drift, 3 unreadable" \
+  UNREADABLE 'fork_pr_contributor_approval\.approval_policy' UNREADABLE 'ruleset\[main-protection\]\.bypass_actors' \
   UNREADABLE 'repo\.allow_squash_merge'
 grep -qF 'HTTP 403' <<<"$out" || fail "unreadable: gh's error was not surfaced"
 
 # B4. drift wins over unreadable: exit 1 when both happen.
 edit repos_o_r '.has_wiki = true'
-expect_run "drift plus unreadable" 1 "15 ok, 1 drift, 3 unreadable" DRIFT 'repo\.has_wiki'
+expect_run "drift plus unreadable" 1 "28 ok, 1 drift, 3 unreadable" DRIFT 'repo\.has_wiki'
 
 # B5. unauthenticated -> every row UNREADABLE, zero ok, exit 2.
 rm -f "$work/fx"/*
 for k in repos_o_r repos_o_r_private-vulnerability-reporting repos_o_r_actions_permissions \
-  repos_o_r_actions_permissions_fork-pr-contributor-approval repos_o_r_rulesets \
-  repos_o_r_rules_branches_main repos_o_r_branches_main_protection; do
+  repos_o_r_actions_permissions_selected-actions repos_o_r_actions_permissions_workflow \
+  repos_o_r_actions_permissions_fork-pr-contributor-approval repos_o_r_vulnerability-alerts \
+  repos_o_r_rulesets repos_o_r_rules_branches_main repos_o_r_branches_main_protection; do
   echo 'gh: Bad credentials (HTTP 401)' >"$work/fx/$k.err"
 done
-expect_run "unauthenticated" 2 "0 ok, 0 drift, 18 unreadable" UNREADABLE 'branch\.main\.classic_protection'
+expect_run "unauthenticated" 2 "0 ok, 0 drift, 30 unreadable" UNREADABLE 'branch\.main\.classic_protection'
 
-# B6. ruleset renamed or deleted -> DRIFT on ruleset.name.
+# B6. one named ruleset renamed or deleted -> DRIFT on its ruleset.name, while
+# the OTHER ruleset entry still reads and validates fully (each entry stands
+# on its own).
 fixtures_match
-echo '[{"id":7,"name":"other"}]' >"$work/fx/repos_o_r_rulesets.json"
-expect_run "missing ruleset" 1 "1 drift" DRIFT 'ruleset\.name' UNREADABLE 'branch\.main\.rule_sources'
+echo '[{"id":7,"name":"other"},{"id":43,"name":"release-tags"}]' >"$work/fx/repos_o_r_rulesets.json"
+expect_run "missing ruleset" 1 "21 ok, 1 drift, 1 unreadable" \
+  DRIFT 'ruleset\[main-protection\]\.name' UNREADABLE 'branch\.main\.rule_sources' ok 'ruleset\[release-tags\]\.rules'
 
 # B7. a second ruleset acting on the branch -> the effective rules name a
-# foreign ruleset_id and an extra rule type.
+# foreign ruleset_id and an extra rule type ("creation" - a type this repo's
+# own rulesets never use, so it cannot collide with a legitimate row).
 fixtures_match
-edit repos_o_r_rules_branches_main '. + [{"type":"pull_request","ruleset_source_type":"Organization","ruleset_source":"o","ruleset_id":99}]'
-expect_run "extra ruleset on the branch" 1 "17 ok, 2 drift, 0 unreadable" \
+edit repos_o_r_rules_branches_main '. + [{"type":"creation","ruleset_source_type":"Organization","ruleset_source":"o","ruleset_id":99}]'
+expect_run "extra ruleset on the branch" 1 "30 ok, 2 drift, 0 unreadable" \
   DRIFT 'branch\.main\.rule_sources' DRIFT 'branch\.main\.rule_types'
 grep -qF 'ruleset id 99' <<<"$out" || fail "extra ruleset: the foreign ruleset id was not named"
 
 # B7b. the foreign rule sits on page 2 of the effective rules: gh --paginate
 # prints one array per page, and a reader of page 1 alone would report ok.
 fixtures_match
-echo '[{"type":"pull_request","ruleset_source_type":"Organization","ruleset_source":"o","ruleset_id":99}]' \
+echo '[{"type":"creation","ruleset_source_type":"Organization","ruleset_source":"o","ruleset_id":99}]' \
   >>"$work/fx/repos_o_r_rules_branches_main.json"
-expect_run "foreign rule on page 2" 1 "17 ok, 2 drift, 0 unreadable" \
+expect_run "foreign rule on page 2" 1 "30 ok, 2 drift, 0 unreadable" \
   DRIFT 'branch\.main\.rule_sources' DRIFT 'branch\.main\.rule_types'
 # The same for the rulesets list: a second same-name ruleset on page 2 is
 # ambiguous, never a silent pick of the page-1 one.
 fixtures_match
-echo '[{"id":43,"name":"main-protection"}]' >>"$work/fx/repos_o_r_rulesets.json"
-expect_run "duplicate ruleset on page 2" 2 "0 drift" UNREADABLE 'ruleset\.name'
+echo '[{"id":44,"name":"main-protection"}]' >>"$work/fx/repos_o_r_rulesets.json"
+expect_run "duplicate ruleset on page 2" 2 "21 ok, 0 drift, 2 unreadable" UNREADABLE 'ruleset\[main-protection\]\.name'
 
 # B8. classic branch protection present -> DRIFT; a bare 404 (what a caller
 # without rights also gets) is UNREADABLE, never proof of absence.
 fixtures_match
 rm "$work/fx/repos_o_r_branches_main_protection.err"
 echo '{"url":"x","required_signatures":{"enabled":false}}' >"$work/fx/repos_o_r_branches_main_protection.json"
-expect_run "classic protection present" 1 "18 ok, 1 drift" DRIFT 'branch\.main\.classic_protection'
+expect_run "classic protection present" 1 "31 ok, 1 drift" DRIFT 'branch\.main\.classic_protection'
 rm "$work/fx/repos_o_r_branches_main_protection.json"
-expect_run "classic protection bare 404" 2 "18 ok, 0 drift, 1 unreadable" UNREADABLE 'branch\.main\.classic_protection'
+expect_run "classic protection bare 404" 2 "31 ok, 0 drift, 1 unreadable" UNREADABLE 'branch\.main\.classic_protection'
 
 # B9. ruleset content drift the named-ruleset rows must catch.
 fixtures_match
 edit repos_o_r_rulesets_42 '.bypass_actors = [{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}]'
-expect_run "extra bypass actor" 1 "18 ok, 1 drift" DRIFT 'ruleset\.bypass_actors'
+expect_run "extra bypass actor" 1 "31 ok, 1 drift" DRIFT 'ruleset\[main-protection\]\.bypass_actors'
 fixtures_match
-edit repos_o_r_rulesets_42 '.rules += [{"type":"creation"}]'
-expect_run "extra rule" 1 "18 ok, 1 drift" DRIFT 'ruleset\.rules'
+edit repos_o_r_rulesets_42 '.rules += [{"type":"update"}]'
+expect_run "extra rule" 1 "31 ok, 1 drift" DRIFT 'ruleset\[main-protection\]\.rules'
 fixtures_match
 edit repos_o_r_rulesets_42 '.conditions.ref_name.include = ["~DEFAULT_BRANCH"]'
-expect_run "~DEFAULT_BRANCH condition" 1 "18 ok, 1 drift" DRIFT 'ruleset\.include'
+expect_run "~DEFAULT_BRANCH condition" 1 "31 ok, 1 drift" DRIFT 'ruleset\[main-protection\]\.include'
 fixtures_match
 edit repos_o_r_rulesets_42 '.rules[0].parameters.required_status_checks[0].integration_id = 15368 | .rules[0].parameters.strict_required_status_checks_policy = true'
-expect_run "integration_id and strict policy" 1 "17 ok, 2 drift" \
-  DRIFT 'ruleset\.required_status_checks' DRIFT 'ruleset\.status_check_policy'
+expect_run "integration_id and strict policy" 1 "30 ok, 2 drift" \
+  DRIFT 'ruleset\[main-protection\]\.required_status_checks' DRIFT 'ruleset\[main-protection\]\.status_check_policy'
+fixtures_match
+edit repos_o_r_rulesets_42 '.rules |= map(if .type == "pull_request" then .parameters.required_approving_review_count = 1 else . end)'
+expect_run "pull_request policy drift" 1 "31 ok, 1 drift" DRIFT 'ruleset\[main-protection\]\.pull_request'
+fixtures_match
+edit repos_o_r_rulesets_43 '.rules = [{"type":"deletion"}]'
+expect_run "release-tags rules drift" 1 "31 ok, 1 drift" DRIFT 'ruleset\[release-tags\]\.rules'
+
+# B9b. an unknown ruleset field in the settings file (a typo, or a field this
+# tool has not learned to check yet) must be refused at STARTUP, before any
+# gh call - never silently compared against an empty (or always-erroring)
+# jq filter and reported as a live-data row.
+fixtures_match
+rm -f "$work/fx/calls.log"
+bad="$work/settings.bad.json"
+jq '.rulesets[0].bogus_field = true' "$work/settings.json" >"$bad"
+rc=0
+out="$(PATH="$work/bin:$PATH" GH_STUB_DIR="$work/fx" "$tool" "$bad" 2>&1)" || rc=$?
+[ "$rc" -eq 2 ] || { echo "$out" >&2; fail "unknown ruleset field: expected exit 2, got $rc"; }
+grep -qF "ruleset field(s) rs_proj does not handle" <<<"$out" \
+  || { echo "$out" >&2; fail "unknown ruleset field: message does not name the problem"; }
+grep -qF "main-protection.bogus_field" <<<"$out" \
+  || { echo "$out" >&2; fail "unknown ruleset field: message does not name the offending entry and field"; }
+[ ! -s "$work/fx/calls.log" ] || fail "unknown ruleset field: the tool made a gh call before refusing the file"
+rm -f "$bad"
+ok "unknown ruleset field: refused at startup (exit 2), before any gh call"
 
 # B10. a 200 body that is not JSON, or not the documented shape -> UNREADABLE
 # rows and exit 2, never jq's own rc 5 aborting the run.
 fixtures_match
 echo '<html>proxy error</html>' >"$work/fx/repos_o_r.json"
-expect_run "non-JSON body" 2 "15 ok, 0 drift, 4 unreadable" UNREADABLE 'repo\.default_branch'
+expect_run "non-JSON body" 2 "27 ok, 0 drift, 5 unreadable" UNREADABLE 'repo\.default_branch'
 grep -qF 'unexpected response' <<<"$out" || fail "non-JSON: the row does not say the response was unexpected"
 fixtures_match
 echo '{"message":"moved"}' >"$work/fx/repos_o_r_rulesets.json"
 echo '{"message":"moved"}' >"$work/fx/repos_o_r_rules_branches_main.json"
-expect_run "wrong-shape rulesets" 2 "0 drift, 10 unreadable" \
-  UNREADABLE 'ruleset\.rules' UNREADABLE 'ruleset\.bypass_actors' \
+expect_run "wrong-shape rulesets" 2 "13 ok, 0 drift, 17 unreadable" \
+  UNREADABLE 'ruleset\[main-protection\]\.rules' UNREADABLE 'ruleset\[release-tags\]\.bypass_actors' \
   UNREADABLE 'branch\.main\.rule_sources' UNREADABLE 'branch\.main\.rule_types'
 fixtures_match
 echo '[]' >"$work/fx/repos_o_r_rulesets_42.json"
-expect_run "wrong-shape ruleset detail" 2 "0 drift, 8 unreadable" UNREADABLE 'ruleset\.rules'
+expect_run "wrong-shape ruleset detail" 2 "23 ok, 0 drift, 9 unreadable" UNREADABLE 'ruleset\[main-protection\]\.rules'
 
 # B11. no gh at all -> exit 2 with a clear message, never a pass. PATH holds
 # only what the tool needs before its gh probe, so a gh on the host cannot leak in.
@@ -394,5 +493,43 @@ out="$(PATH="$work/nogh" "$work/nogh/bash" "$tool" "$work/settings.json" 2>&1)" 
 [ "$rc" -eq 2 ] || { echo "$out" >&2; fail "no gh: expected exit 2, got $rc"; }
 grep -qF "gh not installed" <<<"$out" || { echo "$out" >&2; fail "no gh: message does not say gh is missing"; }
 ok "no gh on PATH: exit 2 with a clear message"
+
+# B12. the two selected-actions/workflow endpoints, and the status-code-only
+# vulnerability-alerts check, each get their own drift and unreadable case -
+# they are new sections/checks and check_section's generic key-loop must
+# actually be wired to their paths, not just declared in the settings file.
+fixtures_match
+edit repos_o_r_actions_permissions_selected-actions '.github_owned_allowed = false'
+expect_run "selected-actions drift" 1 "31 ok, 1 drift" DRIFT 'actions_selected_actions\.github_owned_allowed'
+fixtures_match
+rm "$work/fx/repos_o_r_actions_permissions_selected-actions.json"
+echo 'gh: Not Found (HTTP 404)' >"$work/fx/repos_o_r_actions_permissions_selected-actions.err"
+expect_run "selected-actions unreadable" 2 "31 ok, 0 drift, 1 unreadable" UNREADABLE 'actions_selected_actions\.github_owned_allowed'
+
+fixtures_match
+edit repos_o_r_actions_permissions_workflow '.default_workflow_permissions = "write"'
+expect_run "workflow permissions drift" 1 "31 ok, 1 drift" DRIFT 'actions_workflow\.default_workflow_permissions'
+
+# B13. vulnerability-alerts has NO JSON body: a 404 means disabled (drift,
+# since the file expects enabled) and any other failure is UNREADABLE, never
+# read as "disabled" by default.
+fixtures_match
+rm "$work/fx/repos_o_r_vulnerability-alerts.json"
+echo 'gh: Not Found (HTTP 404)' >"$work/fx/repos_o_r_vulnerability-alerts.err"
+expect_run "vulnerability alerts disabled" 1 "31 ok, 1 drift" DRIFT 'vulnerability_alerts\.enabled'
+fixtures_match
+rm "$work/fx/repos_o_r_vulnerability-alerts.json"
+echo 'gh: Must have admin rights to Repository. (HTTP 403)' >"$work/fx/repos_o_r_vulnerability-alerts.err"
+expect_run "vulnerability alerts unreadable" 2 "31 ok, 0 drift, 1 unreadable" UNREADABLE 'vulnerability_alerts\.enabled'
+grep -qF 'HTTP 403' <<<"$out" || fail "vulnerability alerts: a non-404 failure must not be read as disabled"
+
+# B14. the tag ruleset (release-tags) missing entirely -> DRIFT on its own
+# ruleset[release-tags].name, while main-protection (the branch ruleset)
+# still reads and validates fully, and attributes the branch's effective
+# rules correctly.
+fixtures_match
+echo '[{"id":42,"name":"main-protection"}]' >"$work/fx/repos_o_r_rulesets.json"
+expect_run "release-tags ruleset missing" 1 "25 ok, 1 drift, 0 unreadable" \
+  DRIFT 'ruleset\[release-tags\]\.name' ok 'branch\.main\.rule_sources'
 
 echo "PASS: repo_settings_test"
