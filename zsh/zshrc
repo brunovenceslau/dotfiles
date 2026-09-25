@@ -14,6 +14,10 @@
 
 # Fork-free mkdir for the case the user wipes XDG cache/state between launches;
 # install.sh pre-creates these dirs, so on a normal launch mkdir never runs.
+# The builtin only knows -p and -m, so it MUST NOT outlive startup (`mkdir -v`
+# would fail with "bad option"): the end of this file disables it again, unless
+# it was already a builtin before this line, in which case it is not ours.
+typeset -g _dotfiles_mkdir_builtin=${+builtins[mkdir]}
 zmodload -F zsh/files b:mkdir 2>/dev/null
 [[ -d $XDG_STATE_HOME/zsh ]] || mkdir -p "$XDG_STATE_HOME/zsh"
 [[ -d $XDG_CACHE_HOME/zsh ]] || mkdir -p "$XDG_CACHE_HOME/zsh"
@@ -53,6 +57,16 @@ fi
 # re-sourced rc files.
 path=("$HOME/.local/bin" $path)
 typeset -gU path
+
+# Second pass of zshenv's EDITOR/VISUAL/LESSOPEN defaulting, now that PATH holds
+# the Homebrew prefix and ~/.local/bin (zshenv explains why one pass is not
+# enough). It rewrites only what zshenv itself defaulted. Guarded on the function
+# so a foreign ~/.zshenv that never defined it costs nothing.
+if (( $+functions[_dotfiles_tool_defaults] )); then
+  _dotfiles_tool_defaults
+  unfunction _dotfiles_tool_defaults
+fi
+unset _dotfiles_own_editor _dotfiles_own_visual _dotfiles_own_lessopen
 
 # --- History ---------------------------------------------------
 HISTFILE="$XDG_STATE_HOME/zsh/history"
@@ -241,8 +255,9 @@ zstyle ':completion:*' cache-path "$XDG_CACHE_HOME/zsh/zcompcache"
 
 # --- Functions and aliases ----------------------------------------------------
 # lib/os.sh first: nothing tracked branches on it any more, but the arch helpers
-# stay available to functions, later modules and a host's own .local files. It reads the $OSTYPE /
-# $MACHTYPE builtins, so sourcing it forks nothing on the startup path.
+# stay available to functions, later modules and a host's own .local files.
+# Sourcing it only defines functions, so it forks nothing on the startup path; a
+# helper reads the $MACHTYPE builtin when called.
 # functions.zsh loads before aliases.zsh so a host
 # extending aliases.zsh.local can already call the helpers (an alias wrapping a
 # helper is the common case; the reverse is not). Each file sources its own
@@ -408,10 +423,17 @@ if [[ -r $ZDOTDIR/.zshrc.local ]]; then
 fi
 
 # --- Update-check sentinel -------------------------------------
-# Sourced LAST - after .zshrc.local so a host can tune (DOTFILES_UPDATE_CADENCE_
-# DAYS / _STALENESS_DAYS) or disable (DOTFILES_UPDATE_DISABLE=1) it first. Past
-# its cadence it spawns a fully-detached background `git fetch` - the ONE async
-# spawn sanctions on this path - and surfaces a next-prompt notice;
-# the cadence check itself is a glob (no fork, no network) so a fresh sentinel
-# adds nothing to startup (relies on that for a clean bench).
+# Sourced after .zshrc.local so a host can tune (DOTFILES_UPDATE_CADENCE_DAYS /
+# _STALENESS_DAYS) or disable (DOTFILES_UPDATE_DISABLE set to any non-empty
+# value) it first. Past its cadence it spawns a fully-detached background
+# `git fetch` - the ONE async spawn this path sanctions - and surfaces a
+# next-prompt notice; the cadence check itself is a glob (no fork, no network),
+# so a fresh sentinel adds nothing to startup.
 source "$DOTFILES/zsh/update-check.zsh"
+
+# --- Hand mkdir back to the real binary ---------------------------------------
+# The zsh/files mkdir loaded at the top served the startup path (this file and
+# update-check.zsh); interactive `mkdir -v` / `mkdir -pv` need the real one.
+# Skipped when mkdir was already a builtin before this file ran.
+(( _dotfiles_mkdir_builtin )) || zmodload -F zsh/files -b:mkdir 2>/dev/null
+unset _dotfiles_mkdir_builtin

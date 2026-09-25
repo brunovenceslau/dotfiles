@@ -30,12 +30,42 @@ skip_global_compinit=1
 # (a git hook's $EDITOR, a script's $PAGER), which is why they live here and not
 # in zshrc. Each honors a pre-set value so a calling environment still wins.
 #
+# EDITOR, VISUAL and LESSOPEN depend on which tools are on PATH, and PATH is not
+# final here: this file runs BEFORE zshrc prepends the Homebrew prefix, so on a
+# GUI-launched Apple Silicon terminal (launchd PATH, no /opt/homebrew/bin) a
+# brew-installed nvim or lesspipe is invisible at this point. So the defaulting is
+# a function: it runs once here for every shell, and zshrc runs it AGAIN right
+# after its PATH block, then removes it. The _dotfiles_own_* flags record which
+# variables were unset on entry, so the second pass only ever rewrites a value
+# this file chose, never one the calling environment set.
 # nvim is the editor (config/nvim), with vim as the fallback so a host without it
 # is not left with `ed`. `$+commands` is a zsh builtin view, NOT a subprocess.
-if [[ -z ${EDITOR:-} ]]; then
-  if (( $+commands[nvim] )); then export EDITOR=nvim; else export EDITOR=vim; fi
+typeset -g _dotfiles_own_editor= _dotfiles_own_visual= _dotfiles_own_lessopen=
+[[ -z ${EDITOR:-} ]] && _dotfiles_own_editor=1
+[[ -z ${VISUAL:-} ]] && _dotfiles_own_visual=1
+[[ -z ${LESSOPEN:-} ]] && _dotfiles_own_lessopen=1
+_dotfiles_tool_defaults() {
+  if [[ -n $_dotfiles_own_editor ]]; then
+    if (( $+commands[nvim] )); then export EDITOR=nvim; else export EDITOR=vim; fi
+  fi
+  [[ -n $_dotfiles_own_visual ]] && export VISUAL="$EDITOR"
+  # lesspipe, when installed, teaches less to page archives and PDFs.
+  if [[ -n $_dotfiles_own_lessopen ]]; then
+    if (( ${+commands[lesspipe.sh]} )); then
+      export LESSOPEN="| ${commands[lesspipe.sh]} %s 2>&-"
+    elif (( ${+commands[lesspipe]} )); then
+      export LESSOPEN="| ${commands[lesspipe]} %s 2>&-"
+    fi
+  fi
+  return 0
+}
+_dotfiles_tool_defaults
+# A non-interactive shell never reaches zshrc's second pass, so it keeps nothing
+# of the machinery - a script's namespace stays clean.
+if [[ ! -o interactive ]]; then
+  unfunction _dotfiles_tool_defaults
+  unset _dotfiles_own_editor _dotfiles_own_visual _dotfiles_own_lessopen
 fi
-export VISUAL="${VISUAL:-$EDITOR}"
 export PAGER="${PAGER:-less}"
 export LANG="${LANG:-en_US.UTF-8}"
 
@@ -82,10 +112,3 @@ export DOTFILES="${${(%):-%N}:A:h:h}"
 # BROWSER is macOS-only (`open` is not a portable command name).
 [[ -z ${BROWSER:-} && $OSTYPE == darwin* ]] && export BROWSER=open
 
-# lesspipe, when installed, teaches less to page archives and PDFs. `$commands`
-# is a zsh builtin view - reading it costs nothing and never forks.
-if [[ -z ${LESSOPEN:-} ]] && (( ${+commands[lesspipe.sh]} )); then
-  export LESSOPEN="| ${commands[lesspipe.sh]} %s 2>&-"
-elif [[ -z ${LESSOPEN:-} ]] && (( ${+commands[lesspipe]} )); then
-  export LESSOPEN="| ${commands[lesspipe]} %s 2>&-"
-fi

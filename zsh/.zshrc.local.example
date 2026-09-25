@@ -11,5 +11,5 @@
 
 # ── Update-channel cadence (zsh/update-check.zsh) ────────────────────────────
 # export DOTFILES_UPDATE_CADENCE_DAYS=3    # how often the background fetch runs        (default: 3)
-# export DOTFILES_UPDATE_STALENESS_DAYS=30 # warn if no verified update in N days       (default: 30)
-# export DOTFILES_UPDATE_DISABLE=1         # set to 1 to turn the update sentinel off entirely
+# export DOTFILES_UPDATE_STALENESS_DAYS=30 # warn if no fetch succeeded in N days      (default: 30)
+# export DOTFILES_UPDATE_DISABLE=1         # any non-empty value turns the sentinel off entirely
