@@ -7,9 +7,10 @@
 #
 # Unit tests for bin/check-patterns (static-pattern gate). Proves the
 # gate CATCHES a real curl|sh / wget|bash fetch, an ad-hoc `uname -m` outside
-# lib/os.sh, a hardcoded Homebrew prefix, a `brew shellenv` fork and bash 4 syntax
-# in the bash-3.2 surface; PASSES a clean tree, the sanctioned `uname -m` in
-# lib/os.sh, and each of those literals where it is legitimate;
+# lib/os.sh, a hardcoded Homebrew prefix, a `brew shellenv` fork, bash 4 syntax
+# in the bash-3.2 surface and a `--` after a tool's first operand; PASSES a clean
+# tree, the sanctioned `uname -m` in lib/os.sh, and each of those literals where
+# it is legitimate;
 # SKIPS an absent optional dir (the fail-open regression that made the old inline
 # recipe silently pass), FAILS CLOSED on a scan error, and refuses a no-op scan.
 # Fixture trees only; never the real repo. Not on the shellcheck surface.
@@ -500,5 +501,75 @@ printf '%s\n' \
 # zsh/ is interactive (no pipefail) and outside the arm's surface
 printf '%s\n' "alias ducks='du -cks -- *(D) $P sort -rn $P head'" > "$r/zsh/aliases.zsh"
 [ "$(run "$r")" = "0" ] && ok || fail "here-strings, draining readers, comments and zsh/ must pass the early-exit arm"
+
+# === the misplaced `--` arm =======================================================
+# BSD getopt (macOS) stops at the first operand, so a `--` after it is a FILE
+# operand; GNU getopt permutes argv and accepts either order. Fixtures spell the
+# delimiter through $D, so THIS file's own source never carries the shape the arm
+# looks for (the arm scans tests/).
+dd_msg="check-patterns: a '--' after the first operand"
+D='--'
+i=0
+for line in \
+  "  chmod -R go-w $D \"\$plugins\" 2>/dev/null \\" \
+  "grep -q \"\$pat\" $D \"\$f\" || fail x" \
+  "if ! /bin/rm -f \"\$x\" $D; then :; fi" \
+  "x=\"\$(sed -n 1p \"\$f\" $D)\"" \
+  "sudo chown root:wheel $D /x" \
+  "mkdir -m 700 \"\$d\" $D" \
+  "LC_ALL=C grep -e a -qF \"\$b\" $D f" \
+  "a && cp \"\$a\" $D \"\$b\"" \
+  "elif mv \"\$a\" $D \"\$b\"; then :; fi" \
+  "  x) rm -f \"\$d\" $D ;;" \
+  "grep -em pat $D f" \
+  "grep -fe pat $D f" \
+  "touch -Ar ref $D f" \
+  ; do
+  i=$((i + 1)); r="$work/dd-$i"; seed "$r"; mkdir -p "$r/tests"
+  printf '%s\n' "$line" > "$r/tests/x_test.sh"
+  fails_with "$r" "$dd_msg" "misplaced -- shape $i: $line"
+done
+# zsh/ and the workflows run on a mac too
+r="$work/dd-zsh"; seed "$r"; mkdir -p "$r/zsh"
+printf '%s\n' "  ln -s \"\$src\" $D \"\$dst\"" > "$r/zsh/functions.zsh"
+fails_with "$r" "$dd_msg" "a misplaced -- in zsh/"
+r="$work/dd-ci"; seed "$r"; mkdir -p "$r/.github/workflows"
+printf '%s\n' "      - run: chmod u+x $D bin/x" > "$r/.github/workflows/ci.yml"
+fails_with "$r" "$dd_msg" "a misplaced -- in a workflow run step"
+
+# the fix, argument-taking options, quoted patterns and non-command positions pass
+r="$work/dd-ok"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' \
+  "chmod -R $D go-w \"\$p\" 2>/dev/null" \
+  "rm -f $D \"\$x\"; mv -f $D \"\$a\" \"\$b\"" \
+  "grep -qE $D \"\$pat\" f" \
+  "grep -e \"\$pat\" $D f" \
+  "grep -qF -m 1 $D x f" \
+  "mkdir -m 700 $D \"\$d\"" \
+  "sed -e 's/a/b/' $D f" \
+  "sed -i '' -e 's/a/b/' $D f" \
+  "grep -qx 'install --pin v1 $D gh' <<<\"\$c\"" \
+  "grep -qF \"a; b $D c\" f" \
+  "git grep -h -E pat $D ." \
+  "echo chmod x $D y" \
+  "gh extension install --pin \"\$p\" $D \"\$r\"" \
+  "ck x \"\$(cat \"\$f\")\" \"run --env-file e $D restic\"" \
+  "# never write chmod -R go-w $D x" \
+  "case \$x in a) rm -f $D \"\$d\" ;; esac" \
+  "elif mv -f $D \"\$a\" \"\$b\"; then :; fi" \
+  "grep -em $D pat f" > "$r/tests/x_test.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a leading --, option arguments, quoted text and non-command words must pass the -- arm"
+
+# DOCUMENTED GAPS, pinned: the arm does not see these shapes today. A change that
+# starts catching one must update the arm's NOT-covered list and this
+# fixture together, so coverage never moves silently.
+r="$work/dd-gaps"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' \
+  "\$CHMOD -R go-w $D \"\$d\"" \
+  "sudo -n chmod -R go-w $D \"\$d\"" \
+  "find . -exec chmod go-w $D {} +" \
+  "chmod -R go-w \\" \
+  "  $D \"\$d\"" > "$r/tests/x_test.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a documented gap of the -- arm (\$CMD, sudo options, find -exec, a \\ continuation) is now caught - update the arm's NOT-covered list"
 
 echo "PASS: check_patterns_test ($pass assertions)"

@@ -280,7 +280,14 @@ ensure_submodules() {
 harden_plugin_perms() {
   local plugins="$DOTFILES/zsh/plugins"
   [ -d "$plugins" ] || return 0
-  chmod -R go-w -- "$plugins" 2>/dev/null \
+  # `--` MUST precede the mode: macOS's chmod parses options with BSD getopt,
+  # which stops at the first non-option (`go-w`), so a `--` after it is a FILE
+  # operand ("chmod: --: No such file or directory", exit 1) and every install
+  # printed the warning below although the tree was hardened. GNU getopt
+  # permutes argv and accepts either order; the macOS CI legs ran the bad order
+  # green because this function returns 0 whatever chmod does and no test read
+  # the warning. tests/plugin_perms_test.sh case 4 now does.
+  chmod -R -- go-w "$plugins" 2>/dev/null \
     || warn "could not remove group/other write from $plugins - compinit may flag it as insecure"
   return 0
 }
