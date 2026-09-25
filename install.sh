@@ -202,10 +202,6 @@ _migrate_legacy_history() {
 _cache_shell_inits() {
   local cache_dir="$xdg_cache/zsh" tool bin out tmp
   mkdir -p "$cache_dir" || { warn "could not create $cache_dir - shell integrations will be skipped"; return 0; }
-  # Nothing sources a devctl completion cache, and the loop below never writes
-  # one, so a host that still holds devctl-completion.zsh would keep an orphan
-  # that only --purge clears. Removed on every run; a no-op once it is gone.
-  rm -f -- "$cache_dir/devctl-completion.zsh"
   for tool in starship zoxide canga; do
     # A case, not a lookup table: bash 3.2 has no associative arrays. `set --`
     # carries the generator's argv, so the call below stays one quoted "$@".
