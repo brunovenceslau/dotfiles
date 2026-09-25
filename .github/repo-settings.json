@@ -1,0 +1,49 @@
+{
+  "$comment": "Expected GitHub settings for this repository. Change this file FIRST, then the live setting. tests/repo_settings_test.sh holds the docs and ci.yml to it; `make repo-settings-check` diffs it against the live repository. See docs/development.md, 'Repository settings'. Required checks pin no integration_id on purpose: the file records that none is set, so one appearing is drift.",
+  "repository": "brunovenceslau/dotfiles",
+  "repo": {
+    "default_branch": "main",
+    "allow_merge_commit": true,
+    "allow_squash_merge": false,
+    "allow_rebase_merge": false,
+    "delete_branch_on_merge": true,
+    "has_wiki": false
+  },
+  "private_vulnerability_reporting": {
+    "enabled": true
+  },
+  "actions_permissions": {
+    "sha_pinning_required": true
+  },
+  "fork_pr_contributor_approval": {
+    "approval_policy": "all_external_contributors"
+  },
+  "ruleset": {
+    "name": "main-protection",
+    "target": "branch",
+    "enforcement": "active",
+    "include": [
+      "refs/heads/main"
+    ],
+    "exclude": [],
+    "bypass_actors": [],
+    "rules": [
+      "deletion",
+      "non_fast_forward",
+      "required_signatures",
+      "required_status_checks"
+    ],
+    "required_status_checks": [
+      {
+        "context": "local-ci (macos-arm64)"
+      },
+      {
+        "context": "local-ci (macos-intel)"
+      }
+    ],
+    "status_check_policy": {
+      "strict_required_status_checks_policy": false,
+      "do_not_enforce_on_create": false
+    }
+  }
+}

@@ -36,5 +36,5 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [development.md](development.md) | A maintainer | The quality gates and what each proves, `STRICT=1`, CI, the hard rules, common changes such as adding a config or bumping a plugin pin, and lessons from past reviews. |
+| [development.md](development.md) | A maintainer | The quality gates and what each proves, `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config or bumping a plugin pin, and lessons from past reviews. |
 | [stacked-prs.md](stacked-prs.md) | A maintainer landing a large change | Why every PR targets `main`, the workflow, re-syncing after a merge, keeping signatures through a rebase. |

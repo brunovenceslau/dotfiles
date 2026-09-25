@@ -316,11 +316,12 @@ _link_home_tree() {
 }
 
 # bin/* -> ~/.local/bin/*, minus the repo's own quality gates.
-# The gates (check-patterns, secret-scan, smoke, startup-fork-gate) are
-#   developer tools that `make` runs from the checkout. They MUST NOT land on a
-#   user's PATH: their generic names (`smoke`) shadow other tools, and they locate
-#   the repo from `dirname "$0"`, so run through a ~/.local/bin link they fail with
-#   "does not look like the dotfiles repo". tests/link_engine_test.sh fails when a
+# The gates (check-patterns, secret-scan, smoke, startup-fork-gate,
+#   repo-settings-check) are developer tools that `make` runs from the
+#   checkout. They MUST NOT land on a user's PATH: their generic names (`smoke`)
+#   shadow other tools, and they locate the repo from `dirname "$0"`, so run
+#   through a ~/.local/bin link they fail with "does not look like the dotfiles
+#   repo". tests/link_engine_test.sh fails when a
 #   bin/ tool the Makefile calls is missing from this list, so a new gate cannot
 #   leak onto PATH by omission. A host upgrading from a release that linked them
 #   gets those links pruned as orphans (link_manifest_finalize), since they point
@@ -332,7 +333,7 @@ _link_bin_tree() {
     { [ -e "$f" ] || [ -L "$f" ]; } || continue    # admit dangling symlinks too
     base="${f##*/}"
     case "$base" in
-      check-patterns | secret-scan | smoke | startup-fork-gate) continue ;;   # dev gates
+      check-patterns | secret-scan | smoke | startup-fork-gate | repo-settings-check) continue ;;   # dev gates
     esac
     link "$f" "$HOME/.local/bin/$base" || rc=1
   done

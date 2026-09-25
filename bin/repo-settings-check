@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# repo-settings-check - diff the LIVE GitHub settings against
+# .github/repo-settings.json and print one row per setting.
+#
+# The ONLINE half of the settings-vs-docs drift gate (the offline half is
+# tests/repo_settings_test.sh, which holds the docs and ci.yml to the same file).
+# It reads the live settings with `gh api` under the OPERATOR's own auth, so it
+# is a maintainer-run `make repo-settings-check` and is deliberately NOT part of
+# `make local-ci`: a pull request from a fork cannot run these calls without
+# handing a token to untrusted code, and several endpoints need admin rights a
+# CI token does not have.
+#
+# FAILS CLOSED. A setting is reported `ok` only when the live value was READ and
+# equals the expected one. A failed call (no auth, 403, 404), a body that is not
+# the JSON shape the endpoint documents, or a field the API omitted
+# (bypass_actors and the merge settings are only returned to a caller with
+# enough rights) is `UNREADABLE`, never `ok`.
+#
+# The named ruleset alone does not prove what protects the default branch: a
+# second ruleset (repository or organization) or a classic branch protection
+# would add rules the file does not state. So the EFFECTIVE rules on the branch
+# are read too, every one must come from the expected ruleset, and classic
+# protection must be absent.
+#
+# Endpoints (checked against GitHub's REST docs, 2026-09-25), all GET:
+#   /repos/{o}/{r}
+#     https://docs.github.com/en/rest/repos/repos#get-a-repository
+#   /repos/{o}/{r}/private-vulnerability-reporting
+#     https://docs.github.com/en/rest/repos/repos#check-if-private-vulnerability-reporting-is-enabled-for-a-repository
+#   /repos/{o}/{r}/actions/permissions            (sha_pinning_required)
+#     https://docs.github.com/en/rest/actions/permissions#get-github-actions-permissions-for-a-repository
+#   /repos/{o}/{r}/actions/permissions/fork-pr-contributor-approval
+#     https://docs.github.com/en/rest/actions/permissions#get-fork-pr-contributor-approval-permissions-for-a-repository
+#     approval_policy enum: first_time_contributors_new_to_github |
+#     first_time_contributors | all_external_contributors
+#   /repos/{o}/{r}/rulesets and /repos/{o}/{r}/rulesets/{id}
+#     https://docs.github.com/en/rest/repos/rules#get-all-repository-rulesets
+#     https://docs.github.com/en/rest/repos/rules#get-a-repository-ruleset
+#     enforcement enum: disabled | active | evaluate; rules[].type values used
+#     here: required_signatures, required_status_checks, non_fast_forward,
+#     deletion; required_status_checks parameters: required_status_checks[]
+#     ({context, integration_id?}), strict_required_status_checks_policy,
+#     do_not_enforce_on_create
+#   /repos/{o}/{r}/rules/branches/{branch}   (effective rules, every source;
+#     each entry names its ruleset_id; paginated like the rulesets list)
+#     https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch
+#   /repos/{o}/{r}/branches/{branch}/protection   (classic protection; an
+#     unprotected branch answers 404 "Branch not protected")
+#     https://docs.github.com/en/rest/branches/branch-protection#get-branch-protection
+#
+# Usage: repo-settings-check [SETTINGS_FILE]   (default: the repo's own file)
+# Exit: 0 every row ok; 1 at least one DRIFT; 2 nothing drifted but a setting
+#       could not be read, or gh/jq/the settings file is unusable. No other
+#       code: every jq that reads a response is guarded (see `project`).
+#
+# bin/ is not the 3.2 surface, but a maintainer's Mac may resolve `env bash` to
+# /bin/bash 3.2, so this file stays 3.2-safe anyway (no associative arrays).
+
+# File-wide: every single-quoted $name here is a jq variable (--arg), never a
+# shell expansion.
+# shellcheck disable=SC2016
+
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+settings="${1:-$root/.github/repo-settings.json}"
+
+die() { echo "repo-settings-check: ERROR: $*" >&2; exit 2; }
+
+command -v jq >/dev/null 2>&1 || die "jq not installed (brew install jq)"
+command -v gh >/dev/null 2>&1 || die "gh not installed (brew install gh), and it must be authenticated as a repository admin"
+[ -r "$settings" ] || die "settings file not readable: $settings"
+jq -e 'type == "object"' "$settings" >/dev/null 2>&1 || die "settings file is not a JSON object: $settings"
+
+repo="$(jq -r '.repository // empty' "$settings")"
+[ -n "$repo" ] || die "settings file has no .repository"
+branch="$(jq -r '.repo.default_branch // empty' "$settings")"
+[ -n "$branch" ] || die "settings file has no .repo.default_branch"
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+n_ok=0 n_drift=0 n_unread=0
+rows=()
+BADSHAPE="unexpected response (not the documented JSON shape)"
+
+# row SETTING EXPECTED_JSON STATUS LIVE_TEXT
+row() {
+  rows+=("$3"$'\t'"$1"$'\t'"$2"$'\t'"$4")
+  case "$3" in
+    ok) n_ok=$((n_ok + 1)) ;;
+    DRIFT) n_drift=$((n_drift + 1)) ;;
+    *) n_unread=$((n_unread + 1)) ;;
+  esac
+}
+
+# compare SETTING EXPECTED_JSON LIVE_JSON - both compact JSON; an empty LIVE
+# means the field was absent from a successful response.
+compare() {
+  if [ -z "$3" ]; then
+    row "$1" "$2" UNREADABLE "field not returned (needs admin rights?)"
+  elif [ "$2" = "$3" ]; then
+    row "$1" "$2" ok "$3"
+  else
+    row "$1" "$2" DRIFT "$3"
+  fi
+}
+
+# expect FILTER - the expected value from the settings file, compact and sorted.
+expect() { jq -cS "$1" "$settings"; }
+
+# project FILE FILTER [jq args...] - apply FILTER to a RESPONSE, into $live.
+# Returns 1 when the body is not JSON or the filter errors on its shape, so
+# the caller reports UNREADABLE instead of jq aborting the run with rc 5.
+live=""
+project() {
+  local f="$1" filter="$2"
+  shift 2
+  live="$(jq -cS "$@" "$filter" "$f" 2>/dev/null)" || { live=""; return 1; }
+}
+
+# fetch PATH OUTFILE - GET through gh. On failure the first stderr line is left
+# in OUTFILE.err for the UNREADABLE rows. `gh api` exits non-zero on any
+# HTTP >= 400, so a 403/404 body is never mistaken for settings.
+fetch() {
+  if gh api "$1" >"$2" 2>"$2.err"; then
+    return 0
+  fi
+  local msg
+  msg="$(sed -n 1p "$2.err")"
+  printf '%s\n' "${msg:-gh api $1 failed}" >"$2.err"
+  return 1
+}
+
+# fetch_list PATH OUTFILE - GET a LIST endpoint across EVERY page. Both list
+# endpoints read here paginate (30 per page by default); reading only page 1
+# would silently miss a foreign ruleset or rule on a later page and report ok.
+# `gh api --paginate` follows the Link rel="next" chain and prints one JSON
+# array per page, which `jq -s add` joins. A page that is not an array (an
+# error body, a proxy page) makes the whole list UNREADABLE via OUTFILE.err.
+fetch_list() {
+  fetch_paginated "$1" "$2.pages" || { mv "$2.pages.err" "$2.err"; return 1; }
+  if ! jq -cs 'if length > 0 and all(type == "array") then add else error("shape") end' \
+      "$2.pages" >"$2" 2>/dev/null; then
+    printf '%s\n' "$BADSHAPE" >"$2.err"
+    return 1
+  fi
+}
+fetch_paginated() {
+  if gh api --paginate "$1" >"$2" 2>"$2.err"; then
+    return 0
+  fi
+  local msg
+  msg="$(sed -n 1p "$2.err")"
+  printf '%s\n' "${msg:-gh api $1 failed}" >"$2.err"
+  return 1
+}
+
+# check_section SECTION API_PATH - every key under .SECTION in the settings file
+# is compared with the same key in the endpoint's response, so a new expected
+# setting is a one-line JSON change, not a code change.
+check_section() {
+  local section="$1" path="$2" out="$tmp/$1.json" key exp err="" keys
+  keys="$(jq -r --arg s "$section" '.[$s] // {} | keys_unsorted[]' "$settings")"
+  [ -n "$keys" ] || return 0
+  fetch "$path" "$out" || err="$(cat "$out.err")"
+  while IFS= read -r key; do
+    exp="$(jq -cS --arg s "$section" --arg k "$key" '.[$s][$k]' "$settings")"
+    if [ -n "$err" ]; then
+      row "$section.$key" "$exp" UNREADABLE "$err"
+    elif ! project "$out" 'if type != "object" then error("shape") elif has($k) and .[$k] != null then .[$k] else empty end' --arg k "$key"; then
+      row "$section.$key" "$exp" UNREADABLE "$BADSHAPE"
+    else
+      compare "$section.$key" "$exp" "$live"
+    fi
+  done <<<"$keys"
+}
+
+check_section repo "repos/$repo"
+check_section private_vulnerability_reporting "repos/$repo/private-vulnerability-reporting"
+check_section actions_permissions "repos/$repo/actions/permissions"
+check_section fork_pr_contributor_approval "repos/$repo/actions/permissions/fork-pr-contributor-approval"
+
+# RS_FIELDS - the ruleset fields compared, each paired (by `rs_proj`) with its
+# projection of the full ruleset object. Arrays are compared as sorted sets,
+# since neither rule order nor check order carries meaning.
+RS_FIELDS="target enforcement include exclude bypass_actors rules required_status_checks status_check_policy"
+# The status-check rule as one object; `error` when there is not exactly one.
+RSC='[.rules[] | select(.type == "required_status_checks")] | if length == 1 then .[0].parameters else error("rsc") end'
+rs_proj() {
+  case "$1" in
+    target) echo '.target' ;;
+    enforcement) echo '.enforcement' ;;
+    include) echo '.conditions.ref_name.include // empty | sort' ;;
+    exclude) echo '.conditions.ref_name.exclude // empty | sort' ;;
+    # Absent bypass_actors stays absent (empty), so it reads as UNREADABLE.
+    bypass_actors) echo '.bypass_actors // empty | sort_by(.actor_type, .actor_id)' ;;
+    rules) echo '[.rules[].type] | unique' ;;
+    # Whole check objects, so an integration_id appearing on a check is drift
+    # even though the file pins none.
+    required_status_checks) echo "$RSC | .required_status_checks | sort_by(.context)" ;;
+    status_check_policy) echo "$RSC | {strict_required_status_checks_policy, do_not_enforce_on_create}" ;;
+  esac
+}
+rs_expect() { expect ".ruleset.$1 | if type == \"array\" then sort else . end"; }
+rs_expect_checks() { expect '.ruleset.required_status_checks | sort_by(.context)'; }
+rs_exp() { if [ "$1" = required_status_checks ]; then rs_expect_checks; else rs_expect "$1"; fi; }
+
+ruleset_id=""
+check_ruleset() {
+  local name f err id n
+  name="$(jq -r '.ruleset.name // empty' "$settings")"
+  [ -n "$name" ] || return 0
+
+  if ! fetch_list "repos/$repo/rulesets?per_page=100" "$tmp/rulesets.json"; then
+    err="$(cat "$tmp/rulesets.json.err")"
+    for f in $RS_FIELDS; do row "ruleset.$f" "$(rs_exp "$f")" UNREADABLE "$err"; done
+    return 0
+  fi
+  if ! project "$tmp/rulesets.json" '[.[] | select(.name == $n) | .id]' --arg n "$name"; then
+    row "ruleset.name" "\"$name\"" UNREADABLE "$BADSHAPE"
+    return 0
+  fi
+  n="$(jq 'length' <<<"$live")"
+  if [ "$n" != 1 ]; then
+    # Zero is drift (the ruleset is gone or renamed); more than one is
+    # ambiguous, and a guess could vouch for the wrong ruleset.
+    if [ "$n" = 0 ]; then
+      row "ruleset.name" "\"$name\"" DRIFT "no ruleset named '$name'"
+    else
+      row "ruleset.name" "\"$name\"" UNREADABLE "$n rulesets named '$name'"
+    fi
+    return 0
+  fi
+  id="$(jq -r '.[0]' <<<"$live")"
+  if ! fetch "repos/$repo/rulesets/$id" "$tmp/ruleset.json"; then
+    err="$(cat "$tmp/ruleset.json.err")"
+    for f in $RS_FIELDS; do row "ruleset.$f" "$(rs_exp "$f")" UNREADABLE "$err"; done
+    return 0
+  fi
+  ruleset_id="$id"
+  row "ruleset.name" "\"$name\"" ok "\"$name\" (id $id)"
+  for f in $RS_FIELDS; do
+    if project "$tmp/ruleset.json" "$(rs_proj "$f")"; then
+      compare "ruleset.$f" "$(rs_exp "$f")" "$live"
+    else
+      row "ruleset.$f" "$(rs_exp "$f")" UNREADABLE "$BADSHAPE"
+    fi
+  done
+}
+check_ruleset
+
+# check_branch - what ACTUALLY applies to the default branch.
+check_branch() {
+  local out="$tmp/branch_rules.json" exp_src exp_types err
+  exp_types="$(rs_expect rules)"
+  exp_src="[\"ruleset $(jq -r '.ruleset.name' "$settings")\"]"
+  if ! fetch_list "repos/$repo/rules/branches/$branch?per_page=100" "$out"; then
+    err="$(cat "$out.err")"
+    row "branch.$branch.rule_sources" "$exp_src" UNREADABLE "$err"
+    row "branch.$branch.rule_types" "$exp_types" UNREADABLE "$err"
+  elif [ -z "$ruleset_id" ]; then
+    # Without the expected ruleset's id there is nothing to attribute to.
+    row "branch.$branch.rule_sources" "$exp_src" UNREADABLE "expected ruleset not read (see ruleset rows)"
+    if project "$out" '[.[].type] | unique'; then
+      compare "branch.$branch.rule_types" "$exp_types" "$live"
+    else
+      row "branch.$branch.rule_types" "$exp_types" UNREADABLE "$BADSHAPE"
+    fi
+  else
+    # Every effective rule must come from the expected ruleset: any other
+    # ruleset_id is a second ruleset (repo or org) acting on the branch.
+    if project "$out" '[.[] | .ruleset_id | if . == $id then "ruleset \($name)" else "ruleset id \(.)" end] | unique' \
+        --argjson id "$ruleset_id" --arg name "$(jq -r '.ruleset.name' "$settings")"; then
+      compare "branch.$branch.rule_sources" "$exp_src" "${live:-[]}"
+    else
+      row "branch.$branch.rule_sources" "$exp_src" UNREADABLE "$BADSHAPE"
+    fi
+    if project "$out" '[.[].type] | unique'; then
+      compare "branch.$branch.rule_types" "$exp_types" "$live"
+    else
+      row "branch.$branch.rule_types" "$exp_types" UNREADABLE "$BADSHAPE"
+    fi
+  fi
+
+  # Classic protection must be ABSENT, and only the documented 404 message
+  # proves absence: a bare 404 is also what a caller without rights gets.
+  out="$tmp/protection.json"
+  if fetch "repos/$repo/branches/$branch/protection" "$out"; then
+    row "branch.$branch.classic_protection" '"none"' DRIFT "classic branch protection is configured"
+  else
+    err="$(cat "$out.err")"
+    case "$err" in
+      *"Branch not protected"*"404"*) row "branch.$branch.classic_protection" '"none"' ok '"none"' ;;
+      *) row "branch.$branch.classic_protection" '"none"' UNREADABLE "$err" ;;
+    esac
+  fi
+}
+check_branch
+
+echo "repo-settings-check: $repo vs ${settings#"$root"/}"
+{
+  printf 'STATUS\tSETTING\tEXPECTED\tLIVE\n'
+  # Length guard: bash 3.2 treats an empty "${rows[@]}" as unbound under set -u.
+  [ "${#rows[@]}" -eq 0 ] || printf '%s\n' "${rows[@]}"
+} | column -t -s $'\t'
+echo "repo-settings-check: $n_ok ok, $n_drift drift, $n_unread unreadable"
+
+if [ "$n_drift" -gt 0 ]; then
+  echo "repo-settings-check: FAIL - the live settings drifted from the file; fix the setting, or change the file and the docs together" >&2
+  exit 1
+fi
+if [ "$n_unread" -gt 0 ]; then
+  echo "repo-settings-check: FAIL - $n_unread setting(s) could not be read, so nothing is vouched for them; authenticate gh as a repository admin (gh auth login) and re-run" >&2
+  exit 2
+fi
+echo "repo-settings-check: PASS"

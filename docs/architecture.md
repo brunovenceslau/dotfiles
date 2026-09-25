@@ -32,7 +32,7 @@ Four constraints shape every decision here.
 ```
 ~/.config/dotfiles
 ├── install.sh          bootstrap: install | link | packages | upgrade | uninstall
-├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci
+├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci, repo-settings-check
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
@@ -43,6 +43,7 @@ Four constraints shape every decision here.
 │   ├── secret-scan     secret-shaped content scanner (dev only)
 │   ├── smoke           scratch-home install, idempotency and no-trace proof (dev only)
 │   ├── startup-fork-gate   proves the startup path invokes no external binary (dev only)
+│   ├── repo-settings-check diffs the live GitHub settings against .github/repo-settings.json (dev only)
 │   └── tmux-status     dynamic tmux status segments, linked to ~/.local/bin
 ├── zsh/
 │   ├── zshenv          linked to ~/.zshenv, the only framework file in $HOME
@@ -87,7 +88,7 @@ tools are never linked.
 | `config/gnupg/` | Only `gpg.conf` and `gpg-agent.conf` are linked into `~/.gnupg`. The directory is created with mode 0700 if the framework creates it. | `~/.gnupg` holds live secret keyrings. It must never become a symlink into the repository. |
 | `config/git/` | `~/.config/git/config` is created as a real local file that `[include]`s the tracked config by absolute path and `config.local` by relative path. `config/git/ignore` is linked normally. | `~/.config/git/config` is the path `git config --global` writes to. If it were a symlink into the repository, every global write would land in the tracked, published config. |
 | `config/rclone/`, `config/restic/` | Never linked. | They hold secrets. The repository keeps only a README and `*.example` templates. See [backup and restore](backup-restore.md). |
-| `bin/check-patterns`, `bin/secret-scan`, `bin/smoke`, `bin/startup-fork-gate` | Never linked. `make` runs them from the checkout. | They are the repository's own quality gates. Linked, their generic names (`smoke`) would shadow other tools on a user's `PATH`, and they locate the repository from their own path, so they fail when run through a link. `tests/link_engine_test.sh` fails when a `bin/` tool the Makefile calls is missing from this list. A host that linked them under an older release gets those links pruned as orphans on its next clean relink. |
+| `bin/check-patterns`, `bin/secret-scan`, `bin/smoke`, `bin/startup-fork-gate`, `bin/repo-settings-check` | Never linked. `make` runs them from the checkout. | They are the repository's own quality gates. Linked, their generic names (`smoke`) would shadow other tools on a user's `PATH`, and they locate the repository from their own path, so they fail when run through a link. `tests/link_engine_test.sh` fails when a `bin/` tool the Makefile calls is missing from this list. A host that linked them under an older release gets those links pruned as orphans on its next clean relink. |
 
 `~/.config/git/config` is deliberately not recorded in the manifest, because
 uninstall must not delete a machine-local file. `~/.config/git/ignore` is

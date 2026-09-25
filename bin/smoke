@@ -205,7 +205,7 @@ run_installer >/dev/null || fail "first install.sh exited nonzero"
 # not just the two core links above. tmux-status is the runtime tool; the dev
 # gates (this script among them) must stay OFF the user's PATH.
 [ -L "$HOME/.local/bin/tmux-status" ] || fail "the bin convention did not link ~/.local/bin/tmux-status (link_tree no-op?)"
-for g in check-patterns secret-scan smoke startup-fork-gate; do
+for g in check-patterns secret-scan smoke startup-fork-gate repo-settings-check; do
   { [ -e "$HOME/.local/bin/$g" ] || [ -L "$HOME/.local/bin/$g" ]; } \
     && fail "the dev gate $g was linked onto the user's PATH (~/.local/bin/$g)"
 done

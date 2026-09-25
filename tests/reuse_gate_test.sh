@@ -88,7 +88,7 @@ cmp -s COPYING LICENSES/GPL-3.0-or-later.txt \
   || fail "COPYING differs from LICENSES/GPL-3.0-or-later.txt"
 ok "the root COPYING is byte-identical to LICENSES/GPL-3.0-or-later.txt"
 
-# --- Facts: the two JSON files are declared in REUSE.toml ----------------------
+# --- Facts: every tracked JSON file is declared in REUSE.toml -----------------
 # JSON has no comment syntax, so these cannot carry a header; REUSE.toml is the
 # only place that indirection is allowed, and a new JSON file that forgets it
 # would fail `reuse lint` only where reuse is installed.

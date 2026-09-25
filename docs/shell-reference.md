@@ -208,7 +208,7 @@ always wins.
 
 | Command | Where it comes from |
 | --- | --- |
-| `tmux-status` | `bin/tmux-status`, linked to `~/.local/bin`. The tmux status line runs it; you rarely call it yourself. It is the only `bin/` tool the installer links: `check-patterns`, `secret-scan`, `smoke` and `startup-fork-gate` are repository gates that `make` runs from the checkout. |
+| `tmux-status` | `bin/tmux-status`, linked to `~/.local/bin`. The tmux status line runs it; you rarely call it yourself. It is the only `bin/` tool the installer links: `check-patterns`, `secret-scan`, `smoke`, `startup-fork-gate` and `repo-settings-check` are repository gates that `make` runs from the checkout. |
 | `z <dir>` | zoxide's jump command, from the cached `zoxide init zsh`. Present only when `zoxide` was on `PATH` at install, link or upgrade time. |
 | `is-arm64`, `is-amd64` | Shell functions from `lib/os.sh`: exit 0 on the matching CPU architecture. For a host's own `.local` files. |
 

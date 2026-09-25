@@ -127,6 +127,17 @@ Actions setting requires maintainer approval before any workflow runs on a pull
 request from an outside collaborator (anyone without write access). Your checks
 stay queued until then. That is expected, not a fault in your branch.
 
+### For the maintainer: changing a repository setting
+
+The ruleset, merge methods and Actions settings this page describes are recorded
+in `.github/repo-settings.json`. To change one, update `.github/repo-settings.json`
+first, together with every doc that describes the setting, in one pull request.
+`tests/repo_settings_test.sh` fails that pull request if a doc and the file
+disagree. Once it merges, change the live setting and run
+`make repo-settings-check`, which reads the live settings with your `gh` login
+and exits non-zero until they match the file. See
+[development, Repository settings](docs/development.md#repository-settings).
+
 ## Ask before you build any of these
 
 These surfaces are not settled by a good patch. Open an issue first and get an

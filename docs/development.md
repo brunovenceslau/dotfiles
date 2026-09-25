@@ -64,15 +64,16 @@ parity by construction. Run `make local-ci` before every push.
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
 | `make local-ci` | lint, test, reuse, gitleaks, secret-scan, smoke, forkgate | Everything CI runs. |
+| `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
 `reuse lint` walks what git tracks and does not descend into the pinned plugin
 submodules, so their licences are not checked here. They are recorded in
 [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) instead, with the commit
 each one is pinned to.
 
-Two files cannot carry a header: `config/nvim/lazy-lock.json` and
-`.claude/settings.json`, because JSON has no comment syntax. `REUSE.toml`
-declares them, and `tests/reuse_gate_test.sh` fails if a new tracked `.json`
+Three files cannot carry a header: `config/nvim/lazy-lock.json`,
+`.claude/settings.json` and `.github/repo-settings.json`, because JSON has no
+comment syntax. `REUSE.toml` declares them, and `tests/reuse_gate_test.sh` fails if a new tracked `.json`
 file is not declared there. Everything else states its licence in its own
 comment syntax. A block copied from an upstream project is bracketed by
 `SPDX-SnippetBegin` and `SPDX-SnippetEnd` and repeats that upstream's licence
@@ -195,6 +196,44 @@ tools CI installs log their versions in the "Gate tool versions" step, and
 Add a new gate as a `make` target first, wire it into `make local-ci`, and only
 then expect CI to run it. Do not put gate logic in YAML.
 
+### Repository settings
+
+The GitHub settings the docs rely on are recorded in
+`.github/repo-settings.json`: the default branch, the `main` ruleset (signed
+commits, the required status checks and their policy, no force push, no
+deletion, no bypass actors), merge commits as
+the only merge method, `delete_branch_on_merge`, the wiki off, private
+vulnerability reporting on, SHA pinning required for actions, and approval
+required for workflow runs from every outside contributor. The file is JSON so
+that both halves of the check below read it with `jq`, which the gates already
+require, and compare it directly with the JSON `gh api` returns.
+
+Two checks hold the file to the rest of the world:
+
+| Check | Runs where | Fails when |
+| --- | --- | --- |
+| `tests/repo_settings_test.sh` | `make test`, so every pull request, forks included. No network, no token. | A doc sentence that claims a setting is reworded or disagrees with the file, a doc mentions these settings without an anchor in the test, a doc quotes a check name the file does not require, or the required checks differ from the job names `.github/workflows/ci.yml` generates. |
+| `make repo-settings-check` | A maintainer's machine, on demand. | Any live setting differs from the file (exit 1), or a setting could not be read (exit 2). |
+
+`make repo-settings-check` prints one row per setting with its status, the
+expected value and the live one. Beyond the named ruleset, it reads the rules
+that actually apply to `main` from every source and requires each one to come
+from that ruleset, and it requires classic branch protection to be absent, so a
+second ruleset or a classic rule cannot add enforcement the file does not state. A setting is `ok` only when its live value was
+read and matches. A failed call or a field the API left out, such as
+`bypass_actors` for a caller without admin rights, is `UNREADABLE` and fails the
+run, so a partial read never passes. It needs `gh` authenticated as a repository
+admin and `jq`, and it only issues `GET` requests.
+
+It is not a pull request gate on purpose. Reading these settings needs an
+authenticated token, and a workflow that runs on a pull request from a fork
+cannot hold one without exposing it to the fork's code. Several endpoints also
+need admin rights that the workflow token does not have.
+
+To change a setting, update `.github/repo-settings.json` and the docs in one
+pull request, change the live setting after it merges, and run
+`make repo-settings-check` until it passes.
+
 ### When a runner image is retired
 
 Naming `macos-15-intel` explicitly is what keeps the Intel leg honest, and it
@@ -214,7 +253,12 @@ the success path:
    matrix produces: `local-ci (${{ matrix.name }})`.
 2. Open and merge the pull request that renames the image to the current Intel
    runner. The arm64 leg still gates it.
-3. Add the required check back under whatever name the renamed leg now reports.
+   The same pull request renames the check in `.github/repo-settings.json`,
+   because `tests/repo_settings_test.sh` holds the file's required checks to the
+   job names `ci.yml` generates.
+3. Add the required check back under whatever name the renamed leg now reports,
+   and run `make repo-settings-check`. Between step 1 and this step it reports
+   the missing check as drift, which is expected.
 
 Do not solve it by deleting the Intel leg, and do not solve it by making the
 check non-required. The point of the explicit image name is that losing Intel
@@ -381,10 +425,13 @@ written.
 A static gate cannot fully close this class on its own. Reading a
 repository's live settings needs `gh api repos/<owner>/<repo>` calls
 authenticated against GitHub, and a pull request opened from a fork cannot run
-those calls without exposing a token to untrusted code. The proposed fix, not
-yet built, is a `make` target that fetches the live settings and diffs them
-against what the docs claim, run by a maintainer or on a schedule rather than
-as a pull request gate.
+those calls without exposing a token to untrusted code.
+
+This class is now closed in two halves around one file,
+`.github/repo-settings.json`. `tests/repo_settings_test.sh` holds the docs and
+the CI check names to the file on every pull request, offline.
+`make repo-settings-check` diffs the file against the live repository and is
+run by a maintainer, not by CI. See [Repository settings](#repository-settings).
 
 ### Docs drifted from what the code does
 
