@@ -25,6 +25,28 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# assert_ok_output LABEL OUTPUT - the assert.zsh run must end in ASSERT-OK; any
+# line before it must be a "SKIP: " notice (a missing-tool round-trip, reported
+# on stdout by convention), never anything else - that keeps this assertion as
+# strict about UNEXPECTED stdout as the plain equality check it replaces, while
+# tolerating the graceful skip path.
+assert_ok_output() {
+  local label="$1" out="$2" last other line
+  last="$(printf '%s\n' "$out" | tail -n1)"
+  [ "$last" = "ASSERT-OK" ] || fail "$label run did not reach ASSERT-OK (got: $out)"
+  other="$(printf '%s\n' "$out" | sed '$d')"
+  if [ -n "$other" ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "SKIP: "*) ;;
+        *) fail "$label run: unexpected stdout line: $line" ;;
+      esac
+    done <<EOF
+$other
+EOF
+  fi
+}
+
 # zsh is required to source zsh files; `make lint` already depends on it. Skip
 # gracefully when it is absent locally, but fail closed under CI (STRICT=1).
 if ! command -v zsh >/dev/null 2>&1; then
@@ -159,20 +181,49 @@ typeset -A packers=(
   p.xz        'xz    -c p > p.xz'
   arc.zip     'zip -q arc.zip p'
 )
-local have_tools=1 tool arc
-for tool in tar gzip gunzip bzip2 bunzip2 xz unxz zip unzip; do
-  if (( ! $+commands[$tool] )); then
-    [[ -n ${STRICT-} ]] && fail "extract round-trips: $tool not installed and STRICT=1"
-    print -u2 "SKIP: extract round-trips ($tool not installed)"; have_tools=0; break
-  fi
-done
-if (( have_tools )); then
-  for arc in ${(k)packers}; do
-    ( d="$FUNC_TMP/x-$1-$arc"; mkdir -p "$d" && cd "$d" && print "payload $arc" > p \
-        && eval "$packers[$arc]" && rm p && extract "$arc" >/dev/null \
-        && [[ $(<p) == "payload $arc" ]] ) || fail "extract $arc round-trip failed"
+# Tool(s) each archive's round-trip actually shells out to: the packer command
+# above, plus extract()'s own dispatch (zsh/functions.zsh). Measured, not
+# assumed: this tar shells out to gzip/bzip2/xz (as a *child process*, same
+# binary name for both -c and -x) for -z/-j/-J rather than linking the
+# compression libraries in-process, so each tar.* suffix needs tar AND its
+# compressor; only .gz/.bz2/.xz/.zip name the (de)compressor directly.
+typeset -A pack_tools=(
+  arc.tar     'tar'
+  arc.tar.gz  'tar gzip'
+  arc.tgz     'tar gzip'
+  arc.tar.bz2 'tar bzip2'
+  arc.tbz2    'tar bzip2'
+  arc.tar.xz  'tar xz'
+  arc.txz     'tar xz'
+  p.gz        'gzip gunzip'
+  p.bz2       'bzip2 bunzip2'
+  p.xz        'xz unxz'
+  arc.zip     'zip unzip'
+)
+# Per-format gate, not one all-or-nothing gate: a single missing tool (e.g. no
+# zip on a minimal host) must only skip the format(s) that need it, so every
+# other format still proves its round-trip. STRICT=1 still hard-fails, naming
+# the missing tool, on the first format it blocks. The SKIP goes to STDOUT (the
+# file's convention - see the zsh-not-installed SKIP above) and never stderr:
+# this whole harness is later asserted to write nothing to stderr, so a SKIP on
+# stderr silently turns the graceful non-STRICT path into a FAIL.
+local arc tool missing
+for arc in ${(k)packers}; do
+  missing=()
+  for tool in ${=pack_tools[$arc]}; do
+    (( $+commands[$tool] )) || missing+=("$tool")
   done
-fi
+  if (( ${#missing} )); then
+    if [[ -n ${STRICT-} ]]; then
+      fail "extract round-trips: $missing[1] not installed and STRICT=1"
+    fi
+    print "SKIP: extract round-trips ($arc: ${(j:, :)missing} not installed)"
+    continue
+  fi
+  ( d="$FUNC_TMP/x-$1-$arc"; mkdir -p "$d" && cd "$d" && print "payload $arc" > p \
+      && eval "$packers[$arc]" && rm p && extract "$arc" >/dev/null \
+      && [[ $(<p) == "payload $arc" ]] ) || fail "extract $arc round-trip failed"
+done
 [[ $functions[extract] == *'7z x'* ]] || fail "extract lost its .7z dispatch"
 assert_err 2 'extract on a missing file'  extract "$FUNC_TMP/does-not-exist.zip"
 : > "$FUNC_TMP/mystery.qux"
@@ -258,7 +309,7 @@ ZSH
 # --- Run 1: no `.local` present - must load cleanly and emit nothing on stderr -
 errlog="$work/nolocal.err"
 out="$(zsh -f "$work/assert.zsh" nolocal 2>"$errlog")" || fail "assert run (nolocal) exited non-zero: $(cat "$errlog")"
-[ "$out" = "ASSERT-OK" ] || fail "nolocal run did not reach ASSERT-OK (got: $out)"
+assert_ok_output nolocal "$out"
 [ -s "$errlog" ] && fail "sourcing with no .local wrote to stderr: $(cat "$errlog")"
 
 # --- Run 2: create the `.local` pair - its definitions must take effect -------
@@ -270,7 +321,7 @@ out="$(zsh -f "$work/assert.zsh" nolocal 2>"$errlog")" || fail "assert run (nolo
 printf '__local_marker_fn() { : }\n' > "$ZDOTDIR/functions.zsh.local"
 out="$(zsh -f "$work/assert.zsh" withlocal 2>"$work/withlocal.err")" \
   || fail "assert run (withlocal) exited non-zero: $(cat "$work/withlocal.err")"
-[ "$out" = "ASSERT-OK" ] || fail "withlocal run did not reach ASSERT-OK (got: $out)"
+assert_ok_output withlocal "$out"
 
 # --- kubectl helpers: defined only with kubectl; kc resolves aliases ----------
 # A stub kubectl records its argv. KUBE_CONTEXT_ALIASES maps a short name to a
