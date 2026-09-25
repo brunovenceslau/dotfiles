@@ -7,8 +7,11 @@
 #
 # Unit tests for zsh/aliases.zsh + zsh/functions.zsh.
 # Covers: the alias/function set loads (acceptance: `type mkcd; alias gst`),
-# gpf is the --force-with-lease form, mkcd/up behave, and the
-# `.local` pair is honoured when present and silent when absent.
+# gpf is the --force-with-lease form, mkcd/up behave, extract round-trips every
+# format macOS can pack, the grh family stashes before it resets, go_test keeps
+# go's exit status, the kubectl helpers resolve KUBE_CONTEXT_ALIASES and exist
+# only with kubectl, and the `.local` pair is honoured when present and silent
+# when absent.
 #
 # The zsh files are exercised in an isolated `zsh -f` (NO_RCS: the tester's real
 # ~/.zshenv/.zshrc never load) inside an mktemp workspace, like the other tooling
@@ -30,6 +33,7 @@ if ! command -v zsh >/dev/null 2>&1; then
   exit 0
 fi
 
+zsh_bin="$(command -v zsh)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/aliases_functions_test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
@@ -138,10 +142,38 @@ if (( $+commands[gzip] )); then
   ( cd "$FUNC_TMP" && extract -dash.gz ) || fail "extract failed on a leading-dash archive"
   [[ -f "$FUNC_TMP/-dash" && ! -f "$FUNC_TMP/-dash.gz" ]] || fail "extract did not unpack the leading-dash archive"
 fi
-if (( $+commands[tar] )); then
-  ( cd "$FUNC_TMP" && print hi > tarme && tar -cf arch.tar tarme && rm tarme \
-      && extract arch.tar && [[ -f tarme ]] ) || fail "extract .tar round-trip failed"
+# Every documented format whose tools ship with macOS round-trips: pack a file
+# `p`, remove it, extract the archive, and require the payload back. The tools
+# are in the base system of both CI legs, so a missing one fails under STRICT;
+# 7z is not, so its dispatch line is only checked statically.
+typeset -A packers=(
+  arc.tar     'tar -cf  arc.tar     p'
+  arc.tar.gz  'tar -czf arc.tar.gz  p'
+  arc.tgz     'tar -czf arc.tgz     p'
+  arc.tar.bz2 'tar -cjf arc.tar.bz2 p'
+  arc.tbz2    'tar -cjf arc.tbz2    p'
+  arc.tar.xz  'tar -cJf arc.tar.xz  p'
+  arc.txz     'tar -cJf arc.txz     p'
+  p.gz        'gzip  -c p > p.gz'
+  p.bz2       'bzip2 -c p > p.bz2'
+  p.xz        'xz    -c p > p.xz'
+  arc.zip     'zip -q arc.zip p'
+)
+local have_tools=1 tool arc
+for tool in tar gzip gunzip bzip2 bunzip2 xz unxz zip unzip; do
+  if (( ! $+commands[$tool] )); then
+    [[ -n ${STRICT-} ]] && fail "extract round-trips: $tool not installed and STRICT=1"
+    print -u2 "SKIP: extract round-trips ($tool not installed)"; have_tools=0; break
+  fi
+done
+if (( have_tools )); then
+  for arc in ${(k)packers}; do
+    ( d="$FUNC_TMP/x-$1-$arc"; mkdir -p "$d" && cd "$d" && print "payload $arc" > p \
+        && eval "$packers[$arc]" && rm p && extract "$arc" >/dev/null \
+        && [[ $(<p) == "payload $arc" ]] ) || fail "extract $arc round-trip failed"
+  done
 fi
+[[ $functions[extract] == *'7z x'* ]] || fail "extract lost its .7z dispatch"
 assert_err 2 'extract on a missing file'  extract "$FUNC_TMP/does-not-exist.zip"
 : > "$FUNC_TMP/mystery.qux"
 assert_err 1 'extract on an unknown type' extract "$FUNC_TMP/mystery.qux"
@@ -169,6 +201,43 @@ if (( $+commands[git] )); then
   (( grc == 1 )) || fail "gcd outside a git repo: exit $grc, wanted 1"
   [[ -n $gerr ]] || fail "gcd outside a git repo: nothing on stderr"
 fi
+
+# --- grh family: stash (with untracked files) BEFORE the hard reset ----------
+# The documented data-safety property: a grh* reset is always recoverable from
+# `git stash list`. Pinned statically (the ordering) and behaviourally (a dirty
+# tracked file and an untracked file both survive in the stash).
+[[ $aliases[gss] == 'git stash save' ]] || fail "gss is not 'git stash save': $aliases[gss]"
+[[ $aliases[gssu] == 'gss -u' ]]        || fail "gssu no longer stashes untracked files: $aliases[gssu]"
+local ga
+for ga in grh grhom grhum grhomaster grhumaster; do
+  [[ $aliases[$ga] == 'gssu && git reset --hard'* ]] \
+    || fail "$ga no longer stashes before resetting: $aliases[$ga]"
+done
+if (( $+commands[git] )); then
+  grepo="$FUNC_TMP/grhrepo-$1"; mkdir -p "$grepo"
+  (
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid \
+      GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+    cd "$grepo" && git init -q && print clean > tracked && git add tracked \
+      && git commit -qm init || exit 10
+    print dirty > tracked; print new > untracked
+    eval grh >/dev/null 2>&1 || exit 11
+    [[ $(<tracked) == clean && ! -e untracked ]] || exit 12
+    [[ $(git stash list | wc -l) -eq 1 ]] || exit 13
+    git stash pop -q >/dev/null 2>&1 || exit 14
+    [[ $(<tracked) == dirty && $(<untracked) == new ]] || exit 15
+  ) || fail "grh did not stash the dirty and untracked files before resetting (step $?)"
+fi
+
+# --- go_test: preserves go's exit status through the colouring pipe -----------
+mkdir -p "$FUNC_TMP/gobin"
+print -r -- '#!/bin/sh
+echo "--- FAIL: TestStub"; echo FAIL; exit 3' > "$FUNC_TMP/gobin/go"
+chmod u+x "$FUNC_TMP/gobin/go"
+gout=$( path=("$FUNC_TMP/gobin" $path); rehash; go_test ./... ); grc=$?
+(( grc == 3 )) || fail "go_test did not preserve go's exit status: got $grc, want 3"
+[[ $gout == *'TestStub'* ]] || fail "go_test lost go's output: $gout"
 
 # --- .local pair honoured when present, silent when absent -----
 case $1 in
@@ -202,5 +271,35 @@ printf '__local_marker_fn() { : }\n' > "$ZDOTDIR/functions.zsh.local"
 out="$(zsh -f "$work/assert.zsh" withlocal 2>"$work/withlocal.err")" \
   || fail "assert run (withlocal) exited non-zero: $(cat "$work/withlocal.err")"
 [ "$out" = "ASSERT-OK" ] || fail "withlocal run did not reach ASSERT-OK (got: $out)"
+
+# --- kubectl helpers: defined only with kubectl; kc resolves aliases ----------
+# A stub kubectl records its argv. KUBE_CONTEXT_ALIASES maps a short name to a
+# context, and an unmapped argument passes through unchanged. Without kubectl on
+# PATH (an empty PATH dir, since a CI image may ship a real one) nothing k* exists.
+kbin="$work/kbin"; mkdir -p "$kbin"; klog="$work/kubectl.log"
+printf '#!/bin/sh\necho "$*" >> "%s"\n' "$klog" > "$kbin/kubectl"; chmod u+x "$kbin/kubectl"
+kout="$(PATH="$kbin:/usr/bin:/bin" "$zsh_bin" -f -c '
+  source "$REPO/zsh/functions.zsh"
+  (( $+aliases[k] && $+functions[kc] && $+functions[kn] && $+functions[kcn] )) || { print missing; exit 1 }
+  KUBE_CONTEXT_ALIASES[short]=team-prod-eu
+  kc short && kc literal-ctx && print ok' 2>&1)" || fail "kubectl helpers: $kout"
+[ "$kout" = ok ] || fail "kubectl helpers: $kout"
+[ "$(cat "$klog")" = "config use-context team-prod-eu
+config use-context literal-ctx" ] || fail "kc did not resolve through KUBE_CONTEXT_ALIASES: $(cat "$klog")"
+mkdir -p "$work/emptybin"
+kout="$(PATH="$work/emptybin" "$zsh_bin" -f -c 'source "$REPO/zsh/functions.zsh"
+  print "${+aliases[k]}${+functions[kc]}${+functions[kn]}${+functions[kcn]}${+KUBE_CONTEXT_ALIASES}"')"
+[ "$kout" = "00000" ] || fail "kubectl helpers were defined without kubectl on PATH ($kout)"
+
+# --- ip / tailscale never shadow a real tool on PATH -----------------------------
+# `ip` is the public-IP-via-dig alias only while no real `ip` (iproute2mac) exists;
+# `tailscale` points at the GUI app's CLI only while no `tailscale` is on PATH.
+nbin="$work/nbin"; mkdir -p "$nbin"
+for t in dig ip tailscale; do printf '#!/bin/sh\n' > "$nbin/$t"; chmod u+x "$nbin/$t"; done
+nout="$(PATH="$nbin" ZDOTDIR="$work/emptybin" "$zsh_bin" -f -c 'source "$REPO/zsh/aliases.zsh"; print "${+aliases[ip]}${+aliases[tailscale]}"')"
+[ "$nout" = "00" ] || fail "ip/tailscale alias shadows a real binary on PATH ($nout)"
+rm "$nbin/ip"
+nout="$(PATH="$nbin" ZDOTDIR="$work/emptybin" "$zsh_bin" -f -c 'source "$REPO/zsh/aliases.zsh"; print "${+aliases[ip]}"')"
+[ "$nout" = "1" ] || fail "ip alias missing with dig present and no real ip ($nout)"
 
 echo "PASS: aliases_functions_test"

@@ -4,10 +4,13 @@
 
 # zsh/restic.zsh - restic wrappers that resolve their credentials at call time.
 #
-# The whole point: a restic repository's env file names its secrets by REFERENCE
-# (`pass://…`), never by value, and the reference is resolved by a secret manager
-# in the child process only. Nothing is written to disk in the clear and nothing
-# is exported into this shell.
+# The whole point: a restic repository's env file names its secrets by REFERENCE,
+# never by value, and the reference is resolved by a secret manager in the child
+# process only. Nothing is written to disk in the clear and nothing is exported
+# into this shell. The reference scheme belongs to the runner: `pass-cli run`
+# resolves Proton Pass `pass://` URIs, `op run` resolves 1Password `op://` ones,
+# and neither understands the other's. So one env file serves one runner, and a
+# repo reachable through both needs one <name>.env per runner.
 #
 # The env files live in $XDG_CONFIG_HOME/restic (config/restic in the repo, which
 # is NEVER linked - see lib/link.sh's exceptions table). The repo tracks only
@@ -29,8 +32,8 @@ _restic_repos() {
 }
 
 # _restic_run RUNNER NAME ARGS... - shared body. RUNNER is the secret-manager
-# command that resolves the pass:// references and execs restic with them in its
-# environment.
+# command that resolves the env file's references (its own scheme, see above) and
+# execs restic with them in its environment.
 _restic_run() {
   emulate -L zsh
   local runner="${1:?}" repo="${2:-}"
