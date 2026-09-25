@@ -199,14 +199,19 @@ then expect CI to run it. Do not put gate logic in YAML.
 ### Repository settings
 
 The GitHub settings the docs rely on are recorded in
-`.github/repo-settings.json`: the default branch, the `main` ruleset (signed
-commits, the required status checks and their policy, no force push, no
-deletion, no bypass actors), merge commits as
-the only merge method, `delete_branch_on_merge`, the wiki off, private
-vulnerability reporting on, SHA pinning required for actions, and approval
-required for workflow runs from every outside contributor. The file is JSON so
-that both halves of the check below read it with `jq`, which the gates already
-require, and compare it directly with the JSON `gh api` returns.
+`.github/repo-settings.json`: the default branch, merge commits as the only
+merge method, `delete_branch_on_merge`, the wiki/projects/discussions off,
+private vulnerability reporting and Dependabot alerts on, the Actions
+permissions (SHA pinning required, only GitHub-owned actions, read-only
+default workflow token), and approval required for workflow runs from every
+outside contributor. `.rulesets` is an array, one entry per ruleset this repo
+runs: the `main-protection` branch ruleset (signed commits, the required
+status checks and their policy, the pull request policy - review count,
+thread resolution, allowed merge methods - no force push, no deletion, no
+bypass actors) and the `release-tags` tag ruleset (no force push, no
+deletion on `refs/tags/v*`). The file is JSON so that both halves of the check
+below read it with `jq`, which the gates already require, and compare it
+directly with the JSON `gh api` returns.
 
 Two checks hold the file to the rest of the world:
 
@@ -216,7 +221,7 @@ Two checks hold the file to the rest of the world:
 | `make repo-settings-check` | A maintainer's machine, on demand. | Any live setting differs from the file (exit 1), or a setting could not be read (exit 2). |
 
 `make repo-settings-check` prints one row per setting with its status, the
-expected value and the live one. Beyond the named ruleset, it reads the rules
+expected value and the live one. Beyond the branch ruleset, it reads the rules
 that actually apply to `main` from every source and requires each one to come
 from that ruleset, and it requires classic branch protection to be absent, so a
 second ruleset or a classic rule cannot add enforcement the file does not state. A setting is `ok` only when its live value was
