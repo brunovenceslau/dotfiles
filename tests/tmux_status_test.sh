@@ -23,7 +23,14 @@ pass=0
 # A FIXED expected total (all sources present); the two tool-gated blocks below
 # subtract when they legitimately skip. `pass` accumulates only on success, so a
 # silently-skipped mandatory block trips the final `pass -eq expected` guard.
-expected=26
+# Includes 3 for the stubbed-sysctl load block below, which is NOT tool-gated and
+# so never subtracts: it must run and assert on every platform, CI leg included.
+expected=29
+
+# Glyph constants shared by the stubbed load block below and the _bar unit block
+# further down - defined once here so neither one silently drifts from the other.
+FULL="$(printf '\xe2\x96\x88')"   # U+2588 FULL BLOCK
+EMPTY="$(printf '\xe2\x96\x91')"  # U+2591 LIGHT SHADE
 
 [ -x "$TS" ] || fail "bin/tmux-status not found or not executable"
 command -v git >/dev/null 2>&1 || fail "git required for the branch segment"
@@ -74,6 +81,8 @@ case "$OUT" in *"⎇"*) fail "a non-repo path must NOT render a branch glyph: [$
 pass=$((pass + 2))
 
 # --- load segment: a bar + an integer percentage (format, not a fixed value) ---
+# Drives the REAL, unstubbed sysctl - this is a FORMAT check of whatever this host's
+# load source actually produces, not a value check (that is the stubbed block below).
 run_ts "$nonrepo"
 if LC_ALL=C grep -qE '[0-9]+%' <<<"$OUT"; then
   # FIXED-STRING match on the exact block glyphs the helper emits (U+2588 █ filled /
@@ -84,10 +93,66 @@ if LC_ALL=C grep -qE '[0-9]+%' <<<"$OUT"; then
     || LC_ALL=C grep -qF "$(printf '\xe2\x96\x91')" <<<"$OUT" \
     || fail "load percentage present but neither █ nor ░ bar glyph: [$OUT]"
   pass=$((pass + 1))
+elif [ "$(uname -s)" = "Darwin" ]; then
+  # macOS's sysctl always answers vm.loadavg/hw.ncpu (see bin/tmux-status:85-91), so
+  # a silent SKIP here would hide a real regression behind a green run. FAIL, not skip.
+  fail "Darwin has a real sysctl load source but the helper rendered no percentage: [$OUT]"
 else
   echo "SKIP: no load source readable here; branch-only degrade verified (rc 0)"
   expected=$((expected - 1))
 fi
+
+# --- load segment, VALUE: stub sysctl end-to-end (read -> per-core % -> _bar) ---
+# The block above only proves a FORMAT, and legitimately SKIPs off a mac (sysctl's
+# vm.loadavg/hw.ncpu keys are macOS-only - bin/tmux-status:85-91). That leaves the
+# end-to-end path (sysctl -> per-core percentage -> _bar) with ZERO assertions on
+# any non-mac CI leg, and no assertion anywhere pins the helper's own arithmetic to
+# a known input. This block is NOT tool-gated: it stubs `sysctl` on PATH and runs
+# unconditionally, on every platform, so it can never silently disappear the way the
+# block above can.
+#
+# The helper calls a bare `sysctl` (bin/tmux-status:90-91), a PATH lookup, not an
+# absolute path - so a stub placed earlier on PATH is picked up with no other change.
+stubbin="$work/stubbin"; mkdir -p "$stubbin"
+cat > "$stubbin/sysctl" <<'EOF'
+#!/bin/sh
+# Answers only the two keys bin/tmux-status reads, by the exact `sysctl -n <key>`
+# shape the helper invokes it with ($1 is "-n", $2 is the key).
+case "$2" in
+  vm.loadavg) printf '%s\n' "$STUB_SYSCTL_LOADAVG" ;;
+  hw.ncpu)    printf '%s\n' "$STUB_SYSCTL_NCPU" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod u+x "$stubbin/sysctl"
+
+save_path="$PATH"
+PATH="$stubbin:$PATH"
+# Prove the stub actually wins the lookup BEFORE trusting any value derived from it -
+# a stale PATH order here would make every check below pass vacuously against the
+# real host sysctl (or fail vacuously where the real one has no load source).
+[ "$(command -v sysctl)" = "$stubbin/sysctl" ] \
+  || fail "stub sysctl did not win the PATH lookup: $(command -v sysctl)"
+pass=$((pass + 1))
+
+# mid-range: load 3.00 over 4 cores -> pct = int(3.00/4*100) = 75 (bin/tmux-status:97)
+# -> filled = pct*5/100 = 3 (bin/tmux-status:42) -> 3 full cells, 2 empty.
+export STUB_SYSCTL_LOADAVG="{ 3.00 2.10 1.80 }" STUB_SYSCTL_NCPU="4"
+run_ts "$nonrepo"
+want="$FULL$FULL$FULL$EMPTY$EMPTY 75%"
+[ "$OUT" = "$want" ] || fail "stubbed load (3.00 / 4 cores): expected [$want], got [$OUT]"
+pass=$((pass + 1))
+
+# clamp/edge: load far exceeds cores -> the awk formula's clamp caps pct at 100
+# (bin/tmux-status:97) -> filled = 100*5/100 = 5 -> a fully-filled bar.
+export STUB_SYSCTL_LOADAVG="{ 9.00 8.50 7.00 }" STUB_SYSCTL_NCPU="2"
+run_ts "$nonrepo"
+want="$FULL$FULL$FULL$FULL$FULL 100%"
+[ "$OUT" = "$want" ] || fail "stubbed load (9.00 / 2 cores, over cap): expected [$want], got [$OUT]"
+pass=$((pass + 1))
+
+PATH="$save_path"
+unset STUB_SYSCTL_LOADAVG STUB_SYSCTL_NCPU
 
 # --- never errors on a missing / bad path --------------------------------------
 run_ts "/no/such/path/$$"
@@ -191,8 +256,7 @@ grep -q '^_bar() {' "$barsrc" \
 # shellcheck source=/dev/null
 . "$barsrc"
 
-FULL="$(printf '\xe2\x96\x88')"   # U+2588 FULL BLOCK
-EMPTY="$(printf '\xe2\x96\x91')"  # U+2591 LIGHT SHADE
+# FULL/EMPTY are defined once, near the top of this file, and reused here.
 ck_bar() { # $1 = input, $2 = expected 5-cell rendering
   local got; got="$(_bar "$1")"
   [ "$got" = "$2" ] || fail "_bar($1): expected [$2], got [$got]"
