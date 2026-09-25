@@ -2,10 +2,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-# Feature request form. The first required field is the ask-first
-# acknowledgement: most rejected proposals are rejected on the surface they
-# touch, not on the idea, and finding that out before the code is written is
-# the whole point of the form.
+# Feature request form. The `surfaces` checklist asks which ask-first surfaces
+# the proposal touches: most rejected proposals are rejected on the surface
+# they touch, not on the idea, and finding that out before the code is written
+# is the whole point of the form. The only required checkbox is the "Who this
+# is for" acknowledgement in `checks`.
 name: Feature request
 description: Propose a change to what the framework does.
 title: "feat: "

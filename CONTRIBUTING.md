@@ -105,13 +105,18 @@ for a good SSH signature unless git can see an allowed-signers file. See
 
 ## Pull requests
 
-- **Every pull request targets `main`.** Including a stacked one. A pull request
-  opened with `--base <another branch>` races that branch's deletion when the
-  parent merges, and losing the race closes it permanently: a closed pull
-  request cannot be retargeted or reopened.
-- **State the dependency in the body instead**, as "stacked on #N, review only
-  the last K commits". The reasoning and the re-sync commands are in
-  [stacked pull requests](docs/stacked-prs.md).
+- **Every pull request targets `main`.** A pull request opened with
+  `--base <another branch>` races that branch's deletion when the parent
+  merges, and losing the race closes it permanently: a closed pull request
+  cannot be retargeted or reopened. A pull request from a fork has no stack to
+  express: open one at a time against `main`; cross-fork stacks are not
+  supported.
+- **A large change pushed as branches in this repository can stack**, a chain
+  of small pull requests that still each target `main`, with the dependency
+  stated in the body as "stacked on #N, review only the last K commits". That
+  workflow, its reasoning and the re-sync commands are in
+  [stacked pull requests](docs/stacked-prs.md); it does not apply to a
+  fork-based contribution.
 - **Both CI legs must be green**: `local-ci (macos-arm64)` and
   `local-ci (macos-intel)` are required status checks in the `main` ruleset.
 - **Merges use a merge commit.** Squash and rebase merging are off, because both

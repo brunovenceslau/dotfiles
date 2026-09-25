@@ -324,9 +324,9 @@ _link_home_tree() {
 #   through a ~/.local/bin link they fail with "does not look like the dotfiles
 #   repo". tests/link_engine_test.sh fails when a
 #   bin/ tool the Makefile calls is missing from this list, so a new gate cannot
-#   leak onto PATH by omission. A host upgrading from a release that linked them
-#   gets those links pruned as orphans (link_manifest_finalize), since they point
-#   into the repo and are no longer produced.
+#   leak onto PATH by omission. A host upgrading from an older revision that
+#   linked them gets those links pruned as orphans (link_manifest_finalize),
+#   since they point into the repo and are no longer produced.
 _link_bin_tree() {
   local root="$1" f base rc=0
   [ -d "$root/bin" ] || return 0

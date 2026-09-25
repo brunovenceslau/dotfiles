@@ -33,10 +33,11 @@ adapt it. It is a starting point you own, not a product you configure.
   someone else's dotfiles, and it makes no attempt to be neutral about which
   programs you use or how they are configured.
 - **You are not on macOS.** `install.sh` and `lib/` target bash 3.2, the version
-  macOS ships. No link rule or install step branches on the OS, and the CI
-  matrix covers only macOS runners (`.github/workflows/ci.yml`). On Linux the installer
-  still creates links, but the package manifest, the Homebrew prefix detection
-  and the terminal configuration do not apply.
+  macOS ships, and macOS is the only supported platform. No link rule or
+  install step branches on the OS, so run on Linux, the installer still
+  creates the links, but the package manifest, the Homebrew prefix detection
+  and the terminal configuration do not apply, and the CI matrix never
+  exercises it (`.github/workflows/ci.yml` covers only macOS runners).
 - **You want a stable configuration surface.** The public interface is not
   frozen. Subcommand names are kept for compatibility, but paths, variables and
   defaults can change between releases.
