@@ -73,6 +73,11 @@ rm -f "$state/update-check.stamp" "$state/update-available"
 DOTFILES="$B" XDG_STATE_HOME="$work" DOTFILES_UPDATE_DISABLE=1 zsh -fc "source '$uc'" 2>/dev/null
 ck "disable: no cadence stamp created" "$([ -e "$state/update-check.stamp" ] && echo present || echo absent)" "absent"
 
+# Documented: ANY non-empty value disables it, 0 included.
+rm -f "$state/update-check.stamp"
+DOTFILES="$B" XDG_STATE_HOME="$work" DOTFILES_UPDATE_DISABLE=0 zsh -fc "source '$uc'" 2>/dev/null
+ck "disable: DOTFILES_UPDATE_DISABLE=0 also disables (non-empty)" "$([ -e "$state/update-check.stamp" ] && echo present || echo absent)" "absent"
+
 # --- 6. non-repo DOTFILES: sentinel is a clean no-op --------------------------
 rm -f "$state/update-check.stamp"
 DOTFILES="$work/not-a-repo" XDG_STATE_HOME="$work" zsh -fc "source '$uc'" 2>"$work/err"
@@ -91,6 +96,18 @@ before="$(date -r "$state/update-check.stamp" +%s 2>/dev/null || stat -c %Y "$st
 DOTFILES="$B" XDG_STATE_HOME="$work" zsh -fc "source '$uc'" 2>/dev/null
 after="$(date -r "$state/update-check.stamp" +%s 2>/dev/null || stat -c %Y "$state/update-check.stamp")"
 ck "cadence: fresh stamp not rewritten (no spawn)" "$before" "$after"
+
+# DOTFILES_UPDATE_CADENCE_DAYS is honoured in both directions: a 2-day-old stamp
+# is fresh under a 7-day cadence (kept) and stale under a 1-day one (reset).
+mtime() { date -r "$1" +%s 2>/dev/null || stat -c %Y "$1"; }
+touch -t "$(date -d '2 days ago' +%Y%m%d%H%M 2>/dev/null || date -v-2d +%Y%m%d%H%M)" "$state/update-check.stamp"
+before="$(mtime "$state/update-check.stamp")"
+DOTFILES="$B" XDG_STATE_HOME="$work" DOTFILES_UPDATE_CADENCE_DAYS=7 zsh -fc "source '$uc'" 2>/dev/null
+ck "cadence: CADENCE_DAYS=7 keeps a 2-day-old stamp" "$(mtime "$state/update-check.stamp")" "$before"
+DOTFILES="$B" XDG_STATE_HOME="$work" DOTFILES_UPDATE_CADENCE_DAYS=1 zsh -fc "source '$uc'" 2>/dev/null
+[ "$(mtime "$state/update-check.stamp")" -gt "$before" ] \
+  || fail "cadence: CADENCE_DAYS=1 did not reset a 2-day-old stamp"
+ck "cadence: CADENCE_DAYS=1 resets a 2-day-old stamp" yes yes
 
 # --- 8. startup NEVER BLOCKS on the fetch - the load-bearing test -
 # A fake `git` earlier on PATH that SLEEPS on fetch (real git for everything else).
@@ -139,5 +156,75 @@ grep -q 'TP=0' "$envfile" \
 grep -q 'BatchMode=yes' "$envfile" \
   && ck "fetch sets ssh BatchMode (no SSH passphrase/host-key prompt)" yes yes \
   || fail "fetch did NOT set ssh BatchMode"
+
+# --- 9b. the credential helper is re-injected from the XDG config -------------
+# The scrub drops ~/.gitconfig, so the helper for origin is read back from
+# $XDG_CONFIG_HOME/git/config and passed as -c credential.helper=... . gh writes
+# an empty reset line before its helper, so the FIRST NON-EMPTY value must win.
+# Run twice: plain, and with KSH_ARRAYS set (as a .zshrc.local may), where a
+# 0-based ${hs[1]} would silently pass an empty helper.
+fakebin3="$work/fakebin3"; mkdir -p "$fakebin3" "$work/xdg/git"
+argvfile="$work/fetchargv"
+cat > "$fakebin3/git" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  if [ "\$a" = fetch ]; then printf '%s\n' "\$*" > "$argvfile"; exit 0; fi
+done
+exec $real_git "\$@"
+EOF
+chmod u+x "$fakebin3/git"
+printf '[credential]\n\thelper =\n\thelper = !stub-helper get\n' > "$work/xdg/git/config"
+# credential.helper is matched against a URL, so give origin a URL form for this
+# case (the shim never lets the fetch reach it); restored right after.
+git -C "$B" remote set-url origin "file://$A"
+for opts in "" "setopt ksh_arrays;"; do
+  rm -f "$argvfile"
+  PATH="$fakebin3:$PATH" XDG_CONFIG_HOME="$work/xdg" DOTFILES="$B" DOTFILES_UPDATE_DISABLE=1 \
+    zsh -fc "$opts source '$uc'; _dotfiles_update_fetch '$state'"
+  case "$(cat "$argvfile" 2>/dev/null)" in
+    *"-c credential.helper=!stub-helper get "*) ck "helper re-injected (${opts:-default options})" yes yes ;;
+    *) fail "helper not re-injected (${opts:-default options}): argv [$(cat "$argvfile" 2>/dev/null)]" ;;
+  esac
+done
+git -C "$B" remote set-url origin "$A"
+
+# --- 10. ambient url.insteadOf cannot redirect the background fetch -----------
+# Mirrors upgrade_test case 24. A hostile global config, then a hostile
+# GIT_CONFIG_PARAMETERS, rewrite origin to an attacker repo E that is AHEAD of B.
+# The sentinel scrubs both channels, so it fetches the real origin (A, which B
+# already matches): no update is reported and E's commit never enters B's store.
+( cd "$B"; git merge -q --ff-only '@{upstream}' 2>/dev/null || true )
+E="$work/E"; git clone -q "$A" "$E"
+( cd "$E"; git config user.name e; git config user.email e@x; echo evil > f; git commit -qam evil )
+evil="$(git -C "$E" rev-parse HEAD)"
+origin_url="$(git -C "$B" config --get remote.origin.url)"
+printf '[url "%s"]\n\tinsteadOf = %s\n' "$E" "$origin_url" > "$work/evil.gitconfig"
+[ "$(GIT_CONFIG_GLOBAL="$work/evil.gitconfig" git -C "$B" ls-remote origin HEAD | awk '$2 == "HEAD" { print $1 }')" = "$evil" ] \
+  || fail "case 10 fixture: the hostile insteadOf does not redirect a plain git (case would be vacuous)"
+rm -f "$state/update-available"
+GIT_CONFIG_GLOBAL="$work/evil.gitconfig" zfetch
+ck "insteadOf (global config): no update reported from the attacker repo" \
+  "$([ -e "$state/update-available" ] && echo present || echo absent)" "absent"
+GIT_CONFIG_PARAMETERS="'url.$E.insteadof'='$origin_url'" zfetch
+ck "insteadOf (GIT_CONFIG_PARAMETERS): no update reported from the attacker repo" \
+  "$([ -e "$state/update-available" ] && echo present || echo absent)" "absent"
+git -C "$B" cat-file -e "$evil" 2>/dev/null && fail "the attacker commit entered B's object store"
+ck "the attacker commit never entered the object store" yes yes
+
+# --- 11. a malformed object on origin is refused, even with fsck off ambiently -
+# Mirrors upgrade_test case 25: a commit whose tree has a duplicate entry.
+blob="$(printf x | git -C "$A" hash-object -w --stdin)"
+raw="$(printf '%s' "$blob" | sed 's/../\\x&/g')"
+# shellcheck disable=SC2059  # the format IS the payload: \xHH escapes of the blob id
+{ printf '100644 a\0'; printf "$raw"; printf '100644 a\0'; printf "$raw"; } > "$work/duptree"
+badtree="$(git -C "$A" hash-object -t tree --literally -w "$work/duptree")"
+badc="$(git -C "$A" -c user.name=a -c user.email=a@x commit-tree "$badtree" -p HEAD -m malformed)"
+git -C "$A" update-ref HEAD "$badc"
+printf '[fetch]\n\tfsckObjects = false\n[transfer]\n\tfsckObjects = false\n' > "$work/nofsck.gitconfig"
+rm -f "$state/update-available"
+GIT_CONFIG_GLOBAL="$work/nofsck.gitconfig" zfetch
+git -C "$B" cat-file -e "$badc" 2>/dev/null && fail "the malformed commit entered B's object store"
+ck "malformed object refused by the background fetch" \
+  "$([ -e "$state/update-available" ] && echo present || echo absent)" "absent"
 
 echo "PASS: update_check_test ($pass assertions)"
