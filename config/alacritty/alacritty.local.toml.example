@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/alacritty/alacritty.local.toml.example - copy to alacritty.local.toml
+# (same directory) and edit:
+#     cp ~/.config/alacritty/alacritty.local.toml.example ~/.config/alacritty/alacritty.local.toml
+# Untracked, never published, never uninstalled. This host's
+# terminal look: font family/size, theme/colors, window opacity. Imported LAST by
+# the tracked alacritty.toml, so anything here overrides the base.
+
+[font]
+# Pick a font installed on THIS host. A Nerd Font renders prompt/status glyphs.
+normal = { family = "JetBrainsMono Nerd Font", style = "Regular" }
+size = 13.0
+
+[window]
+# opacity = 1.0                 # 0.0–1.0; lower for a translucent background
+
+# [colors.primary]
+# background = "#1e1e2e"
+# foreground = "#cdd6f4"

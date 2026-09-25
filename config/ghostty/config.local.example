@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/ghostty/config.local.example - copy to config.local (same directory):
+#     cp ~/.config/ghostty/config.local.example ~/.config/ghostty/config.local
+# Untracked, never published, never uninstalled. Per-host Ghostty
+# tweaks: font family/size, opacity, a different theme. Ghostty processes
+# `config-file` at the END and the tracked config includes this file LAST, so
+# anything here overrides the base. Comment only on its OWN line (Ghostty rule).
+
+# font-family = "JetBrainsMono Nerd Font"
+# font-size = 14
+# background-opacity = 1.0
+# theme = light:gruvbox-ipe-light,dark:ipe-amarelo

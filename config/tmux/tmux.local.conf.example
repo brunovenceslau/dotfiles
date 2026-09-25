@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/tmux/tmux.local.conf.example - copy to tmux.local.conf (same directory):
+#     cp ~/.config/tmux/tmux.local.conf.example ~/.config/tmux/tmux.local.conf
+# Untracked, never published, never uninstalled. Per-host tmux
+# tweaks: status-bar theme, plugins, host-specific bindings. Sourced LAST by the
+# tracked tmux.conf, so anything here overrides the base.
+
+# Example: a minimal status bar.
+# set -g status-style "bg=default"
+# set -g status-right "#[fg=cyan]#S #[fg=white]%H:%M"
+
+# Example: a different prefix on this host.
+# set -g prefix C-Space
+# bind C-Space send-prefix

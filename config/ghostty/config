@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/ghostty/config - linked to ~/.config/ghostty/config.
+# Ghostty coexists with Alacritty as a second macOS terminal.
+# Dark mode uses the "Ipê Amarelo" identity ported from Alacritty;
+# light stays gruvbox for now. Per-host overrides go in the untracked config.local,
+# included LAST at the bottom - Ghostty processes `config-file` at the END, so the
+# include wins. Comment only on its OWN line - a trailing "# ..."
+# would become part of the value.
+
+# --- Font (carried over from iTerm2: MonaspiceNeNFM-Medium 15) ---
+font-family = "MonaspiceNe Nerd Font Mono"
+font-style = Medium
+font-size = 15
+font-thicken = true
+font-thicken-strength = 1
+adjust-cell-height = 1
+# Bold text takes the palette's bright colour. This is iTerm2's "Use Bright Bold".
+bold-color = bright
+# iTerm2 ran with ligatures off. Uncomment the line below to turn off both
+# ligatures and Monaspace's "texture healing" (calt). Leave it commented to
+# keep them.
+# font-feature = -calt, -liga
+
+# --- Window ---
+# Padding matches config/alacritty/defaults.toml (x = 8, y = 8). Opacity does
+# not: 0.85 here against 0.94 there. Ghostty also blurs the background, which
+# config/alacritty/defaults.toml does not set.
+background-opacity = 0.85
+background-blur = 16
+window-padding-x = 8
+window-padding-y = 8
+window-padding-balance = true
+# The titlebar follows the system light/dark theme.
+window-theme = system
+# Restore windows and tabs when the app reopens, like the native macOS
+# "reopen windows".
+window-save-state = always
+
+# --- macOS ---
+macos-option-as-alt = true
+# Turn off Ghostty's AppleScript interface to reduce the automation surface.
+macos-applescript = false
+macos-icon = retro
+macos-icon-frame = chrome
+macos-titlebar-proxy-icon = hidden
+# macos-titlebar-style = native
+
+# --- Cursor (carried over from iTerm2: box + blinking) ---
+cursor-style = block
+cursor-style-blink = true
+# Hide the mouse pointer while typing. It comes back on move or click.
+mouse-hide-while-typing = true
+
+# --- Scrollback: Ghostty counts BYTES, not lines. This is 100 MiB. ---
+scrollback-limit = 104857600
+
+# --- Shell integration (loaded by zshrc) and the tmux keys ---
+# zsh/zshrc sources the shell integration MANUALLY, because the framework's
+# custom ZDOTDIR blocks Ghostty's auto-injection. The automatic attempt is
+# therefore turned off here.
+#
+# WARNING: under `shell-integration = none`, Ghostty IGNORES the
+# `shell-integration-features` line below and fills $GHOSTTY_SHELL_FEATURES
+# from its own defaults. zsh/zshrc is what actually arms ssh-env and
+# ssh-terminfo, by appending them to $GHOSTTY_SHELL_FEATURES before it sources
+# the integration. Without that, vim, clear and tmux report "missing terminal"
+# on the remote host. The line below stays as a record of the intent, and for
+# the day this goes back to `shell-integration = zsh`.
+shell-integration = none
+shell-integration-features = cursor,title,ssh-env,ssh-terminfo
+# cmd+s sends the tmux prefix (C-a) then `s`; cmd+b sends C-a then `z`. Neither
+# key is bound in tmux.conf, so both reach a tmux default: `s` opens the session
+# picker, `z` zooms the pane.
+# \x01 = C-a (the prefix set in tmux.conf); \x73 = s, \x7a = z.
+keybind = cmd+s=text:\x01\x73
+keybind = cmd+b=text:\x01\x7a
+# iTerm-style splits: cmd+d sends C-a then `|` (panes side by side,
+# split-window -h); cmd+shift+d sends C-a then `-` (panes stacked,
+# split-window -v). Both inherit the cwd, because tmux.conf binds them with
+# -c "#{pane_current_path}". \x7c = |, \x2d = -.
+keybind = cmd+d=text:\x01\x7c
+keybind = cmd+shift+d=text:\x01\x2d
+
+# --- Colours: dark = Ipê Amarelo (ported from Alacritty), light = gruvbox ---
+theme = light:gruvbox-ipe-light,dark:ipe-amarelo
+
+# Per-host overrides, included LAST so they win. `?` = optional:
+# a missing config.local is skipped silently. Copy config.local.example to start.
+config-file = ?config.local

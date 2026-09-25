@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Palette convention inspired by gruvbox (https://github.com/morhetz/gruvbox).
+# No colour VALUE is copied from it: none of the 17 distinct hex values below
+# appears in gruvbox's own palette. See THIRD-PARTY-NOTICES.md.
+
+# config/ghostty/themes/gruvbox-ipe-light - light gruvbox ported from the iTerm2
+# "Guake Style" profile. Colour only. Activated by
+# `theme = light:gruvbox-ipe-light,...`.
+#
+# On the faefbb background the ported yellows/greens sat at 2.5-3.4:1, i.e.
+# unreadable. Every entry MUST clear 4.5:1 against the background (WCAG AA for
+# body text): normals 1-7 and 8 are held at ~4.6, brights 9-14 at ~6.6 so the
+# bright half stays visibly darker than its normal. Hue is preserved (the shift
+# is lightness + a touch of chroma), so re-deriving a colour means darkening it
+# in HSL, never picking a new hue.
+#
+# palette 0 == background is the gruvbox-light convention (the 0/7 pair is
+# inverted against the dark theme); it is NOT an oversight.
+background = faefbb
+foreground = 2e2a29
+cursor-color = 2e2a29
+cursor-text = faefbb
+selection-background = 2e2a29
+selection-foreground = af9f81
+palette = 0=#faefbb
+palette = 1=#be0f17
+palette = 2=#6e6e0a
+palette = 3=#955f09
+palette = 4=#377375
+palette = 5=#a04b73
+palette = 6=#437643
+palette = 7=#685c51
+palette = 8=#796858
+palette = 9=#890009
+palette = 10=#595505
+palette = 11=#7c4604
+palette = 12=#0e5365
+palette = 13=#7b2b5e
+palette = 14=#2a5d3a
+palette = 15=#2e2a29
