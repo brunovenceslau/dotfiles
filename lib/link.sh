@@ -8,7 +8,7 @@
 # link_tree() with its uninstall manifest. link_tree() maps the
 # repo's config/, home/ and bin/ trees onto their XDG/HOME destinations, applies
 # the exceptions table (gnupg partial; rclone/
-# restic never), and records every created link so uninstall has a single source
+# restic never; the bin/ dev gates never), and records every created link so uninstall has a single source
 # of truth. The backup contract link() implements is documented at link()
 # itself, just below.
 #
@@ -121,7 +121,7 @@ link_manifest_finalize() {
       [ -L "$d" ] || continue
       t="$(readlink "$d")"
       case "$t" in
-        "$root"/*) rm -f -- "$d" && log "pruned orphan link $d (source removed)" ;;
+        "$root"/*) rm -f -- "$d" && log "pruned orphan link $d (no longer produced)" ;;
         *) warn "prune: $d no longer produced but points outside the repo (-> $t) - leaving it" ;;
       esac
     done < <(LC_ALL=C comm -23 "$old" "$tmp")
@@ -315,13 +315,25 @@ _link_home_tree() {
   return "$rc"
 }
 
-# bin/* -> ~/.local/bin/*.
+# bin/* -> ~/.local/bin/*, minus the repo's own quality gates.
+# The gates (check-patterns, secret-scan, smoke, startup-fork-gate) are
+#   developer tools that `make` runs from the checkout. They MUST NOT land on a
+#   user's PATH: their generic names (`smoke`) shadow other tools, and they locate
+#   the repo from `dirname "$0"`, so run through a ~/.local/bin link they fail with
+#   "does not look like the dotfiles repo". tests/link_engine_test.sh fails when a
+#   bin/ tool the Makefile calls is missing from this list, so a new gate cannot
+#   leak onto PATH by omission. A host upgrading from a release that linked them
+#   gets those links pruned as orphans (link_manifest_finalize), since they point
+#   into the repo and are no longer produced.
 _link_bin_tree() {
   local root="$1" f base rc=0
   [ -d "$root/bin" ] || return 0
   for f in "$root"/bin/*; do
     { [ -e "$f" ] || [ -L "$f" ]; } || continue    # admit dangling symlinks too
     base="${f##*/}"
+    case "$base" in
+      check-patterns | secret-scan | smoke | startup-fork-gate) continue ;;   # dev gates
+    esac
     link "$f" "$HOME/.local/bin/$base" || rc=1
   done
   return "$rc"

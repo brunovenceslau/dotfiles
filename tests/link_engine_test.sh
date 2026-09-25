@@ -57,6 +57,7 @@ mkdir -p "$root"/home "$root"/bin
 printf 'x\n'            > "$root/home/gitconfig"
 printf 'x\n'            > "$root/home/hushlogin"
 printf '#!/bin/sh\n'   > "$root/bin/dotfiles-hello"
+printf '#!/bin/sh\n'   > "$root/bin/smoke"               # a repo dev gate -> never
 
 
 # Scratch HOME + XDG target, all under the throwaway work dir.
@@ -123,6 +124,31 @@ is_link_to "$HOME/.hushlogin" "$root/home/hushlogin" || fail "home/hushlogin not
 # bin/* -> ~/.local/bin/*.
 is_link_to "$HOME/.local/bin/dotfiles-hello" "$root/bin/dotfiles-hello" \
   || fail "bin/dotfiles-hello not linked to ~/.local/bin"
+# ...except the repo's dev gates, which `make` runs from the checkout.
+{ [ -e "$HOME/.local/bin/smoke" ] || [ -L "$HOME/.local/bin/smoke" ]; } \
+  && fail "bin/smoke (a dev gate) was linked onto the user's PATH"
+
+# Drift guard over the REAL tree: every bin/ tool the Makefile invokes is a dev
+# gate and must stay unlinked; every other bin/ tool is a runtime tool and must
+# link. A new gate wired into the Makefile but missing from _link_bin_tree's
+# exclusion list fails here instead of leaking onto every user's PATH.
+(
+  export HOME="$work/home_realbin"; mkdir -p "$HOME"
+  unset LINK_MANIFEST
+  _link_bin_tree "$repo_root" || fail "_link_bin_tree over the real repo reported a failure"
+  gates="$(grep -oE 'bin/[A-Za-z0-9._-]+' "$repo_root/Makefile" | sed 's|^bin/||' | sort -u)"
+  [ -n "$gates" ] || fail "drift guard: found no bin/ tool in the Makefile (pattern rot?)"
+  for f in "$repo_root"/bin/*; do
+    b="${f##*/}"
+    if printf '%s\n' "$gates" | grep -qxF -- "$b"; then
+      { [ -e "$HOME/.local/bin/$b" ] || [ -L "$HOME/.local/bin/$b" ]; } \
+        && fail "drift guard: bin/$b is a Makefile gate but was linked onto PATH - add it to _link_bin_tree's exclusions"
+    else
+      is_link_to "$HOME/.local/bin/$b" "$f" \
+        || fail "drift guard: runtime tool bin/$b was not linked to ~/.local/bin"
+    fi
+  done
+)
 
 # The manifest lists EXACTLY the created links (sorted, deduped).
 expected="$work/expected"

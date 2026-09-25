@@ -202,8 +202,13 @@ run_installer >/dev/null || fail "first install.sh exited nonzero"
 # One representative convention link: bin/* -> ~/.local/bin/*. Asserts the
 # convention walker (link_tree) actually placed a link, so a walker that silently
 # no-ops on both runs (idempotently producing zero convention links) is caught,
-# not just the two core links above.
-[ -L "$HOME/.local/bin/smoke" ]  || fail "the bin convention did not link ~/.local/bin/smoke (link_tree no-op?)"
+# not just the two core links above. tmux-status is the runtime tool; the dev
+# gates (this script among them) must stay OFF the user's PATH.
+[ -L "$HOME/.local/bin/tmux-status" ] || fail "the bin convention did not link ~/.local/bin/tmux-status (link_tree no-op?)"
+for g in check-patterns secret-scan smoke startup-fork-gate; do
+  { [ -e "$HOME/.local/bin/$g" ] || [ -L "$HOME/.local/bin/$g" ]; } \
+    && fail "the dev gate $g was linked onto the user's PATH (~/.local/bin/$g)"
+done
 # Real-repo link audit: a plain config dir
 # (lazygit) links by convention, while the secret-bearing ones (rclone, restic) are
 # skipped by the exceptions table - proven end-to-end here, not only against the
@@ -324,9 +329,13 @@ fi
 # it and rmdir the dirs the installer created to hold it. rmdir only removes an
 # EMPTY dir, so any OTHER survivor keeps the dir non-empty and still fails the audit
 # below - leak detection is preserved, only the intended machine-local seed is swept.
+# The docs (README "Uninstalling") promise the file SURVIVES, so when the ROOT
+# ships the tracked git config the seed must be present here, not merely allowed.
 seed="$xdg_config/git/config"
-[ ! -e "$seed" ] || { [ -f "$seed" ] && [ ! -L "$seed" ]; } \
-  || fail "write-back seed is not a real machine-local file: $seed"
+if [ -f "$root/config/git/config" ]; then
+  [ -f "$seed" ] && [ ! -L "$seed" ] \
+    || fail "documented survivor missing or not a real file after --purge: $seed"
+fi
 rm -f "$seed"
 rmdir "$xdg_config/git" "$xdg_config" 2>/dev/null || :
 post_uninstall="$(snap_home)"

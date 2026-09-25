@@ -133,8 +133,8 @@ case "$body" in
 esac
 # shellcheck disable=SC2016  # literal $HOME on purpose: we match the conf's TEXT, not expand it
 case "$sr_line" in
-  *'test -x $HOME/.config/dotfiles/bin/tmux-status'*) : ;;
-  *) fail "status-right must inline the helper path (test -x \$HOME/.config/.../tmux-status), not via a shell var: [$sr_line]" ;;
+  *'test -x $HOME/.local/bin/tmux-status && $HOME/.local/bin/tmux-status'*) : ;;
+  *) fail "status-right must inline the linked helper path (\$HOME/.local/bin/tmux-status), not a checkout path or a shell var: [$sr_line]" ;;
 esac
 pass=$((pass + 2))
 
