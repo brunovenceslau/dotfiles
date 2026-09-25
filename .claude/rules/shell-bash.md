@@ -122,8 +122,9 @@ negated one (`if cmd | grep -q x; then fail`) goes silently green. Remove the
 concurrent writer instead: `grep -q x <<<"$var"`, `grep -q x <<<"$(cmd)"`,
 `[ -n "$(find ...)" ]`, or a reader that drains its input (`sed -n 1p`, awk
 without `exit`). `make check-patterns` flags `grep -q/-m/-l` and `head` after a
-`|` in `install.sh`, `lib/`, `bin/`, `tests/` and the workflows; an awk `exit`
-is discipline, not a gate.
+`|` or `|&` (grep, egrep, fgrep) in `install.sh`, `lib/`, `bin/`, `tests/` and
+the workflows. An awk `exit`, and a line that ENDS in `|` with the reader on the
+next line, are discipline, not a gate.
 
 ## Leave the user's .local files alone
 

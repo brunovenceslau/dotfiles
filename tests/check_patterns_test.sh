@@ -468,6 +468,9 @@ for line in \
   "cmd $P grep -m1 x" \
   "cmd $P grep --quiet x" \
   "cmd $P grep -l x" \
+  "cmd $P& grep -q x" \
+  "cmd $P egrep -q x" \
+  "cmd $P fgrep -q x" \
   "v=\"\$(tmux ls $P head -1)\"" \
   ; do
   i=$((i + 1)); r="$work/eex-$i"; seed "$r"; mkdir -p "$r/tests"

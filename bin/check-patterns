@@ -428,15 +428,22 @@ fi
 # SURFACE: every file that runs under pipefail - install.sh and the lib/ it sources,
 # bin/, tests/, and the workflows (GitHub's bash steps run `-eo pipefail`). zsh/ is
 # interactive config with no pipefail, and the Makefile's recipes run without it.
-# NOT covered: an awk that `exit`s early, `sed ... q`, and a reader behind a
-# function or variable - a line-oriented grep cannot see those.
+# Covered: `|` and `|&`, and grep, egrep and fgrep, behind env assignments.
+# NOT covered: an awk that `exit`s early, `sed ... q`, a reader behind a
+# function or variable, and a pipe that ENDS a line with the reader on the next
+# one (`cmd |` newline `grep -q x`) - a line-oriented grep cannot see those.
+# (The LEADING-pipe continuation, `\` newline `| grep -q x`, is caught.)
+# KNOWN FALSE POSITIVES, both from matching text, not parsing shell: the shape
+# inside a quoted string (`echo "a | grep -q b"`), and a flag-looking pattern
+# argument read as a flag (`cmd | grep -e -l y`). Rephrase the line; neither
+# shape exists in the tree.
 eex=()
 for p in install.sh lib bin tests .github/workflows; do
   [ -e "$root/$p" ] && eex+=("$root/$p")
 done
 if [ "${#eex[@]}" -gt 0 ]; then
-  eex_re='(^|[^|])\|[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
-  eex_re="$eex_re"'(grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[A-Za-z]*[qmlL][A-Za-z0-9]*|--(quiet|silent|max-count[=[:alnum:]]*|files-with(out)?-match(es)?))([^[:alnum:]_-]|$)|head([^[:alnum:]_-]|$))'
+  eex_re='(^|[^|])\|&?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+  eex_re="$eex_re"'([ef]?grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[A-Za-z]*[qmlL][A-Za-z0-9]*|--(quiet|silent|max-count[=[:alnum:]]*|files-with(out)?-match(es)?))([^[:alnum:]_-]|$)|head([^[:alnum:]_-]|$))'
   if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$eex_re")
     if [ -n "$viol" ]; then
