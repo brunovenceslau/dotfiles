@@ -109,12 +109,28 @@ so the snippet names the Apache-2.0 identifier and no copyright text.
 - Upstream: <https://github.com/nvim-orgmode/orgmode>
 - Commit: `d9cd82d732cf4322100cf2c4c57b285c870bd893`
 - Licence: MIT, Copyright (c) 2021 Kristijan Husak
-- Used in: `config/nvim/lua/plugins/orgmode.lua`. Seven of its ten lines are
-  the setup values from the upstream `docs/installation.org` and `README.org`:
-  a plugin name, an `event`, a `config` wrapper and two default paths. These
-  are the documented way to configure the plugin rather than authored
-  expression, so the file carries no snippet. The notice is here because the
-  values were taken from that documentation.
+- Used in: `config/nvim/lua/plugins/orgmode.lua`. Its 13 code lines
+  (non-blank, non-comment) are the setup recipe from the upstream
+  `docs/installation.org` and `README.org`: a plugin name, an `event`, a
+  `config` function that calls `setup` with two default paths, the
+  `vim.lsp.enable('org')` call from the README's "Experimental LSP support"
+  line, and the Lua delimiters around them. These are the documented way to
+  configure the plugin rather than authored expression, so the file carries no
+  snippet. The notice is here because the values were taken from that
+  documentation.
+
+### telescope.nvim
+
+- Upstream: <https://github.com/nvim-telescope/telescope.nvim>
+- Commit: `40aedd8a68c78a656a10a8d62d80c54af59420fb`, the commit
+  `config/nvim/lazy-lock.json` pins
+- Licence: MIT, Copyright (c) 2020-2021 nvim-telescope
+- Used in: `config/nvim/lua/plugins/telescope.lua`. The four keymaps
+  (`<leader>ff`, `<leader>fg`, `<leader>fb`, `<leader>fh`) and their `desc`
+  strings match the upstream README's usage recipe. They are the plugin's
+  documented default bindings rather than authored expression, so the file
+  carries no snippet; the notice records where they came from, on the same
+  basis as nvim-orgmode above.
 
 ### Contributor Covenant
 
@@ -178,8 +194,11 @@ contrast was better taken from the canonical tone than invented.
 
 These are separate programs. `install.sh` does not require any of them, the
 shell degrades silently when one is absent, and nothing from them is copied
-into this repository. They are listed so the tools the shell shells out to are
-visible in one place.
+into this repository. The table lists the tools whose output the startup path
+caches or sources, or that the shell binds keys to. Other optional tools that
+a helper calls on demand (kubectl, restic, pass-cli, op, python3, go, dig, gls,
+uuidgen, osascript, lesspipe) are described, with the helpers that use them, in the
+[shell reference](docs/shell-reference.md).
 
 | Tool | Licence | What it does here |
 | --- | --- | --- |

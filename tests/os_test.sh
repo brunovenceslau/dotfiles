@@ -49,16 +49,19 @@ quad linux-gnu x86_64-pc-linux-gnu       'is-amd64 && ! is-arm64'
 quad darwin23  arm64                      'is-arm64 && ! is-amd64'   # bare zsh-style MACHTYPE
 quad linux-gnu x86_64                      'is-amd64 && ! is-arm64'
 
-# --- uname fallback branch (empty builtins) -----------------------------------
-# `unset` forces the `*)` arms, which shell out to uname; on this VM that is
-# Linux/x86_64.
-case "$(uname -s)/$(uname -m)" in
-  Linux/x86_64)
-    bash -c "unset OSTYPE MACHTYPE; . '$oslib'; is-amd64 && ! is-arm64" \
-      || fail "uname fallback branch wrong on linux/x86_64" ;;
-  # exempt: platform/arch skip, not tool-availability
-  *) echo "SKIP: fallback assertion is tuned for a linux/x86_64 host" ;;
-esac
+# --- uname fallback branch (empty builtins), host-independent ------------------
+# `unset MACHTYPE` forces the `*)` arms, which shell out to `uname -m`. A stub
+# uname function answers each spelling, so both arms of both helpers run on every
+# host - the CI legs are Darwin and would otherwise never reach this code.
+fallback() { # UNAME_M assertion
+  bash -c "unset OSTYPE MACHTYPE; uname() { [ \"\$1\" = -m ] && echo '$1'; }; . '$oslib'; $2" \
+    || fail "uname fallback with uname -m=$1: $2"
+}
+fallback arm64   'is-arm64 && ! is-amd64'
+fallback aarch64 'is-arm64 && ! is-amd64'
+fallback x86_64  'is-amd64 && ! is-arm64'
+fallback amd64   'is-amd64 && ! is-arm64'
+fallback riscv64 '! is-arm64 && ! is-amd64'
 
 # --- Fork-free fast path ---------------------------------------
 # With the builtins populated, a stub uname must never be invoked.

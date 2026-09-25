@@ -14,10 +14,10 @@
 #   (aarch64 -> arm64, x86_64 -> amd64), so is-amd64 is true on an Intel mac.
 #   These helpers are the single sanctioned site for arch detection - all arch
 #   branching MUST go through them, never an ad-hoc `uname -m`.
-# The fast path reads shell builtins ($OSTYPE / $MACHTYPE), which
-#   bash and zsh both populate with no fork, so the helpers are safe to call on
-#   the interactive startup path. `uname` is only a fallback for exotic shells
-#   that leave the builtins empty.
+# The fast path reads the $MACHTYPE shell builtin, which bash and
+#   zsh both populate with no fork, so the helpers are safe to call on the
+#   interactive startup path. `uname` is only a fallback for exotic shells that
+#   leave it empty.
 # Bash 3.2 compatible (no associative arrays, no mapfile,
 #   no ${var,,}).
 #

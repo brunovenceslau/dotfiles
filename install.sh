@@ -56,21 +56,20 @@ manifest="$manifest_dir/manifest"
 
 # vgit - git in the repo with ALL ambient config-injection channels neutralized:
 # the GLOBAL/SYSTEM files AND the GIT_CONFIG_COUNT/KEY_*/VALUE_* + GIT_CONFIG_
-# PARAMETERS + GIT_CONFIG env families. Every fetch and merge on the
-# upgrade path runs through this so no user/machine/.local git config can rewrite
-# the fetch URL (url.insteadOf - which would otherwise redirect the unpinned
-# The upgrade's git: ambient config is scrubbed (GLOBAL/SYSTEM/env families) so a
-# hostile url.insteadOf in the user's config cannot redirect the fetch. Repo-local
-# .git/config still applies: an attacker who can write it already owns the working
-# tree, so it is out of scope by the same logic as install.sh itself (PATH likewise
-# - it already owns `git`). Scrubbing also drops the tracked config's
-# fsckObjects, so re-assert them here with -c so the upgrade
-# never fetches under a config with object fsck off (object fsck happens at the
-# fetch's index-pack; the ff-only merge only touches objects already fsck'd on the
-# way in). Injecting via the wrapper also extends fsck to the submodule fetch (the
-# SHA-pinned plugin objects). These apply harmlessly to non-fetch vgit calls
-# (rev-parse etc. ignore them); receive.fsckObjects is inert on a client fetch but
-# kept as harmless defense-in-depth.
+# PARAMETERS + GIT_CONFIG env families. Every fetch and merge on the upgrade path
+# runs through this, so no user, machine or .local git config can rewrite the
+# fetch URL: a hostile url.insteadOf in ~/.gitconfig would otherwise redirect the
+# unpinned `git fetch origin` to another repository.
+# Repo-local .git/config still applies: an attacker who can write it already owns
+# the working tree, so it is out of scope by the same logic as install.sh itself
+# (PATH likewise - it already owns `git`).
+# Scrubbing also drops the tracked config's fsckObjects, so re-assert them here
+# with -c: the upgrade never fetches under a config with object fsck off. Object
+# fsck happens at the fetch's index-pack; the ff-only merge only touches objects
+# already fsck'd on the way in. Injecting via the wrapper also extends fsck to the
+# submodule fetch (the SHA-pinned plugin objects). The flags are harmless on
+# non-fetch vgit calls (rev-parse etc. ignore them); receive.fsckObjects is inert
+# on a client fetch but kept as defense-in-depth.
 # GNUPGHOME=/dev/null is no-trace defense-in-depth: today no vgit call probes gpg
 # (fetch / merge --ff-only / rev-parse do not), so it changes nothing - but if the
 # upgrade path ever grows a gpg-probing git call (log --show-signature), this keeps
@@ -171,11 +170,17 @@ _migrate_legacy_history() {
   [ -s "$legacy" ] || return 0
   [ -e "$dest" ] && return 0
   mkdir -p "$xdg_state/zsh" || return 0
-  if cp -- "$legacy" "$dest" && chmod 600 "$dest" 2>/dev/null; then
-    log "carried ~/.zsh_history over to ${dest#"$HOME"/} (the original is untouched)"
-  else
+  # umask 077 in a subshell: cp creates the file under the ambient umask
+  # (typically 644) BEFORE any chmod could tighten it, and shell history often
+  # holds secrets typed on a command line. The chmod stays as belt-and-braces for
+  # a destination that somehow already existed with looser bits.
+  if ! ( umask 077 && cp -- "$legacy" "$dest" ); then
     warn "could not copy ~/.zsh_history to $dest - starting with an empty history"
+    return 0
   fi
+  chmod 600 "$dest" 2>/dev/null \
+    || warn "copied ~/.zsh_history to $dest but could not chmod it 600 - check its permissions"
+  log "carried ~/.zsh_history over to ${dest#"$HOME"/} (the original is untouched)"
 }
 
 # _cache_shell_inits - pre-compile the zsh integration the startup path sources:
@@ -243,13 +248,38 @@ _cache_shell_inits() {
 # one with '-', so a healthy checkout (a recursive clone, or the host's own dev
 # tree) is a strict no-op and a locally bumped pin ('+' prefix) is never disturbed.
 # The pins in .gitmodules/index decide the commit; this only materializes them.
+# Object fsck is forced ON with -c, exactly as vgit does on the upgrade path: the
+# tracked config's fsckObjects only applies when the linked XDG git config
+# includes it, which a pre-existing real ~/.config/git/config never does, and an
+# ambient config could turn it off. -c beats every config file and reaches the
+# submodule clones through GIT_CONFIG_PARAMETERS.
 ensure_submodules() {
   command -v git >/dev/null 2>&1 || return 0
   [ -f "$DOTFILES/.gitmodules" ] || return 0
   git -C "$DOTFILES" submodule status 2>/dev/null | grep -q '^-' || return 0
   log "initializing SHA-pinned plugin submodules (a non-recursive clone left them empty)"
-  git -C "$DOTFILES" submodule update --init \
-    || warn "submodule init failed; plugins may be absent - run: git -C \"$DOTFILES\" submodule update --init --recursive"
+  git -C "$DOTFILES" -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
+    submodule update --init \
+    || warn "submodule init failed; plugins may be absent - run: git -C \"$DOTFILES\" -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update --init --recursive"
+}
+
+# harden_plugin_perms - strip group/other write from the plugin tree, the only
+# framework-owned directories on the shell's fpath (zsh-completions/src and its
+# parent). compinit's audit (compaudit) inspects every fpath dir and its parent:
+# a group- or world-writable one makes it fork `getent group` on the startup
+# path, and on a shared group (macOS `staff`) it also reports the dirs as
+# insecure and asks whether to use them. A clone made under umask 002, or a
+# submodule checkout that ran under it, leaves exactly that. git records no
+# directory modes and only the owner-execute bit of files, so this never dirties
+# the tree. Runs after every submodule materialization: `install` (after
+# ensure_submodules) and `link` (which the upgrade re-enters after its
+# submodule update). Best-effort: a path the user does not own is left as is.
+harden_plugin_perms() {
+  local plugins="$DOTFILES/zsh/plugins"
+  [ -d "$plugins" ] || return 0
+  chmod -R go-w -- "$plugins" 2>/dev/null \
+    || warn "could not remove group/other write from $plugins - compinit may flag it as insecure"
+  return 0
 }
 
 # do_uninstall [--purge] - reverse the install from the manifest.
@@ -369,7 +399,7 @@ _do_upgrade() {
   #
   # AUTH re-inject: vgit scrubs the global config to kill a hostile
   # url.insteadOf / gpg.ssh.program - which ALSO drops the credential helper the
-  # operator configured for an HTTPS remote, so the verified fetch would prompt
+  # operator configured for an HTTPS remote, so the upgrade fetch would prompt
   # `Username for github.com` on the startup-adjacent path. Re-inject ONLY
   # credential.helper (resolved for THIS remote from the trusted local/global config)
   # and run non-interactively: GIT_TERMINAL_PROMPT=0 makes a missing/failing
@@ -400,7 +430,7 @@ EOF
     warn "upgrade: fetch failed"
     warn "  Network unreachable? Check that first: the public HTTPS remote needs"
     warn "  no credentials to fetch."
-    warn "  Credentials needed (a private fork, or an SSH remote)? The verified"
+    warn "  Credentials needed (a private fork, or an SSH remote)? The upgrade"
     warn "  fetch scrubs ~/.gitconfig and reads only the XDG config, so put a"
     warn "  credential helper there:"
     warn "    git config -f ~/.config/git/config.local 'credential.https://github.com.helper' '!gh auth git-credential'"
@@ -490,11 +520,15 @@ case "$cmd" in
     # understand rather than silently discard it.
     shift
     [ $# -eq 0 ] || { warn "link takes no arguments (got: $*)"; exit 2; }
-    do_link || { warn "one or more links could not be created (see warnings above)"; exit 1; }
+    link_rc=0
+    do_link || link_rc=1
     # After the links, so `starship` resolves its config through the freshly linked
     # ~/.config/starship. `link` is the arm the upgrade re-enters in a fresh process,
     # so caching here is what keeps the init current across a tool version bump.
+    # It runs even when a link was refused, for the reason the install arm gives.
     _cache_shell_inits
+    harden_plugin_perms
+    [ "$link_rc" -eq 0 ] || { warn "one or more links could not be created (see warnings above)"; exit 1; }
     log "links (re)created."
     ;;
   reseed-settings)
@@ -507,20 +541,43 @@ case "$cmd" in
     [ $# -eq 0 ] || { warn "reseed-settings takes no arguments (got: $*)"; exit 2; }
     ;;
   install)
+    # Reject arguments like the other arms: `install.sh` alone means install, so
+    # drop the subcommand only when it was given, then nothing may remain.
+    [ $# -eq 0 ] || shift
+    [ $# -eq 0 ] || { warn "install takes no arguments (got: $*)"; exit 2; }
     # State/cache dirs the startup path expects to exist, created here so zshrc
     # need not fork mkdir on a normal launch.
     mkdir -p "$xdg_state/zsh" "$xdg_cache/zsh" "$manifest_dir"
     # Before the first interactive shell writes anything, and a no-op afterwards.
     _migrate_legacy_history
-    do_link || { warn "one or more links could not be created (see warnings above)"; exit 1; }
-    # Materialize the SHA-pinned plugin submodules if a non-recursive
-    # clone left them empty (after do_link so the XDG git config - fsckObjects - is
-    # in place for the submodule fetch). link-only stays pure.
-    ensure_submodules
+    # A refused link (typically a pre-existing real ~/.config/<prog> directory)
+    # still fails the install, but only AFTER the local steps below, which do not
+    # depend on the refused link: skipping them left a first-time user with no
+    # prompt until the conflict was fixed.
+    link_rc=0
+    do_link || link_rc=1
+    # Materialize the SHA-pinned plugin submodules if a non-recursive clone left
+    # them empty. link-only stays pure. Skipped after a refused link: that run
+    # already ends in exit 1 and a re-run the user has to make, and the re-run
+    # heals the submodules; fetching third-party code during a run that is
+    # failing adds a network step (and its own failure modes) to a problem that
+    # is purely local. Object fsck is not the reason - ensure_submodules forces
+    # it itself.
+    if [ "$link_rc" -eq 0 ]; then
+      ensure_submodules
+    else
+      warn "skipping plugin submodule init because a link was refused - re-run ./install.sh once it is fixed"
+    fi
+    harden_plugin_perms
     # Pre-compile the shell integrations the startup path sources (starship, zoxide,
     # canga's completion) so `zsh -i` never forks to build one.
     _cache_shell_inits
     _signing_advisory   # warn if commit signing isn't set up yet
+    if [ "$link_rc" -ne 0 ]; then
+      warn "one or more links could not be created (see warnings above)"
+      warn "  fix each refused path, then re-run ./install.sh"
+      exit 1
+    fi
     log "done - start a new zsh (e.g. \`exec zsh\`) to load the config."
     ;;
   upgrade)
@@ -536,6 +593,8 @@ case "$cmd" in
     # A separate subcommand - the default `install` links only, so `make smoke`
     # never triggers a package install (which needs the network). No sudo is
     # involved on that path either: Homebrew is user-scoped.
+    shift
+    [ $# -eq 0 ] || { warn "packages takes no arguments (got: $*)"; exit 2; }
     packages_install || { warn "packages: installation reported problems (see warnings above)"; exit 1; }
     log "packages: done."
     ;;

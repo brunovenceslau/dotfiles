@@ -7,7 +7,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 # Troubleshooting
 
 Symptoms, causes and fixes, keyed to the exact message each tool prints. Messages
-from `install.sh` and its wrappers are prefixed with `install:` and go to stderr.
+from `install.sh` and its wrappers are prefixed with `install:`. Warnings and
+errors go to stderr; progress lines such as `upgrade: already up to date` go to
+stdout. `tests/troubleshooting_messages_test.sh` fails when a message quoted on
+this page no longer exists in the code.
 
 | Symptom | Section |
 | --- | --- |
@@ -21,10 +24,11 @@ from `install.sh` and its wrappers are prefixed with `install:` and go to stderr
 | `upgrade: another upgrade appears to be in progress` | [Stale upgrade lock](#stale-upgrade-lock) |
 | `upgrade: fetch failed` | [Upgrade fetch fails](#upgrade-fetch-fails) |
 | `upgrade: fast-forward merge refused` | [Upgrade refuses to merge](#upgrade-refuses-to-merge) |
-| `updates are available`, or `no verified update in over N days` | [Update notices do not go away](#update-notices-do-not-go-away) |
+| `updates are available`, or `no successful update check in over <n> days` | [Update notices do not go away](#update-notices-do-not-go-away) |
 | `link: refusing to replace an existing directory` | [Install refuses a link](#install-refuses-a-link) |
 | `link: backup already exists, refusing to overwrite` | [Install refuses a link](#install-refuses-a-link) |
 | `link: unknown OS suffix on config/...` | [Install refuses a link](#install-refuses-a-link) |
+| `one or more links could not be created` | [Install refuses a link](#install-refuses-a-link) |
 | `packages: Homebrew is not installed` | [Packages will not install](#packages-will-not-install) |
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
@@ -60,13 +64,24 @@ rm -f "${XDG_CACHE_HOME:-$HOME/.cache}"/zsh/*.zwc \
 exec zsh
 ```
 
-The first shell after any install or upgrade runs a full `compinit` with the
-insecure-directory audit. Only that one is slow. If every shell is slow, measure
-it and look at what you added:
+At most one shell every 24 hours runs a full `compinit` with the
+insecure-directory audit, plus the first shell after the completion cache is
+cleared. Only that one is slow. If every shell is slow, measure it and look at
+what you added:
 
 ```sh
 for i in 1 2 3 4 5; do time zsh -i -c exit; done
 make -C ~/.config/dotfiles forkgate     # proves the startup path forks nothing
+```
+
+**Third cause: group-writable plugin directories.** A clone or submodule
+checkout made under `umask 002` leaves `zsh/plugins` group-writable. compinit's
+audit then runs `getent` on every audited start, and on a shared group it asks
+whether to use the "insecure directories". `./install.sh` and
+`./install.sh link` remove that permission; to fix it by hand:
+
+```sh
+chmod -R go-w ~/.config/dotfiles/zsh/plugins
 ```
 
 A synchronous subprocess or network call in `.zshrc.local` is the usual cause.
@@ -225,7 +240,8 @@ GIT_CONFIG_GLOBAL="$HOME/.config/git/config.local" gh auth setup-git
 
 Or add the block by hand. `config/git/config.local.example` shows it, commented,
 as the `[credential "https://github.com"]` stanza. This applies to HTTPS remotes
-only. An SSH remote authenticates with the host key and needs no helper.
+only. An SSH remote authenticates with your SSH key (through the SSH agent) and
+needs no credential helper.
 
 ## Upgrade refuses a dirty tree
 
@@ -308,8 +324,8 @@ you.
 ## Update notices do not go away
 
 ```
-dotfiles: updates are available - run 'dotfiles-upgrade' to verify and apply.
-dotfiles: no verified update in over 30 days - the update channel may be stalled (run 'dotfiles-upgrade').
+dotfiles: updates are available - run 'dotfiles-upgrade' to apply them.
+dotfiles: no successful update check in over 30 days - the update channel may be stalled (run 'dotfiles-upgrade').
 ```
 
 **"Updates are available"** means the background fetch saw the remote ahead. Run
@@ -320,7 +336,7 @@ survives an upgrade, clear the stale file:
 rm -f ~/.local/state/dotfiles/update-available
 ```
 
-**"No verified update in over N days"** means no background fetch has succeeded
+**"No successful update check in over N days"** means no background fetch has succeeded
 within the staleness window, usually because the host is offline or
 authentication is broken. Run `dotfiles-upgrade` by hand to see the real error.
 
@@ -330,13 +346,24 @@ before it runs:
 ```sh
 DOTFILES_UPDATE_CADENCE_DAYS=7        # fetch less often (default 3)
 DOTFILES_UPDATE_STALENESS_DAYS=60     # freeze warning threshold (default 30)
-DOTFILES_UPDATE_DISABLE=1             # turn the sentinel off
+DOTFILES_UPDATE_DISABLE=1             # turn the sentinel off (any non-empty value)
 ```
 
 ## Install refuses a link
 
-The installer never silently destroys anything. Three refusals are possible, and
-each ends with the rest of the links still placed and a non-zero exit.
+The installer never silently destroys anything. Four warnings are possible. The
+first, second and fourth are refusals: the installer places every other link
+and caches the shell integrations, skips initializing missing plugin submodules
+(it warns `skipping plugin submodule init because a link was refused`), then
+prints the message below and exits 1. The re-run after the fix completes the
+submodule step.
+
+```
+install: one or more links could not be created (see warnings above)
+```
+
+The third, an unknown `@suffix`, skips that one directory and does not fail the
+install.
 
 | Message | Meaning | Fix |
 | --- | --- | --- |
@@ -374,6 +401,18 @@ only while it is still a symlink into the repository, so anything you replaced b
 hand survives.
 
 **Fix.** Inspect the path and remove it yourself if you want it gone.
+
+Two things are left on purpose, with no message:
+
+- `~/.config/git/config`, the machine-local git config the installer wrote. It
+  is where `git config --global` writes, so it can hold your own settings.
+  Delete it by hand if you no longer want it.
+- An empty directory the uninstall did not empty itself. Directories are pruned
+  only when a removed link leaves them empty.
+
+`--purge` does **not** leave your shell history: it deletes
+`$XDG_STATE_HOME/zsh`, which holds it. See
+[Uninstalling](../README.md#uninstalling).
 
 ```
 install: uninstall: refusing to run as root over a manifest owned by uid <n>

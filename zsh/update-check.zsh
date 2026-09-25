@@ -20,15 +20,17 @@
 #   update-last-fetch    mtime = last SUCCESSFUL fetch (gates the freeze warning)
 #   update-available     present iff the last fetch saw the remote ahead
 #
-# Config (set in .zshrc.local / zshenv.local before this file):
+# Config (set in .zshrc.local, or in the environment, before this file):
 #   DOTFILES_UPDATE_CADENCE_DAYS      default 3   - how often to fetch
 #   DOTFILES_UPDATE_STALENESS_DAYS    default 30  - freeze-warning threshold
-#   DOTFILES_UPDATE_DISABLE           set to 1 to turn the sentinel off entirely
+#   DOTFILES_UPDATE_DISABLE           any non-empty value (even 0) turns the
+#                                     sentinel off entirely
 
 # Ensure the fork-free mkdir builtin is loaded even if this module is somehow
-# sourced before zshrc's zmodload (zshrc:13). Normally redundant - this file is
-# sourced last - but it makes the "mkdir is a builtin, not a fork" claim below
-# self-sufficient rather than an implicit load-order dependency.
+# sourced before zshrc's zsh/files zmodload at its top. Normally redundant - this
+# file is sourced last - but it makes the "mkdir is a builtin, not a fork" claim
+# below self-sufficient rather than an implicit load-order dependency. zshrc
+# disables the builtin again after sourcing this file.
 zmodload -F zsh/files b:mkdir 2>/dev/null
 
 # _dotfiles_update_fetch STATEDIR - the body that runs DETACHED off the startup
@@ -36,6 +38,9 @@ zmodload -F zsh/files b:mkdir 2>/dev/null
 # whether the tracking branch is ahead. A named function, not an inline block, so
 # the unit test can drive it synchronously against a local remote.
 _dotfiles_update_fetch() {
+  # Plain zsh semantics whatever .zshrc.local set: with KSH_ARRAYS, for one,
+  # arrays are 0-based and ${hs[1]} below would drop the credential helper.
+  emulate -L zsh
   local state="$1" ahead
   # NON-INTERACTIVE by construction: a background fetch on the
   # startup path must NEVER prompt - even backgrounded, git opens /dev/tty for a
@@ -52,9 +57,28 @@ _dotfiles_update_fetch() {
   # otherwise let this pre-populate un-fsck'd objects. The `-c` flags beat both
   # config files and the GIT_CONFIG_* env families, so the malformed-object
   # rejection cannot be disabled ambiently.
-  GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -oBatchMode=yes" \
-    git -C "$DOTFILES" -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
-    fetch --quiet 2>/dev/null || return 0
+  #
+  # Ambient config is SCRUBBED, the way install.sh's vgit does it for the upgrade:
+  # the GLOBAL/SYSTEM files and the GIT_CONFIG_PARAMETERS/COUNT/GIT_CONFIG env
+  # families are dropped, so a hostile url.insteadOf cannot point this fetch at
+  # another repository and fill the object store from it. Only credential.helper
+  # is read back, from the framework's XDG config and for this remote's RAW url
+  # (`config --get` is immune to insteadOf), exactly as the upgrade re-injects it.
+  # All of this runs in the detached body - never on the prompt's path.
+  (
+    unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG
+    export GIT_CONFIG_SYSTEM=/dev/null
+    local url helpers
+    url=$(GIT_CONFIG_GLOBAL=/dev/null git -C "$DOTFILES" config --get remote.origin.url 2>/dev/null)
+    helpers=$(GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME:-$HOME/.config}/git/config" \
+      git -C "$DOTFILES" config --get-urlmatch credential.helper "$url" 2>/dev/null)
+    local -a hs; hs=( ${(f)helpers} )     # unquoted (f): empty lines dropped
+    export GIT_CONFIG_GLOBAL=/dev/null
+    GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -oBatchMode=yes" \
+      git -C "$DOTFILES" -c credential.helper="${hs[1]-}" \
+      -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
+      fetch --quiet origin 2>/dev/null
+  ) || return 0
   : > "$state/update-last-fetch"
   # @{upstream} needs a tracking branch; a missing/odd count is not "ahead".
   ahead=$(git -C "$DOTFILES" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)
@@ -105,14 +129,14 @@ _dotfiles_update_notice() {
   integer staleness_h=$(( ${DOTFILES_UPDATE_STALENESS_DAYS:-30} * 24 ))
 
   if [[ -e $state/update-available ]]; then
-    print -u2 -- "dotfiles: updates are available - run 'dotfiles-upgrade' to verify and apply."
+    print -u2 -- "dotfiles: updates are available - run 'dotfiles-upgrade' to apply them."
     _dotfiles_update_notified=1
   fi
   # Freeze warning: the last successful fetch is older than the staleness window.
   local -a stale
   stale=( $state/update-last-fetch(N.mh+${staleness_h}) )
   if (( $#stale )); then
-    print -u2 -- "dotfiles: no verified update in over ${DOTFILES_UPDATE_STALENESS_DAYS:-30} days - the update channel may be stalled (run 'dotfiles-upgrade')."
+    print -u2 -- "dotfiles: no successful update check in over ${DOTFILES_UPDATE_STALENESS_DAYS:-30} days - the update channel may be stalled (run 'dotfiles-upgrade')."
     _dotfiles_update_notified=1
   fi
 }

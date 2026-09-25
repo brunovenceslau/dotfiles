@@ -22,7 +22,7 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [shell-reference.md](shell-reference.md) | A user of the shell | `install.sh` subcommands, lifecycle commands, the restic wrappers, every helper function and alias, environment variables, generated files, `.local` files, config surfaces. |
+| [shell-reference.md](shell-reference.md) | A user of the shell | `install.sh` subcommands, lifecycle commands, the restic wrappers, every helper function and alias, commands on `PATH`, key bindings, shell options, environment variables, generated files, `.local` files, config surfaces. |
 
 ## Do a task
 
@@ -30,7 +30,7 @@ Each page has one primary reader and one purpose.
 | --- | --- | --- |
 | [new-mac-host.md](new-mac-host.md) | An operator setting up a machine | Prerequisites, authentication, clone and install, identity and signing, packages, legacy cleanup, verification. |
 | [backup-restore.md](backup-restore.md) | An operator running backups | The secret model, rclone and restic setup, the `restic-pass-cli` and `restic-op` wrappers, backup, verify, restore, retention. |
-| [troubleshooting.md](troubleshooting.md) | Anyone with a broken shell | Symptom, cause and fix for every message the framework prints. |
+| [troubleshooting.md](troubleshooting.md) | Anyone with a broken shell | Symptom, cause and fix for the messages you are most likely to see. `tests/troubleshooting_messages_test.sh` checks that each quoted message still exists in the code. |
 
 ## Change it
 

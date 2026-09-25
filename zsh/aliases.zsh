@@ -192,8 +192,9 @@ alias gpf='git push --force-with-lease'
 
 # --- network ------------------------------------------------------------------
 # Public IP via DNS, which is faster and less rate-limited than an HTTP echo
-# service. Guarded: dig is not installed everywhere.
-(( $+commands[dig] )) && \
+# service. Guarded: dig is not installed everywhere, and a real `ip` (brew's
+# iproute2mac) must not be shadowed.
+(( $+commands[dig] )) && (( ! $+commands[ip] )) && \
   alias ip='dig -4 TXT +short o-o.myaddr.l.google.com @ns1.google.com'
 alias ips="ifconfig -a | grep -oE 'inet6? (addr:)?([0-9a-f:.]+)' | awk '{print \$NF}'"
 alias flushdns='sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder'
@@ -203,7 +204,10 @@ alias hidedesktop='defaults write com.apple.finder CreateDesktop -bool false && 
 alias showdesktop='defaults write com.apple.finder CreateDesktop -bool true && killall Finder'
 # pmset, not the old CGSession path: same effect, supported spelling.
 alias afk='pmset displaysleepnow'
-alias tailscale='/Applications/Tailscale.app/Contents/MacOS/Tailscale'
+# The GUI app's bundled CLI, only when the app is installed and no `tailscale`
+# is already on PATH (brew's CLI-only install must win). `-x` is a builtin test.
+[[ -x /Applications/Tailscale.app/Contents/MacOS/Tailscale ]] && (( ! $+commands[tailscale] )) && \
+  alias tailscale='/Applications/Tailscale.app/Contents/MacOS/Tailscale'
 alias stopwatch='echo "Timer started. Stop with Ctrl-D." && date && time \cat && date'
 (( $+commands[uuidgen] )) && alias uuid='uuidgen | tr "[:upper:]" "[:lower:]"'
 

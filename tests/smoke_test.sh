@@ -82,7 +82,7 @@ if command -v zsh >/dev/null 2>&1; then
   # install die first and the bare exit-nonzero assertion passed vacuously). The
   # specific message grep below is the second half of the same defense. `cp`
   # (not `ln`) for zsh/zshenv so its :A resolves DOTFILES to the fixture
-  # (self-contained); bin/ is linked so the ~/.local/bin/smoke assertion passes
+  # (self-contained); bin/ is linked so the ~/.local/bin/tmux-status assertion passes
   # en route to the check.
   fix="$repo_root/.smoke/fixture-noisy"
   rm -rf "$fix"; mkdir -p "$fix/zsh"

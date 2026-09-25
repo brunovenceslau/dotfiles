@@ -30,10 +30,15 @@ here is installed, uninstalled, or published.
 
 ```sh
 rclone config          # interactive - writes ~/.config/rclone/rclone.conf
-# or start from the template and edit by hand:
-cp config/rclone/rclone.conf.example ~/.config/rclone/rclone.conf
+# or start from the template and edit by hand. $DOTFILES is the repository
+# root, exported by the framework's ~/.zshenv in every zsh:
+mkdir -p ~/.config/rclone
+cp "$DOTFILES/config/rclone/rclone.conf.example" ~/.config/rclone/rclone.conf
 chmod 600 ~/.config/rclone/rclone.conf
 ```
+
+The full backup setup, rclone and restic together, is
+[backup and restore](../../docs/backup-restore.md).
 
 The `.example` files are placeholders only - they carry no real remotes, tokens,
 or passwords, and are safe to commit. **Never** put a real secret in a file (or a

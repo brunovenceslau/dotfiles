@@ -33,8 +33,8 @@ adapt it. It is a starting point you own, not a product you configure.
   someone else's dotfiles, and it makes no attempt to be neutral about which
   programs you use or how they are configured.
 - **You are not on macOS.** `install.sh` and `lib/` target bash 3.2, the version
-  macOS ships. There is no OS detection left in the tree, and the CI matrix
-  covers only macOS runners (`.github/workflows/ci.yml`). On Linux the installer
+  macOS ships. No link rule or install step branches on the OS, and the CI
+  matrix covers only macOS runners (`.github/workflows/ci.yml`). On Linux the installer
   still creates links, but the package manifest, the Homebrew prefix detection
   and the terminal configuration do not apply.
 - **You want a stable configuration surface.** The public interface is not
@@ -49,16 +49,26 @@ adapt it. It is a starting point you own, not a product you configure.
 - **One framework file in `$HOME`.** Only `~/.zshenv`. Everything else lives
   under `~/.config`, `~/.cache` and `~/.local`.
 - **A fork-free interactive startup path.** Nothing on the path to your first
-  prompt spawns a subprocess or touches the network. `make forkgate` proves it
-  by measuring what an interactive shell actually invokes.
+  prompt runs a subprocess or waits on the network. `make forkgate` proves it
+  by measuring what an interactive shell actually invokes. The one exception is
+  the update check: once every 3 days, a shell start launches a detached,
+  non-blocking `git fetch` of this repository in the background
+  ([how it works, and how to turn it off](docs/architecture.md#the-one-sanctioned-background-spawn)).
 - **Pinned plugins.** Three zsh plugins are git submodules pinned to exact
   commits, loaded by a static loader in the zshrc. No plugin manager.
 - **An exact uninstall.** Every symlink the installer creates is recorded in a
   manifest. `dotfiles-uninstall --purge` removes only those links, restores the
-  files it backed up, and leaves no generated state behind. CI verifies this
-  with a before and after diff of a scratch home on every run.
-- **A per-host `.local` layer.** Every config surface loads an untracked
-  `.local` companion, so two machines differ without forking the repository.
+  files it backed up, and deletes the framework's generated cache and state. It
+  leaves one file on purpose: `~/.config/git/config`, a machine-local file that
+  `git config --global` writes to (see [Uninstalling](#uninstalling)). CI
+  verifies the rest with a before and after diff of a scratch home on every run.
+- **A per-host `.local` layer.** The shell, git, terminal, tmux and package
+  surfaces each load an untracked `.local` companion, so two machines differ
+  without forking the repository. The
+  [shell reference](docs/shell-reference.md#local-files) lists every one.
+- **One tool on your `PATH`.** The installer links `bin/tmux-status` (the tmux
+  status-line helper) into `~/.local/bin`. The repository's quality gates stay
+  in `bin/` and run through `make`; they are never linked.
 
 ## Requirements
 
@@ -84,8 +94,15 @@ cd ~/.config/dotfiles
 non-recursive clone leaves them empty until the next `./install.sh` repairs
 them. The installer is idempotent, so a re-run changes nothing.
 
+The installer links whole directories for alacritty, ghostty, lazygit, nvim,
+starship and tmux into `~/.config`. If one of those already exists as a real
+directory, the installer refuses to replace it, places every other link,
+caches the shell integrations, skips the plugin submodule step, and exits 1. Move the directory aside and re-run `./install.sh`; see
+[Install refuses a link](docs/troubleshooting.md#install-refuses-a-link).
+
 Then set this machine's git identity in the untracked local config. The tracked
-config carries no identity, so a fresh clone can commit without one:
+config carries no identity or signing key, so every machine sets its own and
+nothing commits as the maintainer:
 
 ```sh
 git config --file ~/.config/git/config.local user.name  "Your Name"
@@ -112,11 +129,11 @@ prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
 
 | Command | What it does |
 | --- | --- |
-| `./install.sh` | Create state and cache dirs, then create every link. Idempotent. |
-| `./install.sh link` | Recreate links and the manifest only. This is what an upgrade re-runs. |
+| `./install.sh` | Create state and cache dirs, copy a pre-XDG `~/.zsh_history` over, create every link, initialize missing plugin submodules, and cache the shell integrations. Idempotent. |
+| `./install.sh link` | Recreate links and the manifest, then refresh the cached shell integrations. This is what an upgrade re-runs. |
 | `./install.sh packages` | `brew bundle` over `packages/Brewfile`, then the pinned `gh` extensions. |
 | `dotfiles-upgrade` | Fetch, fast-forward merge, update submodules, relink, recompile. |
-| `dotfiles-uninstall [--purge]` | Remove the framework's links and restore backups. `--purge` also clears generated cache and state. |
+| `dotfiles-uninstall [--purge]` | Remove the framework's links and restore backups. `--purge` also deletes generated cache and state, **including your shell history**. |
 | `reload` | Re-source `$ZDOTDIR/.zshrc` in the current shell. |
 
 `dotfiles-upgrade` and `dotfiles-uninstall` are zsh functions defined in
@@ -140,15 +157,33 @@ modified, so commit or stash first. Untracked `.local` files never block it.
 
 ```sh
 dotfiles-uninstall            # remove links, restore backups
-dotfiles-uninstall --purge    # also remove generated cache and state
+dotfiles-uninstall --purge    # also delete generated cache and state
 ```
 
-Uninstall is driven entirely by the manifest at
-`$XDG_STATE_HOME/dotfiles/manifest`. It touches nothing else, and it never
-removes your untracked `.local` files. To reinstall from scratch:
+Uninstall is driven by the manifest at `$XDG_STATE_HOME/dotfiles/manifest`. It
+removes the links the manifest lists (only while they still point into this
+repository), restores each `*.bak`, and then removes any directory those
+removals left empty, up to `$HOME`. It never removes your untracked `.local`
+files.
+
+> **Warning:** `--purge` deletes `$XDG_STATE_HOME/zsh`, which holds your shell
+> history (`$XDG_STATE_HOME/zsh/history`, by default
+> `~/.local/state/zsh/history`). Copy that file somewhere else first if you want
+> to keep it.
+
+Both forms leave `~/.config/git/config` in place. The installer wrote it as a
+real file that includes the tracked git config, and it is where
+`git config --global` writes, so it may hold settings you added. Once the
+repository is gone, delete it by hand if you no longer want it:
 
 ```sh
-dotfiles-uninstall --purge && ./install.sh && exec zsh
+rm ~/.config/git/config
+```
+
+To reinstall and keep your history, uninstall without `--purge`:
+
+```sh
+dotfiles-uninstall && ./install.sh && exec zsh
 ```
 
 ## Security model
@@ -163,9 +198,9 @@ make that reviewable, and where each one is enforced.
 | The fast-syntax-highlighting theme download is neutralized, so a pinned commit cannot be bypassed at source time. | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [architecture](docs/architecture.md#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
 | Object checking is on for every fetch (`transfer`, `fetch` and `receive.fsckObjects`), and the upgrade path re-asserts it after scrubbing ambient git config, so a hostile global config cannot turn it off. | `config/git/config`, the `vgit` wrapper in `install.sh`, `tests/git_config_test.sh` |
 | The upgrade merge is `--ff-only`, so a rewound or diverged remote history is refused rather than checked out. | `install.sh`, [architecture](docs/architecture.md#the-upgrade-path) |
-| Nothing on the interactive startup path forks a process or opens the network. | `make forkgate`, [development](docs/development.md#what-make-forkgate-does) |
+| Nothing on the interactive startup path runs a subprocess or waits on the network. The single exception is the update check: at most once every 3 days it launches a detached background `git fetch` of this repository, and `DOTFILES_UPDATE_DISABLE=1` turns it off. | `make forkgate`, [development](docs/development.md#what-make-forkgate-does), [architecture](docs/architecture.md#the-one-sanctioned-background-spawn) |
 | No user file is overwritten without a `.bak` copy first, and uninstall restores it. | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh` |
-| Two independent secret scanners run as gates over the tree before every push. | `make secret-scan`, `make gitleaks`, [development](docs/development.md#the-two-secret-scanners) |
+| Two independent secret scanners run as gates over the tree in `make local-ci` and in CI on every push and pull request. | `make secret-scan`, `make gitleaks`, [development](docs/development.md#the-two-secret-scanners) |
 
 None of this verifies signatures on what you fetch. `dotfiles-upgrade` is a
 fetch plus a fast-forward merge, and it trusts whatever the remote you cloned

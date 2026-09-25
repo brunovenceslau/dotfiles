@@ -12,19 +12,24 @@ rules that are not negotiable.
 Audience: whoever edits the framework. The install at `~/.config/dotfiles` is
 also the development workspace, so an edit there is live in the next shell.
 
+The page runs from reference to procedure: prerequisites and the gates first
+(what each one proves), then CI, then the rules and the changes that need a
+maintainer decision, and last the step-by-step recipes for common changes.
+
 ## Prerequisites
 
 - macOS, Apple Silicon or Intel. `install.sh` and `lib/` target bash 3.2, the
   version macOS ships, and there is no Linux install path.
 - Xcode Command Line Tools, for git and the compiler toolchain:
   `xcode-select --install`.
-- The tools the gates need: `make`, `shellcheck`, `zsh`, `tmux`, `fzf`, `jq`.
+- The tools the gates need: `make`, `shellcheck`, `zsh`, `tmux`, `fzf`, `jq`,
+  `xz`.
   These are the exact names CI's "Ensure gate tools" step installs, so a tool
   missing from this list is a tool CI cannot provision either.
 - `python3` with the `pyyaml` module, pinned to `6.0.3`. CI's image ships
   `python3` already; if `python3 -c 'import yaml'` fails on your machine,
-  install the pinned version with
-  `python3 -m pip install --break-system-packages 'pyyaml==6.0.3'`.
+  install the pinned, hash-checked version with
+  `python3 -m pip install --break-system-packages --require-hashes -r .github/ci-requirements.txt`.
 - `reuse` and `gitleaks`, the licensing and secret-scanning gates. `reuse`
   needs a module that can detect file encodings, and the homebrew-core formula
   installs it as the `reuse[charset-normalizer]` extra. Install it another way
@@ -35,7 +40,7 @@ also the development workspace, so an edit there is live in the next shell.
 One line covers the Homebrew-installable prerequisites:
 
 ```sh
-brew install shellcheck zsh tmux fzf jq reuse gitleaks
+brew install shellcheck zsh tmux fzf jq xz reuse gitleaks
 ```
 
 Once a tool is missing, `STRICT=1` decides what happens: unset, a gate skips
@@ -51,9 +56,9 @@ parity by construction. Run `make local-ci` before every push.
 | Target | What it runs | What it proves |
 | --- | --- | --- |
 | `make lint` | shellcheck over `install.sh`, `lib/`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
-| `make check-patterns` | `bin/check-patterns` | No `curl \| sh` style runtime fetch, no ad-hoc `uname -m` outside `lib/os.sh`, no unescaped `#` inside a Makefile `$(shell ...)`, no hardcoded Homebrew prefix and no `brew shellenv` or `brew --prefix` fork, no bash 4 syntax in `install.sh` or `lib/`, no GNU-only regex escape (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface, `tests/` and the workflows, and the pinned plugins still have the shapes the startup shims assume. |
+| `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download executed on the same line: piped into `sh`, `bash`, `zsh`, `ksh` or `dash` (also through `\|&`, `sudo` with options, `env`, `exec`, a quoted name or a path such as `/bin/bash`), passed as a command substitution to `eval` (also `eval --`) or to a shell with a `c` option (`bash -lc "$(curl ...)"`, `bash --norc -c "$(curl ...)"`), or fed as a process substitution to `source`, `.` or a shell (`bash < <(wget ...)`), also when the tool is written `command curl`, `env curl`, `sudo curl`, `\curl` or `/usr/bin/curl`. Not caught, among others (the list is illustrative, not exhaustive): a download saved and executed on a later line, one passed through another command first (`curl ... \| tee f \| bash`), one fed through a here-string or `/dev/stdin`, a fetch behind an assignment, `time` or a brace group inside the substitution, a substitution that does not start the `-c` string (`sh -c "set -e; $(curl ...)"`), a fetch through an alias or function, a shell reached through `xargs` or `nohup`, and fetch tools other than curl and wget. Also no ad-hoc `uname -m` outside `lib/os.sh`, no unescaped `#` inside a Makefile `$(shell ...)`, no hardcoded Homebrew prefix and no `brew shellenv` or `brew --prefix` fork, no bash 4 syntax in `install.sh` or `lib/`, no GNU-only regex escape (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface, `tests/` and the workflows, and the pinned plugins still have the shapes the startup shims assume. |
 | `make test` | every `tests/*.sh` | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. |
-| `make smoke` | `bin/smoke` | A fresh install into a scratch home works, an interactive shell starts cleanly, a re-run is a no-op, and `--purge` leaves no trace. |
+| `make smoke` | `bin/smoke` | A fresh install into a scratch home works, an interactive shell starts cleanly, a re-run is a no-op, the dev gates are not linked onto `PATH`, and `--purge` leaves no trace except the documented machine-local `~/.config/git/config`. |
 | `make secret-scan` | `bin/secret-scan --git .` | No secret-shaped content in the tracked tree. |
 | `make gitleaks` | `gitleaks dir .` | The same question asked again, with [gitleaks](https://gitleaks.io/)' maintained rule set, over the working directory as it is on disk. |
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
@@ -113,8 +118,9 @@ Run the gates the way CI does before concluding that a change is safe:
 make local-ci STRICT=1
 ```
 
-A local green can be vacuous. Several tool-availability skips exit 0 even under
-`STRICT=1`. A pass proves what ran, not what was covered. When a particular suite
+A local green can be vacuous. Platform and privilege skips (a case only a given
+OS, architecture or root can stage) exit 0 even under `STRICT=1`; a missing
+tool fails it. A pass proves what ran, not what was covered. When a particular suite
 matters to your change, check that it did not skip.
 
 Where `make` is unavailable, run the same commands it drives:
@@ -125,7 +131,7 @@ shellcheck install.sh lib/*.sh bin/*
 /bin/bash -n install.sh lib/*.sh
 /bin/bash -n tests/*.sh          # the tests run under bash 3.2 on the macOS legs
 zsh -n zsh/zshenv zsh/zshrc zsh/*.zsh
-STRICT=1 bash tests/*.sh
+for t in tests/*.sh; do STRICT=1 bash "$t" || echo "FAILED: $t"; done
 reuse lint
 gitleaks dir . --no-banner --redact
 bin/secret-scan --git .
@@ -178,6 +184,13 @@ than dropping the coverage.
 
 The workflow checks out submodules recursively, so smoke exercises the real
 plugin path. It does not persist credentials on the runner.
+
+Every action is pinned to a full-length commit SHA, with the release tag in a
+trailing comment. GitHub enforces this: the repository's Actions settings
+require SHA pinning, so a workflow that references an action by tag or branch
+fails to run. Dependabot (`.github/dependabot.yml`) proposes the bumps. The gate
+tools CI installs log their versions in the "Gate tool versions" step, and
+`pyyaml` is installed hash-checked from `.github/ci-requirements.txt`.
 
 Add a new gate as a `make` target first, wire it into `make local-ci`, and only
 then expect CI to run it. Do not put gate logic in YAML.
