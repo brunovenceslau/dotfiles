@@ -184,14 +184,19 @@ mkdir -p "$work/bin" "$work/fx"
 
 # The stub answers `gh api PATH` from $work/fx: PATH with its query dropped and
 # every / turned into _, then .json (a 200 body) or .err (stderr + exit 1, the
-# way gh reports HTTP >= 400). Anything else is a 404. Every call is logged, so
+# way gh reports HTTP >= 400). Anything else is a 404. `--paginate` is accepted
+# and the file is printed as-is, so a fixture holding several concatenated
+# arrays is exactly what gh prints for several pages. Every call is logged, so
 # the test can prove the tool only ever issues plain GETs.
 cat >"$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"$GH_STUB_DIR/calls.log"
-[ "$#" -eq 2 ] && [ "$1" = api ] || { echo "stub gh: unexpected call: $*" >&2; exit 64; }
-k="$(tr '/' '_' <<<"${2%%\?*}")"
+[ "${1:-}" = api ] || { echo "stub gh: unexpected call: $*" >&2; exit 64; }
+shift
+[ "${1:-}" != --paginate ] || shift
+[ "$#" -eq 1 ] || { echo "stub gh: unexpected call" >&2; exit 64; }
+k="$(tr '/' '_' <<<"${1%%\?*}")"
 if [ -f "$GH_STUB_DIR/$k.err" ]; then cat "$GH_STUB_DIR/$k.err" >&2; exit 1; fi
 if [ -f "$GH_STUB_DIR/$k.json" ]; then cat "$GH_STUB_DIR/$k.json"; exit 0; fi
 echo "gh: Not Found (HTTP 404)" >&2; exit 1
@@ -279,7 +284,9 @@ expect_run() {
 # B1. match -> exit 0, every row ok, and only plain GETs were issued.
 fixtures_match
 expect_run "match" 0 "19 ok, 0 drift, 0 unreadable"
-grep -vqE '^api [^ ]+$' "$work/fx/calls.log" && fail "the tool issued a gh call other than a plain 'gh api PATH' GET"
+grep -vqE '^api (--paginate )?[^ ]+$' "$work/fx/calls.log" && fail "the tool issued a gh call other than a plain 'gh api [--paginate] PATH' GET"
+grep -qE '^api --paginate repos/o/r/rules/branches/main' "$work/fx/calls.log" || fail "the effective-rules list is not read with --paginate"
+grep -qE '^api --paginate repos/o/r/rulesets[?]' "$work/fx/calls.log" || fail "the rulesets list is not read with --paginate"
 ok "stubbed match: only plain GET calls"
 
 # B2. drift -> exit 1, exactly the drifted rows are DRIFT.
@@ -326,6 +333,19 @@ expect_run "extra ruleset on the branch" 1 "17 ok, 2 drift, 0 unreadable" \
   DRIFT 'branch\.main\.rule_sources' DRIFT 'branch\.main\.rule_types'
 grep -qF 'ruleset id 99' <<<"$out" || fail "extra ruleset: the foreign ruleset id was not named"
 
+# B7b. the foreign rule sits on page 2 of the effective rules: gh --paginate
+# prints one array per page, and a reader of page 1 alone would report ok.
+fixtures_match
+echo '[{"type":"pull_request","ruleset_source_type":"Organization","ruleset_source":"o","ruleset_id":99}]' \
+  >>"$work/fx/repos_o_r_rules_branches_main.json"
+expect_run "foreign rule on page 2" 1 "17 ok, 2 drift, 0 unreadable" \
+  DRIFT 'branch\.main\.rule_sources' DRIFT 'branch\.main\.rule_types'
+# The same for the rulesets list: a second same-name ruleset on page 2 is
+# ambiguous, never a silent pick of the page-1 one.
+fixtures_match
+echo '[{"id":43,"name":"main-protection"}]' >>"$work/fx/repos_o_r_rulesets.json"
+expect_run "duplicate ruleset on page 2" 2 "0 drift" UNREADABLE 'ruleset\.name'
+
 # B8. classic branch protection present -> DRIFT; a bare 404 (what a caller
 # without rights also gets) is UNREADABLE, never proof of absence.
 fixtures_match
@@ -359,8 +379,9 @@ grep -qF 'unexpected response' <<<"$out" || fail "non-JSON: the row does not say
 fixtures_match
 echo '{"message":"moved"}' >"$work/fx/repos_o_r_rulesets.json"
 echo '{"message":"moved"}' >"$work/fx/repos_o_r_rules_branches_main.json"
-expect_run "wrong-shape rulesets" 2 "0 drift, 3 unreadable" \
-  UNREADABLE 'ruleset\.name' UNREADABLE 'branch\.main\.rule_sources' UNREADABLE 'branch\.main\.rule_types'
+expect_run "wrong-shape rulesets" 2 "0 drift, 10 unreadable" \
+  UNREADABLE 'ruleset\.rules' UNREADABLE 'ruleset\.bypass_actors' \
+  UNREADABLE 'branch\.main\.rule_sources' UNREADABLE 'branch\.main\.rule_types'
 fixtures_match
 echo '[]' >"$work/fx/repos_o_r_rulesets_42.json"
 expect_run "wrong-shape ruleset detail" 2 "0 drift, 8 unreadable" UNREADABLE 'ruleset\.rules'

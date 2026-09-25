@@ -48,7 +48,7 @@
 #     ({context, integration_id?}), strict_required_status_checks_policy,
 #     do_not_enforce_on_create
 #   /repos/{o}/{r}/rules/branches/{branch}   (effective rules, every source;
-#     each entry names its ruleset_id)
+#     each entry names its ruleset_id; paginated like the rulesets list)
 #     https://docs.github.com/en/rest/repos/rules#get-rules-for-a-branch
 #   /repos/{o}/{r}/branches/{branch}/protection   (classic protection; an
 #     unprotected branch answers 404 "Branch not protected")
@@ -138,6 +138,30 @@ fetch() {
   return 1
 }
 
+# fetch_list PATH OUTFILE - GET a LIST endpoint across EVERY page. Both list
+# endpoints read here paginate (30 per page by default); reading only page 1
+# would silently miss a foreign ruleset or rule on a later page and report ok.
+# `gh api --paginate` follows the Link rel="next" chain and prints one JSON
+# array per page, which `jq -s add` joins. A page that is not an array (an
+# error body, a proxy page) makes the whole list UNREADABLE via OUTFILE.err.
+fetch_list() {
+  fetch_paginated "$1" "$2.pages" || { mv "$2.pages.err" "$2.err"; return 1; }
+  if ! jq -cs 'if length > 0 and all(type == "array") then add else error("shape") end' \
+      "$2.pages" >"$2" 2>/dev/null; then
+    printf '%s\n' "$BADSHAPE" >"$2.err"
+    return 1
+  fi
+}
+fetch_paginated() {
+  if gh api --paginate "$1" >"$2" 2>"$2.err"; then
+    return 0
+  fi
+  local msg
+  msg="$(sed -n 1p "$2.err")"
+  printf '%s\n' "${msg:-gh api $1 failed}" >"$2.err"
+  return 1
+}
+
 # check_section SECTION API_PATH - every key under .SECTION in the settings file
 # is compared with the same key in the endpoint's response, so a new expected
 # setting is a one-line JSON change, not a code change.
@@ -194,7 +218,7 @@ check_ruleset() {
   name="$(jq -r '.ruleset.name // empty' "$settings")"
   [ -n "$name" ] || return 0
 
-  if ! fetch "repos/$repo/rulesets?per_page=100" "$tmp/rulesets.json"; then
+  if ! fetch_list "repos/$repo/rulesets?per_page=100" "$tmp/rulesets.json"; then
     err="$(cat "$tmp/rulesets.json.err")"
     for f in $RS_FIELDS; do row "ruleset.$f" "$(rs_exp "$f")" UNREADABLE "$err"; done
     return 0
@@ -237,7 +261,7 @@ check_branch() {
   local out="$tmp/branch_rules.json" exp_src exp_types err
   exp_types="$(rs_expect rules)"
   exp_src="[\"ruleset $(jq -r '.ruleset.name' "$settings")\"]"
-  if ! fetch "repos/$repo/rules/branches/$branch" "$out"; then
+  if ! fetch_list "repos/$repo/rules/branches/$branch?per_page=100" "$out"; then
     err="$(cat "$out.err")"
     row "branch.$branch.rule_sources" "$exp_src" UNREADABLE "$err"
     row "branch.$branch.rule_types" "$exp_types" UNREADABLE "$err"
