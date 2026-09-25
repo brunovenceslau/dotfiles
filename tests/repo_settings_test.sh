@@ -127,8 +127,7 @@ SECURITY.md|<https://github.com/brunovenceslau/dotfiles/security/advisories/new>
 README.md|use the private advisory form linked from|pvr
 .github/ISSUE_TEMPLATE/config.yml|url: https://github.com/brunovenceslau/dotfiles/security/advisories/new|pvr
 .github/ISSUE_TEMPLATE/bug_report.yml|Use the private advisory|pvr
-docs/stacked-prs.md|This repository has `delete_branch_on_merge` enabled.|.repo.delete_branch_on_merge == true
-docs/stacked-prs.md|verified-signatures branch rule then rejects them|rule("required_signatures")
+docs/stacked-prs.md|With `delete_branch_on_merge` on, merging the parent deletes its head branch|.repo.delete_branch_on_merge == true
 docs/development.md|the repository'"'"'s Actions settings require SHA pinning|.actions_permissions.sha_pinning_required == true
 docs/development.md|Both legs are required status checks on `main`|on_main and rule("required_status_checks") and (.ruleset.required_status_checks | length) == 2
 docs/development.md|the requirement lives in the branch ruleset rather than in the workflow|rule("required_status_checks")'

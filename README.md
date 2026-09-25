@@ -219,7 +219,6 @@ To report a vulnerability, use the private advisory form linked from
 | [Troubleshooting](docs/troubleshooting.md) | Something is broken and you want the symptom, cause and fix. |
 | [Backup and restore](docs/backup-restore.md) | You are setting up or using the restic and rclone backups. |
 | [Development](docs/development.md) | You are changing the repository and need the quality gates. |
-| [Stacked pull requests](docs/stacked-prs.md) | You are landing a large change as a chain of small PRs. |
 
 ## Contributing
 

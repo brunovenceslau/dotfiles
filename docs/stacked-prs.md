@@ -6,12 +6,14 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Stacked pull requests
 
-Large changes here land as a stack: a chain of small pull requests that build on
+This page is the maintainer's workflow for branches pushed to this repository.
+Outside contributors work from a fork and open one pull request at a time; see
+[CONTRIBUTING.md](../CONTRIBUTING.md).
+
+Large changes land as a stack: a chain of small pull requests that build on
 each other, each reviewed and gated independently, landed bottom-up. Stacking
 keeps every PR small enough to review honestly while a large piece of work keeps
 moving.
-
-Audience: whoever is landing a multi-part change in this repository.
 
 ## The rule: every PR targets `main`
 
@@ -21,18 +23,12 @@ the PR body ("stacked on #N, review only the last K commits"), never in
 
 ### Why not chain the bases
 
-A `--base <branch>` pull request is coupled to that branch's lifetime. This
-repository has `delete_branch_on_merge` enabled. When the parent merges, its head
-branch is deleted, and GitHub's automatic retarget of the child races that
-deletion. The child can lose that race and be **closed**, which is
+A `--base <branch>` pull request is coupled to that branch's lifetime. With
+`delete_branch_on_merge` on, merging the parent deletes its head branch, and
+GitHub's automatic retarget of the child races that deletion. The child can lose that race and be **closed**, which is
 unrecoverable: a closed PR cannot be retargeted (`gh pr edit --base` silently
 does nothing) and cannot be reopened (`gh pr reopen` fails). The review thread is
 lost and the only way forward is a replacement PR.
-
-In one measured case (`example-org/example-repo`, 2026-08-06) the parent merged
-at 17:59:16, its head branch was deleted five seconds later, and the child that
-was based on it was closed one second after that. The race window is seconds
-wide, so there is no reaction time to lose it in.
 
 ### What targeting `main` costs
 
@@ -96,23 +92,11 @@ child's pull request. Only the branch contents need the rebase.
 
 ### Signing must survive the rebase
 
-`git rebase` rewrites commits, which strips their signatures and re-stamps the
-committer. Two traps, both measured on 2026-08-16:
-
-**Unsigned replay.** With `commit.gpgsign` off, a plain `git rebase` leaves the
-replayed commits unsigned and GitHub silently drops the Verified badge. This
-framework deliberately omits `commit.gpgsign` from the tracked config so a
-keyless clone can commit, so always pass `-c commit.gpgsign=true` explicitly.
-
-**Committer pollution from a worktree.** Never run `git config user.email ...`
-inside a linked worktree of the real repository. A plain `git config` writes the
-shared `.git/config`, so a scratch identity becomes the committer of the real
-repository's commits. GitHub's verified-signatures branch rule then rejects them
-with `reason: no_user`, even though `git verify-commit` passes locally: local
-verification uses your own allowed-signers file, while GitHub maps the committer
-email to an account. Set the identity per command
-(`git -c user.email=... -c user.name=... rebase ...`) and verify through
-`gh api`, never only through `git verify-commit`.
+`git rebase` rewrites commits, which strips their signatures. With
+`commit.gpgsign` off, a plain `git rebase` leaves the replayed commits unsigned
+and GitHub silently drops the Verified badge. This framework deliberately omits
+`commit.gpgsign` from the tracked config so a keyless clone can commit, so
+always pass `-c commit.gpgsign=true` explicitly.
 
 ## Retargeting a non-compliant PR
 
