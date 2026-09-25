@@ -84,6 +84,7 @@ if command -v zsh >/dev/null 2>&1; then
     || fail "zsh/zshenv: STARSHIP_CACHE ignores a pre-set XDG_CACHE_HOME (got '$got')"
   ok
 else
+  if [ -n "${STRICT:-}" ]; then fail "zsh unavailable and STRICT=1 - STARSHIP_CACHE value not checked"; fi
   echo "SKIP: zsh unavailable - STARSHIP_CACHE value not checked"
 fi
 # install.sh runs `starship init` from bash, which never reads zshenv, so it
