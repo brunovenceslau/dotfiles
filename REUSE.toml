@@ -6,7 +6,7 @@
 #
 # Every other tracked file states its copyright and licence in its own comment
 # syntax, which keeps the notice next to the code it covers. JSON has no
-# comment syntax at all, so the two JSON files are declared here instead. This
+# comment syntax at all, so the JSON files are declared here instead. This
 # file is the ONLY place where that indirection is allowed: a new entry means a
 # new file that genuinely cannot hold a header, not a shortcut past one.
 #
@@ -27,6 +27,16 @@ SPDX-License-Identifier = "GPL-3.0-or-later"
 # Claude Code's settings file. Its empty attribution block is what keeps an
 # agent co-author out of this repo's commits, so it is tracked deliberately.
 path = ".claude/settings.json"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+# The expected GitHub settings, read by jq in bin/repo-settings-check and
+# tests/repo_settings_test.sh. JSON so both halves of the drift gate read it
+# with a tool the gates already require, and so it diffs directly against the
+# JSON that `gh api` returns.
+path = ".github/repo-settings.json"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
 SPDX-License-Identifier = "GPL-3.0-or-later"
