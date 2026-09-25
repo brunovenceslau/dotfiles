@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# zsh/.zshrc.local.example - copy to .zshrc.local (same directory) and edit:
+#     cp ~/.config/zsh/.zshrc.local.example ~/.config/zsh/.zshrc.local
+# Untracked, never uninstalled. Sourced LAST by
+# .zshrc, so it can tune anything: the DOTFILES_* knobs below, plus arbitrary
+# host-specific zsh (extra aliases/functions, PATH tweaks, secret exports).
+# Everything here is COMMENTED OUT - the bare copy is a no-op until you edit it.
+
+# ── Update-channel cadence (zsh/update-check.zsh) ────────────────────────────
+# export DOTFILES_UPDATE_CADENCE_DAYS=3    # how often the background fetch runs        (default: 3)
+# export DOTFILES_UPDATE_STALENESS_DAYS=30 # warn if no verified update in N days       (default: 30)
+# export DOTFILES_UPDATE_DISABLE=1         # set to 1 to turn the update sentinel off entirely
