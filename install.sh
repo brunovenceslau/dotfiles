@@ -202,9 +202,9 @@ _migrate_legacy_history() {
 _cache_shell_inits() {
   local cache_dir="$xdg_cache/zsh" tool bin out tmp
   mkdir -p "$cache_dir" || { warn "could not create $cache_dir - shell integrations will be skipped"; return 0; }
-  # canga replaced devctl, the completion this framework integrated with before
-  # it, and nothing sources devctl's cache any more. Removed on every run (a
-  # no-op once it is gone), or the orphan outlives the replacement.
+  # Nothing sources a devctl completion cache, and the loop below never writes
+  # one, so a host that still holds devctl-completion.zsh would keep an orphan
+  # that only --purge clears. Removed on every run; a no-op once it is gone.
   rm -f -- "$cache_dir/devctl-completion.zsh"
   for tool in starship zoxide canga; do
     # A case, not a lookup table: bash 3.2 has no associative arrays. `set --`
@@ -346,10 +346,9 @@ do_upgrade() {
 # never an in-process call. install.sh sources lib/ at start-up and git swaps a
 # modified file by unlink+create, so after the merge THIS process still holds the
 # PRE-merge engine while $DOTFILES holds the post-merge tree: an in-process relink
-# applies the OLD link rules to the NEW config, silently, with every gate green.
-# That is the pre-merge-engine defect: the pre-merge engine applied the OLD
-# exceptions table to a config/ tree whose rules had changed. A child re-reads
-# the merged tree from disk.
+# applies the OLD link rules to the NEW config, silently, with every gate green:
+# the OLD exceptions table against a config/ tree whose rules have changed. A
+# child re-reads the merged tree from disk.
 #
 # The child runs POST-MERGE code - but so does the merged zshrc at the next shell,
 # so the delta is timing, not reachability. What IS guaranteed by construction is its SCOPE: it
@@ -364,8 +363,9 @@ do_upgrade() {
 # The up-to-date path calls this too. An upgrade interrupted after
 # its merge leaves the installed state behind the tree, and re-running
 # dotfiles-upgrade is the user's recovery path - so "nothing to merge" must still
-# converge instead of returning success without doing anything, which is what made
-# the pre-merge-engine defect permanent rather than merely a one-cycle lag.
+# converge instead of returning success without doing anything. Otherwise a
+# stale relink from an interrupted upgrade would stay wrong forever instead of
+# for one cycle.
 _upgrade_apply() {
   local rc=0
   # >>> POST-MERGE BOUNDARY
@@ -446,9 +446,9 @@ EOF
     rm -f "$xdg_state/dotfiles/update-available"
     log "upgrade: already up to date"
     # Nothing to merge is NOT nothing to do - reconcile the installed
-    # state against the current tree. Returning here unconditionally is what made
-    # the pre-merge-engine defect survive: the user's natural recovery (re-run dotfiles-upgrade) reported
-    # success forever while the links stayed wrong.
+    # state against the current tree. Returning here unconditionally would make
+    # the user's natural recovery (re-run dotfiles-upgrade) report success
+    # forever while the links stayed wrong.
     _upgrade_apply || { warn "upgrade: reconciliation reported problems"; return 1; }
     return 0
   fi
@@ -476,9 +476,10 @@ EOF
 
 # authoring-side advisory. The tracked git config deliberately omits
 # commit.gpgsign (a keyless fresh clone must still be able to commit), so a host
-# with no config.local commits UNSIGNED with no other signal - and nothing catches
-# that until another machine's post-cutover upgrade REFUSES those commits. Warn once
-# at install time, pointing at the example. Non-fatal; reads the global config
+# with no config.local commits UNSIGNED with no other signal: nothing local
+# refuses the commit, and it surfaces only after the push, as a missing Verified
+# badge or a remote branch rule that requires signatures. Warn once at install
+# time, pointing at the example. Non-fatal; reads the global config
 # (the linked ~/.config/git/config + its config.local include).
 _signing_advisory() {
   command -v git >/dev/null 2>&1 || return 0

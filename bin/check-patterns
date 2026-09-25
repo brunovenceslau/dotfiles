@@ -25,8 +25,8 @@
 #         `\`-continued line is not caught (the macOS CI leg's real make 3.81 backstops it).
 #     (4) a drifted pinned-plugin shim premise in the SHA-pinned zsh plugins - the one pinned
 #         `$(uname -a)` shape the startup fork-free path relies on; a bump that
-#         reshapes it must re-verify the shim. (The second premise, pure.zsh's
-#         `who -m`, retired with pure - see the note above the check itself.)
+#         reshapes it must re-verify the shim. It is the only startup fork a shim
+#         covers - see the note above the check itself.
 #     (5) a LONE `/opt/homebrew` - the Homebrew prefix MUST be resolved by directory
 #         existence, so naming the Apple Silicon prefix without the Intel one on the
 #         same line is the shape of a hardcode that breaks the Intel mac silently.
@@ -239,9 +239,9 @@ fi
 # The forkgate measures EXECS, not the semantic shape a bump could change:
 # fast-syntax-highlighting.plugin.zsh forks `$(uname -a)` at source time, answered by the zshrc
 # `uname` function shim. If a bump removed or reshaped it, the shim would stop covering the real
-# fork with no gate to notice, regressing the fork-free startup path. (The second premise here
-# used to be pure.zsh's `who -m` guard; pure was replaced by starship, whose init is cached at
-# install time and forks nothing at startup, so there is no shim to re-verify.) This file lives
+# fork with no gate to notice, regressing the fork-free startup path. It is the only shim
+# premise: the prompt (starship) and zoxide are cached at install time and fork nothing at
+# startup, so they have no shape to re-verify here. This file lives
 # in a SHA-pinned submodule EXCLUDED from the shared scan above, so reference it by explicit
 # path; a present-but-missing shape fails closed, while an ABSENT file (uninitialized submodule)
 # is a loud skip, STRICT-escalated.

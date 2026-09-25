@@ -225,8 +225,9 @@ _link_git() {
   local dir="$1" cfg="$2" root="$3"
   local gitdir="$cfg/git" dest="$cfg/git/config" tracked="$dir/config" target
   [ -e "$tracked" ] || return 0   # a stripped subset without the tracked config: nothing to do
-  # (1) Convert a pre-migration WHOLE-DIR symlink (~/.config/git -> repo/config/git):
-  #     remove ONLY the link (never its target) so a real dir can hold the local file.
+  # (1) Convert a WHOLE-DIR symlink into the repo (~/.config/git -> repo/config/git),
+  #     which would make the tracked config git's global write target: remove ONLY
+  #     the link (never its target) so a real dir can hold the local file.
   if [ -L "$gitdir" ]; then
     target="$(readlink "$gitdir")"
     case "$target" in
@@ -271,9 +272,9 @@ _link_git() {
 # _write_git_local_config DEST TRACKED - write a real, machine-local git config at
 # DEST that [include]s the TRACKED config by ABSOLUTE path (a relative include would
 # resolve against ~/.config/git, not the repo). The tracked config carries its own
-# relative `[include] config.local` -> <repo>/config/git/config.local, honored on an
-# UPGRADE (where the pre-migration config.local was reached through the old
-# whole-dir symlink). The second, relative include below resolves ~/.config/git/config.local -
+# relative `[include] config.local` -> <repo>/config/git/config.local, which keeps
+# a config.local that sits in the checkout working after step (1) converts a
+# whole-dir symlink. The second, relative include below resolves ~/.config/git/config.local -
 # where the host's git identity and signing key are written on a FRESH
 # install - so BOTH includes are load-bearing: trimming the second would silently
 # break signing resolution on a fresh host. Written via a mktemp sibling + mv so
