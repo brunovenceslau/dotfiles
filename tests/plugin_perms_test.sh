@@ -90,7 +90,11 @@ done
 # macOS's chmod does: it reports the `--` as a missing file, still applies the
 # mode to every other operand (on host 1 the warning printed yet no g+w/o+w
 # path was left), and exits 1. The real chmod runs under POSIXLY_CORRECT=1, so
-# a GNU host checks the call twice.
+# a GNU host checks the call twice. The variable MUST reach the real chmod ONLY:
+# exported to the sourcing bash it puts bash in POSIX mode, where macOS's bash
+# 3.2 rejects lib/os.sh's dashed function names (`is-arm64`) and lib/link.sh's
+# process substitution, so sourcing install.sh fails (the first macOS CI run of
+# this case, 2026-09-25; reproduced under bash 3.2.57).
 real_chmod="$(command -v chmod)" || fail "no chmod on PATH"
 bsd="$work/bsd"; mkdir -p "$bsd"; clog="$work/chmod.log"
 cat > "$bsd/chmod" <<SHIM
@@ -114,7 +118,7 @@ for a in "\$@"; do
   fi
 done
 shift "\$n"
-rc=0; "$real_chmod" "\$@" || rc=\$?
+rc=0; POSIXLY_CORRECT=1 "$real_chmod" "\$@" || rc=\$?
 [ "\$bad" = 0 ] || exit 1
 exit "\$rc"
 SHIM
@@ -130,7 +134,7 @@ fi
 chmod -R g+w "$fx/zsh/plugins"   # re-loosen what case (2) hardened
 [ -n "$(writable)" ] || fail "fixture: could not re-loosen zsh/plugins for case 4"
 : > "$clog"
-err="$(PATH="$bsd:$PATH" POSIXLY_CORRECT=1 \
+err="$(PATH="$bsd:$PATH" \
   bash -c '. "$1"; DOTFILES="$2"; harden_plugin_perms' _ "$installer" "$fx" 2>&1 >/dev/null)" \
   || fail "harden_plugin_perms returned non-zero under BSD argv parsing"
 [ -s "$clog" ] || fail "harden_plugin_perms never reached the chmod shim (case would be vacuous)"
