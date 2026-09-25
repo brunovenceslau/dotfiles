@@ -70,7 +70,7 @@ while IFS= read -r pat; do
 done <<'PATS'
 zsh[[:space:]]+-n
 (/bin/)?bash[[:space:]]+-n
-bin/(check-patterns|secret-scan|smoke|startup-fork-gate)
+bin/(check-patterns|secret-scan|smoke|startup-fork-gate|repo-settings-check)
 reuse[[:space:]]+lint
 gitleaks[[:space:]]+(dir|git|file|directory|stdin|detect|protect)
 PATS

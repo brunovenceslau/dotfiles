@@ -27,7 +27,7 @@ TEST_FILES   := $(wildcard tests/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns test reuse gitleaks smoke secret-scan forkgate local-ci
+.PHONY: help lint check-patterns test reuse gitleaks smoke secret-scan forkgate local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
@@ -39,6 +39,7 @@ help:
 	@echo "  make secret-scan  high-confidence secret scan over the tracked tree"
 	@echo "  make forkgate   prove 'zsh -i -c exit' invokes no external binary"
 	@echo "  make local-ci   every locally-runnable CI gate; reports skipped legs"
+	@echo "  make repo-settings-check  maintainer-run: diff live GitHub settings vs .github/repo-settings.json"
 
 # Lint = shellcheck (install.sh, lib/, bin/) + `zsh -n` over all
 #   .zsh + `/bin/bash -n` over the bash surface + static-pattern checks +
@@ -183,3 +184,14 @@ local-ci: lint test reuse gitleaks secret-scan smoke forkgate
 	else \
 	  echo "local-ci: SKIP gitleaks (not installed locally; enforced in CI)"; \
 	fi
+
+# The ONLINE half of the settings-vs-docs drift gate: diff the live GitHub
+#   settings against .github/repo-settings.json with `gh api` under the
+#   operator's own auth. Deliberately NOT a prerequisite of local-ci and never
+#   called from CI: a pull request from a fork cannot run these calls without
+#   exposing a token to untrusted code, and several endpoints need admin rights.
+#   The OFFLINE half (the docs and ci.yml held to the same file) is
+#   tests/repo_settings_test.sh, which `make test` runs on every pull request.
+#   No STRICT skip: a missing gh or jq is exit 2, never a pass.
+repo-settings-check:
+	@bin/repo-settings-check
