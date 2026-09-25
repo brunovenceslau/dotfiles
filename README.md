@@ -81,8 +81,8 @@ adapt it. It is a starting point you own, not a product you configure.
 
 ## Install
 
-Three lines on a machine that already has `git`. Cloning needs no
-authentication: the repository is public and read access is anonymous.
+Three lines on a machine that already has `git`. Cloning over HTTPS needs no
+credentials.
 
 ```sh
 git clone --recurse-submodules https://github.com/brunovenceslau/dotfiles.git ~/.config/dotfiles

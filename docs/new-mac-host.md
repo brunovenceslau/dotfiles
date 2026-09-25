@@ -36,8 +36,8 @@ brew install gh        # only for step 2 and for registering a signing key
 
 ## 2. Authenticate to GitHub (only if you will push)
 
-Skip this step if you only want to install the framework: the clone in step 3 is
-public and reads without credentials. Do it if you will push to your own fork,
+Skip this step if you only want to install the framework: the HTTPS clone in
+step 3 needs no credentials. Do it if you will push to your own fork,
 or if you will register a signing key with `gh` in step 4.
 
 Repository access and commit signing use separate keys. Cloning needs neither.

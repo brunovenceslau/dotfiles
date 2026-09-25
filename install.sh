@@ -431,7 +431,7 @@ $cred_all
 EOF
   if ! GIT_TERMINAL_PROMPT=0 vgit -c credential.helper="$cred_helper" fetch origin; then
     warn "upgrade: fetch failed"
-    warn "  Network unreachable? Check that first: the public HTTPS remote needs"
+    warn "  Network unreachable? Check that first: the upstream HTTPS remote needs"
     warn "  no credentials to fetch."
     warn "  Credentials needed (a private fork, or an SSH remote)? The upgrade"
     warn "  fetch scrubs ~/.gitconfig and reads only the XDG config, so put a"

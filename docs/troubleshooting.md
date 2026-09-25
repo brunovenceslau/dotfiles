@@ -229,8 +229,8 @@ existing backup, see [Install refuses a link](#install-refuses-a-link).
 **Cause.** The remote needs credentials and none are wired: you are pushing, or
 the remote is a private fork. Either `gh` is not wired as the credential helper,
 or the helper was written to `~/.gitconfig` and disappeared with the XDG-only
-cleanup. `gh auth login` alone is not enough. A read-only clone of the public
-repository never reaches this.
+cleanup. `gh auth login` alone is not enough. A read-only HTTPS clone of the
+upstream repository never reaches this.
 
 **Fix.**
 
@@ -326,7 +326,7 @@ neutralize a hostile `url.insteadOf` or `gpg.ssh.program`. It then re-injects
 only the credential helper it can read from the XDG config. A helper that lives
 anywhere else is not seen, and the fetch runs with `GIT_TERMINAL_PROMPT=0`, so
 it fails instead of prompting. Credentials only matter when the remote is a
-private fork or an SSH URL; the public HTTPS remote fetches without them.
+private fork or an SSH URL; the upstream HTTPS remote fetches without them.
 
 **Fix.** Check the network first. If the remote needs credentials, put the
 helper where the upgrade reads it:
