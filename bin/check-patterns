@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Nine checks across our OWN runtime surface
+#   `make lint` includes. Ten checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
 #   we police our code, not upstream's):
 #     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
@@ -41,6 +41,9 @@
 #     (9) an early-exit reader (`grep -q`/`-m`/`-l`, `head`) on the right of a
 #         pipe in the pipefail surface - the writer can die of SIGPIPE when the
 #         reader exits first, failing the pipeline at random.
+#    (10) a `--` after the first operand of a file or text tool (`chmod -R go-w --`)
+#         - BSD getopt on macOS stops at the first operand and reads the `--` as a
+#         file, which GNU's argv permutation hides from every Linux run.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -79,7 +82,7 @@ fi
 
 bad=0
 
-# --- code/comment split, used by arms (5)-(8) ---------------------------------
+# --- code/comment split, used by arms (5)-(10) --------------------------------
 # The comments that STATE these constraints necessarily spell the forbidden
 # literals - install.sh's own "no associative arrays, no mapfile, no ${var,,}"
 # header, and every `# never hardcode /opt/homebrew` a reader deserves beside the
@@ -456,6 +459,92 @@ if [ "${#eex[@]}" -gt 0 ]; then
     if [ "$rc" -ge 2 ]; then
       printf '%s\n' "$out" >&2
       echo "check-patterns: early-exit-reader scan errored (exit $rc) - failing closed" >&2
+      bad=1
+    fi
+  fi
+fi
+
+# (10) forbid a `--` AFTER the first operand of a file or text tool. macOS's
+# tools parse argv with BSD getopt, which stops at the first non-option: in
+# `chmod -R go-w -- "$d"` the mode ends option parsing, so the `--` is a FILE
+# operand ("chmod: --: No such file or directory", exit 1). GNU getopt permutes
+# argv and accepts either order, so no Linux run sees the break, and a caller
+# that swallows the exit code hides it on a mac too: install.sh's
+# harden_plugin_perms warned on every mac install this way while the macOS CI
+# legs stayed green (measured 2026-09-25). The fix is always to move `--` in
+# front of the first operand: `chmod -R -- go-w "$d"`, `grep -q -- "$pat" "$f"`.
+# SURFACE: the same files as arm 8 - everything that runs on a mac.
+# SHAPE: a command word in command position (line start; after `; & | ( ) { ! `,
+# the `)` covering a case arm `pat) cmd`; or behind a workflow `run:`,
+# then/do/else/elif/if/while/until/time/sudo/command/exec/env/nohup; then env
+# assignments, then optionally a path), then option tokens, then a token that
+# does not start with `-` (the first operand), then any tokens, then a bare `--`.
+# A token is unquoted text plus WHOLE quoted strings, so a ` -- ` inside a quoted
+# pattern is not the delimiter. An option that takes an argument (`grep -e PAT`,
+# `mkdir -m 700`) would make a separate argument read as the first operand, so
+# each tool family names its argument-taking short letters. The FIRST such
+# letter in a cluster takes the argument, as getopt does: the rest of the
+# cluster when anything follows it (`-em` is `-e m`), else the next token
+# (`-qe PAT`). Families: chmod chown chgrp rm rmdir cat (none); cp mv ln (S t,
+# GNU); mkdir (m); touch (A d r t); grep egrep fgrep (A B C D d e f m); sed
+# (e f i).
+# NOT covered: other tools (find has no such `--`: its paths come first); a
+# command behind `\` (`\rm`), `env` or `sudo` with options (`env -i`,
+# `sudo -n`), `coproc`, `$CMD` indirection, `find -exec`, xargs, an alias or an
+# `sh -c '...'` string; and a call split across `\` lines.
+# KNOWN FALSE POSITIVES, from matching text, not parsing shell: a LONG option
+# that takes a separate argument (`grep --regexp PAT -- f`) reads PAT as the
+# first operand - write `--regexp=PAT`; a redirection before the `--`
+# (`rm 2>/dev/null -- f`) reads as the first operand - put it last; and quoted
+# prose or an unquoted `$(...)` argument holding a separator or keyword before a
+# tool name and a later ` -- ` (`warn "x; rm it by hand -- see docs"`) reads as
+# a call - rephrase it. None of these exists in the tree.
+dd=()
+for p in install.sh lib bin zsh tests Makefile .github/workflows; do
+  [ -e "$root/$p" ] && dd+=("$root/$p")
+done
+if [ "${#dd[@]}" -gt 0 ]; then
+  dd_pos='((^|[;&|(){!`])[[:space:]]*'                   # after a separator; `)` ends a case pattern
+  dd_pos="$dd_pos"'|(^|[^[:alnum:]_-])(run:|then|do|else|elif|if|while|until|time|sudo|command|exec|env|nohup)[[:space:]]+)'
+  dd_pos="$dd_pos"'([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'  # env assignments: LC_ALL=C grep
+  dd_pos="$dd_pos"'([^[:space:];&|()]*/)?'                 # a path prefix: /bin/rm
+  # A TOKEN is unquoted text plus whole quoted strings, so a ` -- ` INSIDE a quoted
+  # pattern (`grep -qx 'install --pin v1 -- gh'`) is not read as the delimiter. It
+  # never crosses `; & | ( )`: a `)` closes the `$(...)` the command sits in.
+  q="'"
+  dd_qs="${q}[^${q}]*${q}|\"[^\"]*\""
+  dd_tok="([^[:space:];&|()$q\"]|$dd_qs)+"
+  dd_tail="[[:space:]]+([^-[:space:];&|()$q\"]|$dd_qs)([^[:space:];&|()$q\"]|$dd_qs)*"
+  dd_tail="$dd_tail([[:space:]]+$dd_tok)*[[:space:]]+--([[:space:];&|)]|\$)"
+  # _dd_family TOOLS LETTERS -> one alternative: TOOLS, their options, the tail.
+  _dd_family() {
+    local opt='[[:space:]]+(--[^[:space:]]+|-[^[:space:]-]+)'
+    if [ -n "$2" ]; then
+      # A cluster with no argument letter; or one whose FIRST argument letter takes
+      # the rest of the cluster (`-em`); or one ending at that letter, which takes
+      # the next token (`-qe PAT`).
+      opt="[[:space:]]+(--[^[:space:]]+|-[^[:space:]$2-]+|-[^[:space:]$2-]*[$2]$dd_tok|-[^[:space:]$2-]*[$2][[:space:]]+$dd_tok)"
+    fi
+    printf '%s' "$dd_pos($1)($opt)*$dd_tail"
+  }
+  dd_re="$(_dd_family 'chmod|chown|chgrp|rm|rmdir|cat' '')"
+  dd_re="$dd_re|$(_dd_family 'cp|mv|ln' 'St')"
+  dd_re="$dd_re|$(_dd_family 'mkdir' 'm')"
+  dd_re="$dd_re|$(_dd_family 'touch' 'Adrt')"
+  dd_re="$dd_re|$(_dd_family '[ef]?grep' 'ABCDdefm')"
+  dd_re="$dd_re|$(_dd_family 'sed' 'efi')"
+  if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$dd_re" "${dd[@]}" 2>&1); then
+    viol=$(printf '%s\n' "$out" | _code_hits "$dd_re")
+    if [ -n "$viol" ]; then
+      printf '%s\n' "$viol" >&2
+      echo "check-patterns: a '--' after the first operand - BSD getopt (macOS) stops at the first non-option, so the '--' becomes a file operand; put it before the first operand (chmod -R -- go-w \"\$d\")" >&2
+      bad=1
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      printf '%s\n' "$out" >&2
+      echo "check-patterns: '--' placement scan errored (exit $rc) - failing closed" >&2
       bad=1
     fi
   fi
