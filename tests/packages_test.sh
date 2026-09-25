@@ -87,13 +87,73 @@ gcalls="$(
 printf '%s\n' "$gcalls" | grep -qF -- "--pin $gsha -- github/gh-stack" \
   || fail "gh: gh-stack not installed pinned with the -- belt (got: $gcalls)"
 
-# (2) idempotent: `gh extension list` already shows it -> NOT re-installed.
+# (2) idempotent: `gh extension list` already shows it AT ITS PIN -> nothing runs.
+# gh prints a git extension's commit as its first 8 characters.
 gcalls2="$(
   command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
-  gh() { case "$1 $2" in ('extension list') printf 'gh stack\tgithub/gh-stack\tv1.0\n' ;; ('extension install') echo "install $*" ;; esac; }
+  gh() { case "$1 $2" in ('extension list') printf 'gh stack\tgithub/gh-stack\t%s\n' "${gsha%"${gsha#????????}"}" ;; ('extension '*) echo "$*" ;; esac; }
   warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$gdot" _packages_gh_extensions )"
-ck "gh: idempotent - no re-install when already present" "$(printf '%s\n' "$gcalls2" | grep -c 'install')" "0"
+ck "gh: idempotent - no remove/install when already at the pin" "$(printf '%s\n' "$gcalls2" | grep -cE 'install|remove' || true)" "0"
+
+# (2b) a PIN BUMP reaches a host that already has the extension: the installed
+# version differs from the manifest pin -> remove by name, then install at the pin.
+tdot="$work/tdot"; mkdir -p "$tdot/packages"
+printf 'github/gh-stack v0.2.0\n' > "$tdot/packages/gh-extensions.txt"
+gcalls2b="$(
+  command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
+  gh() { case "$1 $2" in ('extension list') printf 'gh stack\tgithub/gh-stack\tv0.1.0\n' ;; ('extension '*) echo "$*" ;; esac; }
+  warn() { :; }; log() { :; }
+  . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
+ck "gh: pin bump -> remove then install at the new pin" "$(printf '%s ' $gcalls2b)" \
+  "extension remove -- gh-stack extension install --pin v0.2.0 -- github/gh-stack "
+# The same tag already installed -> nothing runs.
+gcalls2c="$(
+  command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
+  gh() { case "$1 $2" in ('extension list') printf 'gh stack\tgithub/gh-stack\tv0.2.0\n' ;; ('extension '*) echo "$*" ;; esac; }
+  warn() { :; }; log() { :; }
+  . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
+ck "gh: tag pin already installed -> no-op" "$(printf '%s\n' "$gcalls2c" | grep -cE 'install|remove' || true)" "0"
+
+# (2e) a re-pin whose new pin is NOT reachable upstream (offline, or a bad pin)
+# never removes the working extension.
+gcalls2e="$(
+  command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
+  gh() { case "$1 $2" in ('extension list') printf 'gh stack\tgithub/gh-stack\tv0.1.0\n' ;; ('extension '*) echo "$*" ;; (api*) return 1 ;; esac; }
+  warn() { echo "WARN $*"; }; log() { :; }
+  . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
+ck "gh: unreachable pin -> nothing removed or installed" "$(printf '%s\n' "$gcalls2e" | grep -cE '^extension (remove|install)' || true)" "0"
+printf '%s\n' "$gcalls2e" | grep -q 'not confirmed upstream' \
+  || fail "gh: unreachable pin did not warn (got: $gcalls2e)"
+
+# (2f) the new pin is reachable but its install FAILS after the remove: the
+# previous version is reinstalled, and the warning prints the exact retry.
+gcalls2f="$(
+  command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
+  gh() { case "$1 $2 ${3-} ${4-}" in
+      ('extension list '*) printf 'gh stack\tgithub/gh-stack\tv0.1.0\n' ;;
+      ('extension install --pin v0.2.0') echo "$*"; return 1 ;;
+      ('extension '*) echo "$*" ;;
+    esac; }
+  warn() { echo "WARN $*"; }; log() { :; }
+  . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
+printf '%s\n' "$gcalls2f" | grep -qx 'extension install --pin v0.1.0 -- github/gh-stack' \
+  || fail "gh: a failed re-pin did not restore the previous version (got: $gcalls2f)"
+printf '%s\n' "$gcalls2f" | grep -qF 'retry: gh extension remove gh-stack; gh extension install --pin v0.2.0 -- github/gh-stack' \
+  || fail "gh: a failed re-pin did not print the exact recovery command (got: $gcalls2f)"
+pass=$((pass + 2))
+
+# (2d) the installed check matches the EXACT repo, not a substring: only
+# owner/gh-foobar is installed, so owner/gh-foo must still be installed.
+pdot="$work/pdot"; mkdir -p "$pdot/packages"
+printf 'owner/gh-foo v1.0.0\n' > "$pdot/packages/gh-extensions.txt"
+gcalls2d="$(
+  command() { if [ "$1" = -v ] && [ "$2" = gh ]; then echo /gh; return 0; fi; builtin command "$@"; }
+  gh() { case "$1 $2" in ('extension list') printf 'gh foobar\towner/gh-foobar\tv1.0.0\n' ;; ('extension '*) echo "$*" ;; esac; }
+  warn() { :; }; log() { :; }
+  . "$repo_root/lib/packages.sh"; DOTFILES="$pdot" _packages_gh_extensions )"
+ck "gh: prefix collision -> owner/gh-foo still installed, nothing removed" "$(printf '%s ' $gcalls2d)" \
+  "extension install --pin v1.0.0 -- owner/gh-foo "
 
 # (3) guard: gh absent -> skip, no install attempt, rc 0 (best-effort, never fatal).
 grc=0; gout="$(

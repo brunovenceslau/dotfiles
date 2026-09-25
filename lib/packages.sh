@@ -52,9 +52,18 @@ _packages_gh_ext_list() {
 # being present (it is installed by the brew step, but a host without it just
 # skips), and best-effort: an install failure warns and the function still returns
 # 0, so a flaky network never fails `install.sh packages`.
+#
+# Idempotent by NAME AND PIN. The installed version is read from `gh extension
+# list` (tab-separated when not on a terminal: name, owner/repo, version) and
+# matched on the EXACT repo field - a substring match would report owner/gh-foo
+# installed when only owner/gh-foobar is. A pin bump in the manifest must reach
+# hosts that already carry the extension, and `gh extension upgrade` skips pinned
+# extensions, so a version that differs from the pin is removed and reinstalled
+# at the pin. gh prints a git extension's commit as its first 8 characters, so a
+# 40-hex pin also matches on that prefix.
 _packages_gh_extensions() {
   command -v gh >/dev/null 2>&1 || { log "packages: gh not on PATH - skipping gh extensions"; return 0; }
-  local exts installed repo pin
+  local exts installed repo pin cur
   exts="$(_packages_gh_ext_list "$DOTFILES/packages/gh-extensions.txt" "$DOTFILES/packages/gh-extensions.local.txt")"
   [ -n "$exts" ] || return 0
   installed="$(gh extension list 2>/dev/null || true)"
@@ -63,17 +72,56 @@ _packages_gh_extensions() {
   # owner (already blocked by the validator) can never be read as a gh flag.
   while IFS=' ' read -r repo pin; do
     [ -n "$repo" ] || continue
-    if printf '%s\n' "$installed" | grep -qF -- "$repo"; then
-      log "packages: gh extension already installed: $repo"
-    else
+    # "-" marks "not installed"; an installed extension with no version prints "".
+    cur="$(printf '%s\n' "$installed" | awk -F '\t' -v r="$repo" '$2 == r { print $3; found = 1; exit } END { if (!found) print "-" }')"
+    if [ "$cur" = "$pin" ] || { [ "${#pin}" -eq 40 ] && [ "$cur" = "$(printf '%s' "$pin" | cut -c1-8)" ]; }; then
+      log "packages: gh extension already installed at its pin: $repo ($pin)"
+      continue
+    fi
+    if [ "$cur" = "-" ]; then
       log "packages: installing gh extension: $repo (pinned $pin)"
       gh extension install --pin "$pin" -- "$repo" \
-        || warn "packages: gh extension install failed (non-fatal): $repo"
+        || warn "packages: gh extension install failed (non-fatal): $repo - retry: gh extension install --pin $pin -- $repo"
+      continue
+    fi
+    # A re-pin must remove first (gh refuses to install over an installed
+    # extension, and `upgrade` ignores pins), so a failed install would leave the
+    # host WITHOUT the extension. Guard both ends: remove only once the new pin is
+    # confirmed to exist upstream, and if the install still fails, put the
+    # previous version back and print the exact command to retry.
+    if ! _packages_gh_pin_exists "$repo" "$pin"; then
+      warn "packages: gh extension $repo: pin $pin not confirmed upstream (offline, gh not authenticated - try 'gh auth status' - or a bad pin) - left at ${cur:-its current version}"
+      continue
+    fi
+    log "packages: gh extension $repo is at ${cur:-an unknown version}, re-pinning to $pin"
+    # Removed by its name, which gh derives from the repo's last component.
+    gh extension remove -- "${repo##*/}" \
+      || { warn "packages: gh extension remove failed (non-fatal): $repo - left at ${cur:-its current version}"; continue; }
+    if ! gh extension install --pin "$pin" -- "$repo"; then
+      warn "packages: gh extension install failed (non-fatal): $repo at $pin"
+      if [ -n "$cur" ] && gh extension install --pin "$cur" -- "$repo"; then
+        warn "packages:   restored the previous version $cur"
+      else
+        warn "packages:   $repo is NOT installed now"
+      fi
+      warn "packages:   retry: gh extension remove ${repo##*/}; gh extension install --pin $pin -- $repo"
     fi
   done <<EOF
 $exts
 EOF
   return 0
+}
+
+# _packages_gh_pin_exists REPO PIN - whether PIN resolves upstream: a vX.Y.Z pin
+# as a release (gh installs a binary extension from its release assets), a
+# 40-hex pin as a commit. One API call; a network failure reads as "no", which
+# is the safe answer for the caller (it then leaves the installed version alone).
+_packages_gh_pin_exists() {
+  local repo="$1" pin="$2"
+  case "$pin" in
+    v*) gh api "repos/$repo/releases/tags/$pin" >/dev/null 2>&1 ;;
+    *)  gh api "repos/$repo/commits/$pin" >/dev/null 2>&1 ;;
+  esac
 }
 
 # _packages_brew - brew bundle the tracked Brewfile, then the

@@ -23,9 +23,10 @@
 # SHA-pinned git submodule: gh downloads a mutable release ASSET, so a maintainer
 # who re-uploads the tag's asset could change the executed bytes. Accepted residual
 # for a dev-tooling CLI from GitHub's own org, guarded on `command -v gh` and
-# best-effort. Installation is idempotent by extension NAME (an already-installed
-# gh-stack is skipped - a pin BUMP is applied on a fresh install; existing installs
-# re-pin only on re-provision or an explicit upgrade, tracked as a follow-up).
+# best-effort. Installation is idempotent by repo AND pin: an extension already
+# at its pin is skipped, and one at any other version is removed and reinstalled
+# at the pin, so a pin BUMP here reaches existing hosts on the next
+# `install.sh packages`.
 #
 # gh-stack: GitHub's native stacked-PR CLI (github org). It is the workflow every
 # host uses to open large PR stacks and land them bottom-up with
