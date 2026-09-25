@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Code owners. One maintainer, every path: there is no area of this repository
+# that someone else reviews, so a narrower rule would only create the illusion
+# of a second reviewer. The last matching rule wins in this file, so a future
+# per-area owner goes BELOW this line, never above it.
+* @brunovenceslau
