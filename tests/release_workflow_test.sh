@@ -138,66 +138,37 @@ ok "cliff.toml is conventional-commits only, merge commits skipped, grouped by t
 
 # --- Well-formedness + structure (PyYAML; loud skip when absent) --------------
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
-  python3 - "$wf" <<'PY' || fail "PyYAML structural checks failed (see above)"
-import re, sys, yaml
+  # tests/release_workflow_check.py, not a `python3 - <<'PY'` heredoc: it keeps
+  # the PyYAML checks (Python's regex dialect) out of a `.sh` file that
+  # bin/check-patterns arm (8) scans for GNU-only SHELL-regex escapes. See that
+  # file's header for why.
+  python3 "$repo_root/tests/release_workflow_check.py" "$wf" \
+    || fail "PyYAML structural checks failed (see above)"
+  ok "PyYAML structural checks pass on the real release.yml"
 
-with open(sys.argv[1]) as f:
-    doc = yaml.safe_load(f)
+  # --- release_workflow_check.py's own failure contract ------------------------
+  # A `|| fail` around a check that never actually fails proves nothing: this
+  # feeds the script a MUTATED copy of release.yml and asserts it exits non-zero,
+  # so the failure path above is known to fire on a real defect, not just to be
+  # unreachable dead code. mktemp dir, cleaned up on exit like
+  # tests/check_patterns_test.sh's own fixture trees.
+  mut_dir="$(mktemp -d "${TMPDIR:-/tmp}/release_workflow_check_test.XXXXXX")"
+  trap 'rm -rf "$mut_dir"' EXIT INT TERM
+  mut_wf="$mut_dir/release.yml"
+  # A plain string swap, no regex: breaks the `job.get("runs-on") ==
+  # "ubuntu-latest"` assertion without touching anything else in the file.
+  sed 's/ubuntu-latest/ubuntu-24.04/' "$wf" > "$mut_wf"
+  grep -q 'ubuntu-24.04' "$mut_wf" || fail "fixture bug: the runs-on mutation did not apply"
+  if python3 "$repo_root/tests/release_workflow_check.py" "$mut_wf" >/dev/null 2>&1; then
+    fail "release_workflow_check.py must fail on a mutated release.yml (runs-on changed), but it exited 0"
+  fi
+  ok "release_workflow_check.py fails on a mutated release.yml (runs-on changed)"
 
-assert isinstance(doc, dict), "workflow is not a YAML mapping"
-
-# `on:` parses as the YAML 1.1 boolean True key.
-trigger = doc.get(True, doc.get("on"))
-assert isinstance(trigger, dict), "workflow has no trigger mapping (`on:`)"
-assert set(trigger) == {"push"}, f"release.yml must trigger on push only, got {sorted(trigger)}"
-push = trigger["push"] or {}
-assert set(push) == {"tags"}, f"the push trigger must filter tags only, got {sorted(push)}"
-assert push["tags"] == ["v*"], f"tag filter must be ['v*'], got {push['tags']!r}"
-
-assert doc.get("permissions") == {"contents": "read"}, \
-    f"top-level permissions must be contents: read, got {doc.get('permissions')!r}"
-
-jobs = doc.get("jobs")
-assert isinstance(jobs, dict) and len(jobs) == 1, \
-    f"release.yml must define exactly one job, got {sorted(jobs or [])}"
-name, job = next(iter(jobs.items()))
-
-assert job.get("runs-on") == "ubuntu-latest", \
-    f"job {name!r} must run on ubuntu-latest, got {job.get('runs-on')!r}"
-assert job.get("permissions") == {"contents": "write"}, \
-    f"job {name!r} must hold exactly contents: write, got {job.get('permissions')!r}"
-assert job.get("continue-on-error") is not True, \
-    f"job {name!r} must not set continue-on-error"
-assert isinstance(job.get("timeout-minutes"), int), \
-    f"job {name!r} must set a timeout-minutes (a hung release job burns the runner)"
-
-steps = job.get("steps") or []
-assert steps, "the release job has no steps"
-
-checkout = [s for s in steps if str(s.get("uses") or "").startswith("actions/checkout@")]
-assert len(checkout) == 1, "expected exactly one actions/checkout step"
-with_ = checkout[0].get("with") or {}
-assert with_.get("fetch-depth") == 0, \
-    "checkout must set fetch-depth: 0 - the notes need the full history and its tags"
-assert with_.get("persist-credentials") is False, \
-    "checkout must set persist-credentials: false"
-
-# A `${{ }}` inside a run: block is substituted into the script before bash sees
-# it. Every value this workflow needs reaches its script through `env:` instead.
-for s in steps:
-    run = s.get("run")
-    if run and "${{" in run:
-        raise AssertionError(
-            f"step {s.get('name')!r} interpolates ${{{{ }}}} inside run: - pass it via env:")
-
-runs = "\n".join(str(s.get("run") or "") for s in steps)
-assert re.search(r"sha256sum[ \t]+--check", runs), "no sha256 verification in any run: step"
-assert re.search(r"gh release create[ \t]+\"\$TAG\"", runs), "no `gh release create \"$TAG\"`"
-assert "--verify-tag" in runs, "gh release create must pass --verify-tag"
-
-print(f"PyYAML: release.yml well-formed; one job {name!r} on ubuntu-latest, "
-      f"{len(steps)} steps, contents: write scoped to the job")
-PY
+  # --- missing argv[1] ----------------------------------------------------------
+  if python3 "$repo_root/tests/release_workflow_check.py" >/dev/null 2>&1; then
+    fail "release_workflow_check.py must fail with no workflow path argument, but it exited 0"
+  fi
+  ok "release_workflow_check.py fails with no argv (IndexError on sys.argv[1])"
 else
   if [ -n "${STRICT:-}" ]; then fail "PyYAML unavailable and STRICT=1 - release.yml structural checks not run"; fi
   echo "SKIP: PyYAML unavailable - release.yml structural checks not run"

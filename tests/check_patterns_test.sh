@@ -452,6 +452,58 @@ r="$work/gnu-plugins-ok"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
 printf '%s\n' "sed -E 's/\\s+//'" > "$r/zsh/plugins/p/p.zsh"
 [ "$(run "$r")" = "0" ] && ok || fail "a GNU escape inside zsh/plugins must pass (third-party)"
 
+# the only content-independent LANGUAGE exemption this arm has, scoped to
+# tests/ ONLY: a fixed `*.py` extension, never a marker or a parse of the
+# file's content (the plugins dir and this script's own name, excluded
+# elsewhere, are content-independent path exclusions, not language
+# exemptions). Python's `re` module is a different regex dialect, where these
+# escapes are portable, so non-shell code that needs one lives in its own
+# `.py` file under tests/ - see tests/release_workflow_check.py for the real
+# one.
+r="$work/gnu-py-ok"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/tests/x.py"
+[ "$(run "$r")" = "0" ] && ok || fail "a \\s inside a tests/*.py file must pass (extension exemption)"
+
+# the exemption stops at tests/: every OTHER root the arm scans is still caught,
+# because lib/link.sh's _link_bin_tree links every bin/* file onto the live PATH
+# by basename (and the rest of gnu_rest is shell-adjacent the same way) - a
+# `.py` file there holding a GNU-only regex must not slip through unscanned.
+# HARDCODED, deliberately independent of bin/check-patterns's own gnu_rest=()
+# list: this fixture is the SPEC for which roots stay fully scanned, so a root
+# dropped (or moved into its own grep pass) on the implementation side must
+# fail here, not silently shrink alongside it. install.sh and Makefile are
+# single FILES, not directories, so a "*.py under install.sh" cannot exist and
+# they have no fixture of their own.
+gnu_rest_dirs=(lib bin zsh .github/workflows)
+for d in "${gnu_rest_dirs[@]}"; do
+  r="$work/gnu-py-still-caught-${d//\//-}"; seed "$r"; mkdir -p "$r/$d"
+  printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/$d/x.py"
+  fails_with "$r" "$gnu_msg" "a \\s in $d/x.py must still fail (exemption is tests/-only)"
+done
+
+# the exemption is the FILE, not the escape: the same content in a `.sh` file is
+# still caught, proving arm 8 was not accidentally weakened for the shell surface.
+r="$work/gnu-sh-still-caught"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/tests/x.sh"
+fails_with "$r" "$gnu_msg" "the same \\s in a .sh file must still fail"
+
+# a heredoc is shell-surface TEXT to this arm - it has no notion of an embedded
+# language, so a python3 heredoc left inside a `.sh` script is still caught. The
+# extension exemption only helps once the body is actually moved to its own file.
+r="$work/gnu-heredoc-still-caught"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "python3 - <<'PY'" "import re" "re.compile(r\"\\s+\")" "PY" > "$r/tests/x_test.sh"
+fails_with "$r" "$gnu_msg" "a \\s inside a python3 heredoc in a .sh file must still fail"
+
+# the filter is an EXACT suffix `.py`, not "contains py": neither a double
+# extension nor a name that merely starts with the letters buys the exemption.
+r="$work/gnu-py-suffix-exact"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/tests/x.py.sh"
+fails_with "$r" "$gnu_msg" "a \\s in x.py.sh (not a .py file) must still fail"
+
+r="$work/gnu-py-prefix-only"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/tests/xpy"
+fails_with "$r" "$gnu_msg" "a \\s in a file named xpy (no .py suffix) must still fail"
+
 # === the early-exit-reader arm ===================================================
 # `grep -q` / `head` on the right of a pipe exit before the writer is done; under
 # pipefail the writer's SIGPIPE fails the pipeline at random. Fixtures spell the
