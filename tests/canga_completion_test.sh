@@ -72,15 +72,6 @@ listing="$(ls -A "$work/gen/cache/zsh")"
 [ "$listing" = "canga-completion.zsh" ] || fail "unexpected files beside the cache: $listing"
 ok "no stray temp or init-style file"
 
-# canga replaced devctl, the completion this framework integrated with before
-# it: the cache devctl left behind is sourced by nothing, so a run removes it.
-# Planted with no devctl on PATH, as after the replacement.
-legacy="$work/gen/cache/zsh/devctl-completion.zsh"
-printf 'compdef _devctl devctl\n' > "$legacy"
-gen ok
-[ ! -e "$legacy" ] || fail "the orphaned devctl completion cache survived a run"
-ok "the orphaned devctl completion cache is removed"
-
 gen empty
 grep -q 'FAKE-SENTINEL' "$cache" || fail "an empty generator clobbered the previous cache"
 ok "an empty generator keeps the previous cache and does not fail the install"

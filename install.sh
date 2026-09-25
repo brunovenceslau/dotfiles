@@ -7,8 +7,21 @@
 #
 # install.sh - link the dotfiles into $HOME by convention.
 #
-#   install.sh [install]   create state/cache dirs, then (re)create every link
-#   install.sh link        (re)create only the links + manifest
+# Each line below is `install.sh <name>`, then a run of 2+ spaces, then its
+#   description - that gap is load-bearing: tests/subcommand_docs_test.sh
+#   parses it to find where each subcommand's name ends.
+#
+#   install.sh [install]             create state/cache dirs, then (re)create every link
+#   install.sh link                  (re)create only the links + manifest
+#   install.sh packages              install from the tracked package manifests
+#   install.sh upgrade               fetch, fast-forward, update submodules, relink,
+#                                    recompile (wrapped by dotfiles-upgrade)
+#   install.sh uninstall [--purge]   remove framework links; --purge also clears
+#                                    generated cache/state (wrapped by dotfiles-uninstall)
+#   install.sh -h | --help | help    print a short usage line
+#
+# reseed-settings is retired: kept as a no-op, cross-version ABI only (see
+# "Treat an install.sh subcommand name as an ABI" in .claude/rules/shell-bash.md).
 #
 # The link engine, exceptions table and uninstall manifest live in lib/link.sh.
 # `make smoke` (bin/smoke) proves this installer's idempotency end-to-end on
@@ -202,10 +215,6 @@ _migrate_legacy_history() {
 _cache_shell_inits() {
   local cache_dir="$xdg_cache/zsh" tool bin out tmp
   mkdir -p "$cache_dir" || { warn "could not create $cache_dir - shell integrations will be skipped"; return 0; }
-  # Nothing sources a devctl completion cache, and the loop below never writes
-  # one, so a host that still holds devctl-completion.zsh would keep an orphan
-  # that only --purge clears. Removed on every run; a no-op once it is gone.
-  rm -f -- "$cache_dir/devctl-completion.zsh"
   for tool in starship zoxide canga; do
     # A case, not a lookup table: bash 3.2 has no associative arrays. `set --`
     # carries the generator's argv, so the call below stays one quoted "$@".

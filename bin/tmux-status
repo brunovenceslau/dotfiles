@@ -82,11 +82,12 @@ fi
 [ -n "$branch" ] && out="$(printf '\xe2\x8e\x87') $branch"   # U+2387 branch glyph
 
 # --- 1-minute load average, normalised per core -> percentage + bar ------------
-# sysctl is the macOS load source; macos/arm64 + macos/x86_64 is the whole matrix
-# (Linux was withdrawn 2026-09-13). The failure arms are not dead code: off a mac
-# these keys do not exist, sysctl fails, `load` stays empty and the segment drops
-# - the helper's degrade contract. _bar is therefore unreachable through this
-# block off a mac, which is why tests/tmux_status_test.sh drives it directly.
+# sysctl is the macOS load source; macos/arm64 + macos/x86_64 is the whole
+# matrix, since this framework has no Linux install path. The failure arms are
+# not dead code: off a mac these keys do not exist, sysctl fails, `load` stays
+# empty and the segment drops - the helper's degrade contract. _bar is
+# therefore unreachable through this block off a mac, which is why
+# tests/tmux_status_test.sh drives it directly.
 load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' 2>/dev/null || true)"  # "{ 0.52 ... }"
 cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
 case "$cores" in ''|*[!0-9]*) cores=1 ;; esac

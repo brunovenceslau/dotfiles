@@ -31,14 +31,14 @@ STRICT ?=
 
 help:
 	@echo "Targets:"
-	@echo "  make lint       shellcheck + zsh -n + /bin/bash -n + static patterns"
-	@echo "  make test           unit tests for the repo tooling (tests/*.sh)"
-	@echo "  make reuse      REUSE 3.3 compliance: every file states its copyright and licence"
-	@echo "  make gitleaks   gitleaks' maintained secret rule set over the working directory"
-	@echo "  make smoke      fresh-install smoke in a scratch HOME (install + zsh -i + idempotency)"
-	@echo "  make secret-scan  high-confidence secret scan over the tracked tree"
-	@echo "  make forkgate   prove 'zsh -i -c exit' invokes no external binary"
-	@echo "  make local-ci   every locally-runnable CI gate; reports skipped legs"
+	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns"
+	@echo "  make test                 unit tests for the repo tooling (tests/*.sh)"
+	@echo "  make reuse                REUSE 3.3 compliance: every file states its copyright and licence"
+	@echo "  make gitleaks             gitleaks' maintained secret rule set over the working directory"
+	@echo "  make smoke                fresh-install smoke in a scratch HOME (install + zsh -i + idempotency)"
+	@echo "  make secret-scan          high-confidence secret scan over the tracked tree"
+	@echo "  make forkgate             prove 'zsh -i -c exit' invokes no external binary"
+	@echo "  make local-ci             every locally-runnable CI gate; reports skipped legs"
 	@echo "  make repo-settings-check  maintainer-run: diff live GitHub settings vs .github/repo-settings.json"
 
 # Lint = shellcheck (install.sh, lib/, bin/) + `zsh -n` over all

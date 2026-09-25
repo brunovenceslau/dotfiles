@@ -31,10 +31,12 @@ credited in the advisory unless you ask not to be.
 | Version | Supported |
 | --- | --- |
 | `main` | Yes |
-| The latest release tag, once one exists | Yes |
+| The latest release tag | Yes |
 | Any earlier tag | No |
 
-No release has been tagged yet, so today `main` is the only supported version.
+The project is pre-1.0 (SemVer `0.y.z`): the public surface is not frozen, and
+a break is a MINOR bump, named in the release notes (see
+[development, Cutting a release](docs/development.md#cutting-a-release)).
 There is no backport branch. A fix lands on `main` and is carried by the next
 tag. If you run an older tag, upgrade rather than wait for a patch release.
 
