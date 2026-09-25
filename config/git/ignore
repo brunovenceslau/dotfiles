@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+*~
+.DS_Store
+
+# IDEs
+.vscode
+.idea
+**/__debug_bin*
+
+# Golang
+__debug_bin
+
+# AI
+.claude/settings.local.json
