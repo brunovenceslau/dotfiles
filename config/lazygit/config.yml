@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# config/lazygit/config.yml - linked to ~/.config/lazygit/config.yml by the
+# convention walker (config/<prog> -> ~/.config/<prog>). lazygit is
+# XDG-aware and honors $XDG_CONFIG_HOME on EVERY platform, including macOS - where
+# it otherwise defaults to the platform dir (~/Library/Application Support/lazygit).
+# zsh/zshenv exports XDG_CONFIG_HOME=~/.config unconditionally, so this XDG link is
+# the config lazygit reads on every host (confirm with
+# `lazygit --print-config-dir`).
+#
+# Portable base only: no per-host or secret settings (lazygit has no native include
+# / .local layer, and is not one of the framework's enumerated .local surfaces -
+# zsh, git, packages, alacritty, ghostty, tmux - so it carries no .local pair).
+# Kept dependency-free - no external pager/diff tool that a fresh
+# host might lack. Personal tweaks are edited in place on a host if ever needed.
+
+gui:
+  showFileTree: true         # tree view of the changed files (press `t` to toggle)
+  showRandomTip: false
+  nerdFontsVersion: ""       # ASCII-safe: a terminal may lack a Nerd Font
+
+git:
+  paging:
+    colorArg: always         # colorize diffs using lazygit's built-in pager
