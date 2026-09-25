@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# cliff.toml - the release-notes template.
+#
+# Read by ONE caller, .github/workflows/release.yml, which pins and
+# checksum-verifies the git-cliff it runs. git-cliff is deliberately not a
+# contributor tool: no `make` target invokes it, and nothing has to be
+# installed to develop here. There is no tracked CHANGELOG.md either - the
+# notes this file shapes exist only on the GitHub release for a tag, so the
+# tree never holds a second, drifting copy of the history.
+
+[changelog]
+# No `header` and no `footer` on purpose: the output of a run IS the body of
+# one release, handed straight to `gh release create --notes-file`, and the
+# release page already shows the tag, its date and the compare link.
+#
+# `commit_groups(groups=commit_parsers_groups)` emits the sections in the order
+# the `commit_parsers` below declare them, which is why no group name needs the
+# `<!-- N -->` sort prefix git-cliff's default template carries.
+#
+# Breaking changes are listed twice, once in their own leading section and once
+# in their type's section. That is deliberate: before 1.0 a break is a MINOR
+# bump (docs/development.md, "Cutting a release"), so the notes are the only
+# place the version number itself does NOT warn a reader.
+body = """
+{% set breaking = commits | filter(attribute="breaking", value=true) %}\
+{% if breaking | length > 0 %}\
+### Breaking changes
+
+{% for commit in breaking %}\
+- {% if commit.scope %}({{ commit.scope }}) {% endif %}{{ commit.message | upper_first }}
+{% endfor %}
+{% endif %}\
+{% for entry in commits | commit_groups(groups=commit_parsers_groups) %}\
+### {{ entry.group }}
+
+{% for commit in entry.commits %}\
+- {% if commit.scope %}({{ commit.scope }}) {% endif %}\
+{% if commit.breaking %}[breaking] {% endif %}\
+{{ commit.message | upper_first }}
+{% endfor %}
+{% endfor %}"""
+trim = true
+# A tag with nothing to report must still produce a file rather than an error,
+# so `gh release create --notes-file` never fails on an empty range.
+render_always = true
+
+[git]
+conventional_commits = true
+# Drop everything that is not a conventional commit. On this repository that is
+# exactly the merge commits: every change lands through the merge button
+# ("Merge pull request #N from ..."), and their content is already listed as
+# the branch's own commits. `require_conventional` stays OFF for the same
+# reason - it would fail the release on those merges.
+filter_unconventional = true
+require_conventional = false
+split_commits = false
+commit_preprocessors = []
+protect_breaking_commits = false
+# Belt and braces with `filter_unconventional`: an explicit skip so a merge
+# commit stays out of the notes even if someone later writes one with a
+# conventional subject.
+#
+# `chore(deps)` is NOT skipped, unlike git-cliff's default. Dependabot here
+# only ever bumps a pinned GitHub Action (.github/dependabot.yml enables the
+# `github-actions` ecosystem and nothing else), which is a supply-chain change
+# a reader of the notes has to see.
+commit_parsers = [
+  { message = "^Merge ", skip = true },
+  { message = "^feat", group = "Features" },
+  { message = "^fix", group = "Bug fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactoring" },
+  { message = "^docs?", group = "Documentation" },
+  { message = "^test", group = "Tests" },
+  { message = "^build", group = "Build" },
+  { message = "^ci", group = "CI" },
+  { message = "^style", group = "Styling" },
+  { message = "^revert", group = "Reverts" },
+  { message = "^chore", group = "Chores" },
+  { message = ".*", group = "Other" },
+]
+# Keep an unmatched commit visible (the `.*` parser above catches it into
+# "Other") rather than dropping it: a missing line in the notes is invisible,
+# a line in the wrong section is not.
+filter_commits = false
+fail_on_unmatched_commit = false
+link_parsers = []
+# Only version tags delimit a release. A tag of any other shape must not split
+# the history, or the notes would start from the wrong place.
+tag_pattern = "v[0-9]*"
+topo_order = false
+sort_commits = "oldest"
+# The pinned zsh plugins are third-party history and are not ours to report.
+recurse_submodules = false
