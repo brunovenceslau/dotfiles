@@ -33,7 +33,7 @@ ok "Makefile defines a 'reuse' target that runs 'reuse lint'"
 # A blocking gate MUST be reachable from local-ci, or `make local-ci` before a
 # push proves nothing about it. Same assertion shape as the smoke test's.
 # grep -w is supported by GNU and macOS BSD grep.
-if ! grep -E '^local-ci:' "$mk" | grep -qw reuse; then
+if ! grep -qw reuse <<<"$(grep -E '^local-ci:' "$mk")"; then
   fail "reuse must be a local-ci prerequisite (it is a blocking gate)"
 fi
 ok "reuse is a local-ci prerequisite"
@@ -53,7 +53,7 @@ ok "the 'reuse' recipe fails closed under STRICT=1"
 # local-ci runs under STRICT=1 in CI, so a gate CI cannot install is a red leg.
 # The gate-tools loop is the single place that decides what CI provisions;
 # tests/dev_docs_prereqs_test.sh then holds the docs to that same list.
-grep -E '^[[:space:]]*for tool in .*; do[[:space:]]*$' "$wf" | grep -qw reuse \
+grep -qw reuse <<<"$(grep -E '^[[:space:]]*for tool in .*; do[[:space:]]*$' "$wf")" \
   || fail "ci.yml's gate-tools loop does not install reuse, which local-ci STRICT=1 requires"
 ok "ci.yml's gate-tools loop installs reuse"
 

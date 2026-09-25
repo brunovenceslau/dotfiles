@@ -33,8 +33,8 @@ msg="$( warn() { echo "$*"; }
         command() { if [ "$1" = -v ] && [ "$2" = brew ]; then return 1; fi; builtin command "$@"; }
         packages_install 2>&1 )" && rc=0 || rc=$?
 ck "brew absent -> nonzero exit" "$rc" "1"
-printf '%s\n' "$msg" | grep -qi 'brew.sh' || fail "brew-absent did not point at the official method (brew.sh)"
-printf '%s\n' "$msg" | grep -qiE 'will not run|not run a remote' || fail "brew-absent did not disavow a remote bootstrap"
+grep -qi 'brew.sh' <<<"$msg" || fail "brew-absent did not point at the official method (brew.sh)"
+grep -qiE 'will not run|not run a remote' <<<"$msg" || fail "brew-absent did not disavow a remote bootstrap"
 
 # --- brew happy path: bundle Brewfile then Brewfile.local; propagate failure ----
 bdot="$work/bdot"; mkdir -p "$bdot/packages"
@@ -43,8 +43,8 @@ printf 'brew "extra"\n' > "$bdot/packages/Brewfile.local"
 bcalls="$( command() { if [ "$1" = -v ] && [ "$2" = brew ]; then echo /brew; return 0; fi; builtin command "$@"; }
   brew() { echo "brew $*"; }; warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$bdot" packages_install )"
-printf '%s\n' "$bcalls" | grep -qF "bundle --file $bdot/packages/Brewfile" || fail "brew: tracked Brewfile not bundled"
-printf '%s\n' "$bcalls" | grep -qF "bundle --file $bdot/packages/Brewfile.local" || fail "brew: Brewfile.local not bundled"
+grep -qF "bundle --file $bdot/packages/Brewfile" <<<"$bcalls" || fail "brew: tracked Brewfile not bundled"
+grep -qF "bundle --file $bdot/packages/Brewfile.local" <<<"$bcalls" || fail "brew: Brewfile.local not bundled"
 brc=0; ( command() { if [ "$1" = -v ] && [ "$2" = brew ]; then return 0; fi; builtin command "$@"; }
   brew() { case "$*" in *Brewfile.local*) return 1;; *) return 0;; esac; }; warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$bdot" packages_install ) || brc=$?
@@ -84,7 +84,7 @@ gcalls="$(
   gh() { case "$1 $2" in ('extension list') : ;; ('extension install') shift 2; echo "install $*" ;; esac; }
   warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$gdot" _packages_gh_extensions )"
-printf '%s\n' "$gcalls" | grep -qF -- "--pin $gsha -- github/gh-stack" \
+grep -qF -- "--pin $gsha -- github/gh-stack" <<<"$gcalls" \
   || fail "gh: gh-stack not installed pinned with the -- belt (got: $gcalls)"
 
 # (2) idempotent: `gh extension list` already shows it AT ITS PIN -> nothing runs.
@@ -123,7 +123,7 @@ gcalls2e="$(
   warn() { echo "WARN $*"; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
 ck "gh: unreachable pin -> nothing removed or installed" "$(printf '%s\n' "$gcalls2e" | grep -cE '^extension (remove|install)' || true)" "0"
-printf '%s\n' "$gcalls2e" | grep -q 'not confirmed upstream' \
+grep -q 'not confirmed upstream' <<<"$gcalls2e" \
   || fail "gh: unreachable pin did not warn (got: $gcalls2e)"
 
 # (2f) the new pin is reachable but its install FAILS after the remove: the
@@ -137,9 +137,9 @@ gcalls2f="$(
     esac; }
   warn() { echo "WARN $*"; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$tdot" _packages_gh_extensions )"
-printf '%s\n' "$gcalls2f" | grep -qx 'extension install --pin v0.1.0 -- github/gh-stack' \
+grep -qx 'extension install --pin v0.1.0 -- github/gh-stack' <<<"$gcalls2f" \
   || fail "gh: a failed re-pin did not restore the previous version (got: $gcalls2f)"
-printf '%s\n' "$gcalls2f" | grep -qF 'retry: gh extension remove gh-stack; gh extension install --pin v0.2.0 -- github/gh-stack' \
+grep -qF 'retry: gh extension remove gh-stack; gh extension install --pin v0.2.0 -- github/gh-stack' <<<"$gcalls2f" \
   || fail "gh: a failed re-pin did not print the exact recovery command (got: $gcalls2f)"
 pass=$((pass + 2))
 
@@ -162,7 +162,7 @@ grc=0; gout="$(
   warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$gdot" _packages_gh_extensions )" || grc=$?
 ck "gh absent -> returns 0 (best-effort)" "$grc" "0"
-! printf '%s\n' "$gout" | grep -q 'GH-SHOULD-NOT-RUN' || fail "gh absent: gh was still invoked"
+! grep -q 'GH-SHOULD-NOT-RUN' <<<"$gout" || fail "gh absent: gh was still invoked"
 
 # (4) validation: a .local line can neither inject a flag/path/URL/glob NOR install an
 # UNPINNED extension - only `owner/repo <sha|vX.Y.Z>` survives (assert DROP for each).
@@ -204,7 +204,7 @@ wcalls="$(
   gh() { case "$1 $2" in ('extension list') : ;; ('extension install') echo "WIRED" ;; esac; }
   warn() { :; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$gdot" packages_install 2>/dev/null )"
-printf '%s\n' "$wcalls" | grep -qF "WIRED" \
+grep -qF "WIRED" <<<"$wcalls" \
   || fail "packages_install did not run the gh-extensions step"
 flat="$(printf '%s ' $wcalls)"
 case "$flat" in
@@ -220,7 +220,7 @@ berc=0; bwarn="$(
   warn() { echo "WARN $*"; }; log() { :; }
   . "$repo_root/lib/packages.sh"; DOTFILES="$gdot" _packages_gh_extensions )" || berc=$?
 ck "gh install failure -> _packages_gh_extensions still rc 0" "$berc" "0"
-printf '%s\n' "$bwarn" | grep -qi 'non-fatal' || fail "gh install failure did not warn non-fatal (got: $bwarn)"
+grep -qi 'non-fatal' <<<"$bwarn" || fail "gh install failure did not warn non-fatal (got: $bwarn)"
 prc=0; (
   command() { case "$1 $2" in ('-v brew') echo /brew; return 0 ;; ('-v gh') echo /gh; return 0 ;; esac; builtin command "$@"; }
   brew() { :; }
@@ -238,7 +238,7 @@ bad="$(grep -vE '^[[:space:]]*(#|$)' "$repo_root/packages/Brewfile" | grep -vE '
 # host). gh-stack is a binary extension, so its pin is the vX.Y.Z release tag.
 bad="$(_packages_gh_ext_list "$repo_root/packages/gh-extensions.txt" | grep -vE '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]* ([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$' || true)"
 [ -z "$bad" ] || fail "gh-extensions.txt has an invalid/unpinned owner/repo: $bad"
-_packages_gh_ext_list "$repo_root/packages/gh-extensions.txt" | grep -qE '^github/gh-stack (v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$' \
+grep -qE '^github/gh-stack (v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$' <<<"$(_packages_gh_ext_list "$repo_root/packages/gh-extensions.txt")" \
   || fail "gh-extensions.txt: github/gh-stack must be present, pinned to a release tag or commit SHA"
 # The macOS-GUI terminal cask lives in the Brewfile. ghostty is the installed cask;
 # alacritty ships as config only (its cask is commented out), so the invariant tracks

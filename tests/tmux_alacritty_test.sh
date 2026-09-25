@@ -114,7 +114,7 @@ if command -v tmux >/dev/null 2>&1; then
   # (with -q) is clean; a copy WITHOUT -q reports "No such file or directory".
   cfg_err() {  # $1 = conf, $2 = pattern; echoes the pattern if it shows in the config-load output
     tmux -L t16test kill-server 2>/dev/null || true; wait_dead
-    tmux -L t16test -f "$1" -C new-session -d </dev/null 2>&1 | tr -d '\r' | grep -o "$2" | head -1
+    tmux -L t16test -f "$1" -C new-session -d </dev/null 2>&1 | tr -d '\r' | grep -o "$2" | sed -n 1p
     tmux -L t16test kill-server 2>/dev/null || true
   }
   rm -f "$local_conf"

@@ -36,7 +36,7 @@ ok "Makefile defines a 'gitleaks' target that runs 'gitleaks dir'"
 # A blocking gate MUST be reachable from local-ci, or `make local-ci` before a
 # push proves nothing about it. Same assertion shape as the reuse gate's.
 # grep -w is supported by GNU and macOS BSD grep.
-if ! grep -E '^local-ci:' "$mk" | grep -qw gitleaks; then
+if ! grep -qw gitleaks <<<"$(grep -E '^local-ci:' "$mk")"; then
   fail "gitleaks must be a local-ci prerequisite (it is a blocking gate)"
 fi
 ok "gitleaks is a local-ci prerequisite"
@@ -56,7 +56,7 @@ ok "the 'gitleaks' recipe fails closed under STRICT=1"
 # local-ci runs under STRICT=1 in CI, so a gate CI cannot install is a red leg.
 # The gate-tools loop is the single place that decides what CI provisions;
 # tests/dev_docs_prereqs_test.sh then holds the docs to that same list.
-grep -E '^[[:space:]]*for tool in .*; do[[:space:]]*$' "$wf" | grep -qw gitleaks \
+grep -qw gitleaks <<<"$(grep -E '^[[:space:]]*for tool in .*; do[[:space:]]*$' "$wf")" \
   || fail "ci.yml's gate-tools loop does not install gitleaks, which local-ci STRICT=1 requires"
 ok "ci.yml's gate-tools loop installs gitleaks"
 

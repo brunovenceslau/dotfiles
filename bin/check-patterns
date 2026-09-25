@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Eight checks across our OWN runtime surface
+#   `make lint` includes. Nine checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
 #   we police our code, not upstream's):
 #     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
@@ -38,6 +38,9 @@
 #     (8) GNU-only regex escapes (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface,
 #         tests/ and the workflows included - BSD sed/grep on macOS silently read
 #         them as something else, and no Linux run can see it.
+#     (9) an early-exit reader (`grep -q`/`-m`/`-l`, `head`) on the right of a
+#         pipe in the pipefail surface - the writer can die of SIGPIPE when the
+#         reader exits first, failing the pipeline at random.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -114,14 +117,14 @@ _code_hits() {
     [ -n "$hit" ] || continue
     code="$(_code_of "$hit")"
     [ -n "$code" ] || continue
-    rc=0; printf '%s\n' "$code" | grep -qE -- "$match" || rc=$?
+    rc=0; grep -qE -- "$match" <<<"$code" || rc=$?
     if [ "$rc" -ge 2 ]; then
       echo "check-patterns: code re-test errored (exit $rc) on '$match' - failing closed" >&2
       printf '%s\n' "$hit"; continue
     fi
     [ "$rc" -eq 0 ] || continue
     if [ -n "$exempt" ]; then
-      rc=0; printf '%s\n' "$code" | grep -qE -- "$exempt" || rc=$?
+      rc=0; grep -qE -- "$exempt" <<<"$code" || rc=$?
       if [ "$rc" -ge 2 ]; then
         echo "check-patterns: exemption re-test errored (exit $rc) on '$exempt' - exempting nothing" >&2
       elif [ "$rc" -eq 0 ]; then
@@ -404,6 +407,48 @@ if [ "${#gnu[@]}" -gt 0 ]; then
     if [ "$rc" -ge 2 ]; then
       printf '%s\n' "$out" >&2
       echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
+      bad=1
+    fi
+  fi
+fi
+
+# (9) forbid an EARLY-EXIT reader on the right of a pipe in the pipefail surface.
+# `grep -q` (and -m, -l, -L) stops reading at its first match and `head` at its
+# last line, closing the pipe while the writer may still be writing. bash
+# line-buffers a builtin printf, so `printf '%s\n' "$multi_line" | grep -q X` is
+# one write(2) PER LINE, and whether the reader has exited before the next one is
+# pure scheduling. When it has, the writer dies of SIGPIPE (or prints "printf:
+# write error: Broken pipe" where SIGPIPE is ignored, as on a CI runner), and
+# under pipefail the PIPELINE fails even though grep matched: an assertion goes
+# red at random (tests/packages_test.sh on macOS CI, 2026-09-25), and a NEGATED
+# one (`if cmd | grep -q X; then fail`) goes silently green. The fix is always to
+# remove the concurrent writer - a here-string (`grep -q X <<<"$var"`,
+# `grep -q X <<<"$(cmd)"`), `[ -n "$(find ...)" ]` - or a reader that drains its
+# input (`sed -n 1p` for `head -1`).
+# SURFACE: every file that runs under pipefail - install.sh and the lib/ it sources,
+# bin/, tests/, and the workflows (GitHub's bash steps run `-eo pipefail`). zsh/ is
+# interactive config with no pipefail, and the Makefile's recipes run without it.
+# NOT covered: an awk that `exit`s early, `sed ... q`, and a reader behind a
+# function or variable - a line-oriented grep cannot see those.
+eex=()
+for p in install.sh lib bin tests .github/workflows; do
+  [ -e "$root/$p" ] && eex+=("$root/$p")
+done
+if [ "${#eex[@]}" -gt 0 ]; then
+  eex_re='(^|[^|])\|[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+  eex_re="$eex_re"'(grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[A-Za-z]*[qmlL][A-Za-z0-9]*|--(quiet|silent|max-count[=[:alnum:]]*|files-with(out)?-match(es)?))([^[:alnum:]_-]|$)|head([^[:alnum:]_-]|$))'
+  if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
+    viol=$(printf '%s\n' "$out" | _code_hits "$eex_re")
+    if [ -n "$viol" ]; then
+      printf '%s\n' "$viol" >&2
+      echo "check-patterns: an early-exit reader (grep -q/-m/-l, head) on the right of a pipe - under pipefail the writer can die of SIGPIPE and fail the pipeline at random; feed it a here-string (grep -q PAT <<<\"\$var\") or use a reader that drains (sed -n 1p)" >&2
+      bad=1
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      printf '%s\n' "$out" >&2
+      echo "check-patterns: early-exit-reader scan errored (exit $rc) - failing closed" >&2
       bad=1
     fi
   fi

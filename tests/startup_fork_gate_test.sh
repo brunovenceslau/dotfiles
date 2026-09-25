@@ -62,7 +62,7 @@ out="$("$copy/bin/startup-fork-gate" "$copy" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "planted uname -a: gate exited $rc, want 1. Output: $out"
-printf '%s\n' "$out" | grep -qF "uname -a" \
+grep -qF "uname -a" <<<"$out" \
   || fail "planted uname -a: gate red but did not NAME the binary. Output: $out"
 
 # --- 2. Pristine copy passes --------------------------------------------------
@@ -73,7 +73,7 @@ out="$("$copy/bin/startup-fork-gate" "$copy" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 0 ] || fail "pristine copy: gate exited $rc, want 0. Output: $out"
-printf '%s\n' "$out" | grep -qF "no external binary invoked" \
+grep -qF "no external binary invoked" <<<"$out" \
   || fail "pristine copy: gate green without the OK line. Output: $out"
 
 # --- 3. Shim displacement (the mac topology) stays covered --------------------
@@ -98,7 +98,7 @@ out="$("$copy/bin/startup-fork-gate" "$copy" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "shim displacement: gate exited $rc, want 1 (mac-topology false-green is back?). Output: $out"
-printf '%s\n' "$out" | grep -qF "uname -a" \
+grep -qF "uname -a" <<<"$out" \
   || fail "shim displacement: gate red but did not NAME the binary. Output: $out"
 
 # --- 4. who absent -> LOUD failure, never a quiet pass ------------------------
@@ -123,7 +123,7 @@ out="$(PATH="$mirror" "$copy/bin/startup-fork-gate" "$copy" 2>&1)"
 rc=$?
 set -e
 [ "$rc" -eq 1 ] || fail "who absent: gate exited $rc, want a LOUD 1. Output: $out"
-printf '%s\n' "$out" | grep -qF "'who' is not on PATH" \
+grep -qF "'who' is not on PATH" <<<"$out" \
   || fail "who absent: gate failed for the wrong reason. Output: $out"
 
 echo "PASS: startup_fork_gate_test (planted violation caught by name; pristine tree green; mac-topology shim displacement covered; canary precondition fails loudly)"

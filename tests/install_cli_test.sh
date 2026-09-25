@@ -33,14 +33,14 @@ mkdir -p "$HOME"
 for arg in --help -h help; do
   rc=0; out="$("$installer" "$arg" 2>&1)" || rc=$?
   [ "$rc" -eq 0 ] || fail "install.sh $arg exited $rc (want 0)"
-  printf '%s\n' "$out" | grep -q 'usage: install.sh' \
+  grep -q 'usage: install.sh' <<<"$out" \
     || fail "install.sh $arg did not print the usage line"
 done
 
 # --- unknown command: exit 2 + a warning ------------------------------------
 rc=0; out="$("$installer" bogus 2>&1)" || rc=$?
 [ "$rc" -eq 2 ] || fail "install.sh bogus exited $rc (want 2)"
-printf '%s\n' "$out" | grep -q 'unknown command' \
+grep -q 'unknown command' <<<"$out" \
   || fail "install.sh bogus did not warn about the unknown command"
 
 # --- uninstall with an unknown option: exit 2, refused BEFORE any removal ----
@@ -49,7 +49,7 @@ printf '%s\n' "$out" | grep -q 'unknown command' \
 # from 1 = a removal that failed; the exit-code fidelity fix in the dispatch).
 rc=0; out="$("$installer" uninstall --typo 2>&1)" || rc=$?
 [ "$rc" -eq 2 ] || fail "install.sh uninstall --typo exited $rc (want 2)"
-printf '%s\n' "$out" | grep -q 'unknown option' \
+grep -q 'unknown option' <<<"$out" \
   || fail "install.sh uninstall --typo did not warn about the unknown option"
 
 # --- unexpected arguments: exit 2, refused before anything is written --------
@@ -59,13 +59,13 @@ for argv in "install --bogus" "packages --bogus" "link extra" "upgrade --force" 
   # shellcheck disable=SC2086  # word-split on purpose: argv is a subcommand + one argument
   rc=0; out="$("$installer" $argv 2>&1)" || rc=$?
   [ "$rc" -eq 2 ] || fail "install.sh $argv exited $rc (want 2)"
-  printf '%s\n' "$out" | grep -q 'takes no arguments' \
+  grep -q 'takes no arguments' <<<"$out" \
     || fail "install.sh $argv did not say it takes no arguments (got: $out)"
 done
 
 # --- the no-write contract: HOME stays completely empty ---------------------
 # (no `find -quit`: BSD/macOS find lacks it; -mindepth is portable.)
-if find "$HOME" -mindepth 1 | grep -q .; then
+if [ -n "$(find "$HOME" -mindepth 1)" ]; then
   fail "a help/error dispatch wrote into HOME (these paths must be write-free)"
 fi
 

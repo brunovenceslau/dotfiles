@@ -150,7 +150,7 @@ r="$work/empty"; mkdir -p "$r"
 # a no-op refuse - this isolates the Makefile rule.
 r="$work/mkhash"; mkdir -p "$r/lib"; printf 'noop() { : ; }\n' > "$r/lib/os.sh"
 cat > "$r/Makefile" <<'EOF'
-PY := $(shell head -1 x | grep -qE '^#!' && echo y)
+PY := $(shell grep -cE '^#!' x)
 EOF
 [ "$(run "$r")" != "0" ] && ok || fail "an unescaped # inside a Makefile \$(shell ...) must fail the gate"
 
@@ -158,7 +158,7 @@ EOF
 # blanket ban on `#` in the Makefile.
 r="$work/mkhashok"; mkdir -p "$r/lib"; printf 'noop() { : ; }\n' > "$r/lib/os.sh"
 cat > "$r/Makefile" <<'EOF'
-PY := $(shell head -1 x | grep -qE '^\#!' && echo y)
+PY := $(shell grep -cE '^\#!' x)
 EOF
 [ "$(run "$r")" = "0" ] && ok || fail "an escaped \\# inside a Makefile \$(shell ...) must pass"
 
@@ -450,5 +450,52 @@ printf '%s\n' "# POSIX classes, not \\s: BSD sed has no \\s" > "$r/tests/x_test.
 r="$work/gnu-plugins-ok"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
 printf '%s\n' "sed -E 's/\\s+//'" > "$r/zsh/plugins/p/p.zsh"
 [ "$(run "$r")" = "0" ] && ok || fail "a GNU escape inside zsh/plugins must pass (third-party)"
+
+# === the early-exit-reader arm ===================================================
+# `grep -q` / `head` on the right of a pipe exit before the writer is done; under
+# pipefail the writer's SIGPIPE fails the pipeline at random. Fixtures spell the
+# pipe through $P, so THIS file's own source never carries the shape the arm
+# looks for (the arm scans tests/).
+eex_msg="check-patterns: an early-exit reader"
+P='|'
+i=0
+for line in \
+  "printf '%s\\n' \"\$out\" $P grep -q 'usage' || fail x" \
+  "if find \"\$HOME\" $P grep -q .; then fail x; fi" \
+  "x=\"\$(LC_ALL=C grep a f $P LC_ALL=C grep -qF b)\"" \
+  "  $P grep -qE '(^|[^[:alnum:]_-])canga' ; then" \
+  "cmd $P grep -E -q x" \
+  "cmd $P grep -m1 x" \
+  "cmd $P grep --quiet x" \
+  "cmd $P grep -l x" \
+  "v=\"\$(tmux ls $P head -1)\"" \
+  ; do
+  i=$((i + 1)); r="$work/eex-$i"; seed "$r"; mkdir -p "$r/tests"
+  printf '%s\n' "$line" > "$r/tests/x_test.sh"
+  fails_with "$r" "$eex_msg" "early-exit reader shape $i: $line"
+done
+# lib/ (sourced by install.sh) and the workflows are on the surface too
+r="$work/eex-lib"; seed "$r"
+printf '%s\n' "cur=\"\$(git status $P grep -q x)\"" > "$r/lib/tool.sh"
+fails_with "$r" "$eex_msg" "an early-exit reader in lib/"
+r="$work/eex-ci"; seed "$r"; mkdir -p "$r/.github/workflows"
+printf '%s\n' "          xz --version $P head -1" > "$r/.github/workflows/ci.yml"
+fails_with "$r" "$eex_msg" "head in a workflow run step"
+
+# the fixes, and readers that drain their input, pass
+r="$work/eex-ok"; seed "$r"; mkdir -p "$r/tests" "$r/zsh"
+printf '%s\n' \
+  "grep -q 'usage' <<<\"\$out\" || fail x" \
+  "grep -qw reuse <<<\"\$(grep -E '^local-ci:' Makefile)\"" \
+  "if [ -n \"\$(find \"\$HOME\" -mindepth 1)\" ]; then fail x; fi" \
+  "n=\"\$(cmd $P grep -c x || true)\"" \
+  "bad=\"\$(cmd $P grep -vE '^#' || true)\"" \
+  "a || grep -q x f" \
+  "v=\"\$(cmd $P sed -n 1p)\"" \
+  "cmd $P headers" \
+  "# never pipe into grep -q: cmd $P grep -q x" > "$r/tests/x_test.sh"
+# zsh/ is interactive (no pipefail) and outside the arm's surface
+printf '%s\n' "alias ducks='du -cks -- *(D) $P sort -rn $P head'" > "$r/zsh/aliases.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "here-strings, draining readers, comments and zsh/ must pass the early-exit arm"
 
 echo "PASS: check_patterns_test ($pass assertions)"

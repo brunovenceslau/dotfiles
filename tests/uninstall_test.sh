@@ -220,7 +220,7 @@ if [ "$(id -u)" -ne 0 ]; then
   mkdir -p "$manifest_dir"; printf '%s\n' "$keep" > "$manifest"
   rc=0; out="$(PATH="$shim:$PATH" "$repo_root/install.sh" uninstall 2>&1)" || rc=$?
   [ "$rc" -eq 1 ] || fail "root over a user-owned manifest must exit 1 (got $rc): $out"
-  printf '%s\n' "$out" | grep -q "refusing to run as root over a manifest owned by uid $(id -u)" \
+  grep -q "refusing to run as root over a manifest owned by uid $(id -u)" <<<"$out" \
     || fail "root refusal did not name the manifest owner: $out"
   [ -L "$keep" ] || fail "the root refusal still removed a manifest link"
   rm -f "$keep"

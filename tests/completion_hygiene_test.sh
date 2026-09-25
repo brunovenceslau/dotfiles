@@ -90,7 +90,7 @@ check_and_expect() {
   o="$(check "$f" 2>/dev/null || true)"; [ -n "$o" ] && rc=1
   if [ "$expect" = flag ]; then
     [ "$rc" -eq 1 ] || fail "$label: expected FLAG, got clean"
-    [ -z "$name" ] || printf '%s\n' "$o" | grep -q -- "$name" || fail "$label: flagged but did not name '$name' (got [$o])"
+    [ -z "$name" ] || grep -q -- "$name" <<<"$o" || fail "$label: flagged but did not name '$name' (got [$o])"
   else
     [ "$rc" -eq 0 ] || fail "$label: expected CLEAN, got flag [$o]"
   fi
@@ -194,7 +194,7 @@ ok "every compdef in the tree names a defined completion function"
 rf="$work/reg_bad.zsh"
 printf '%s\n' '_real() { _files -/ }' 'compdef _real realcmd' 'compdef _missing missingcmd' > "$rf"
 o="$(check_reg "$rf" 2>/dev/null || true)"
-printf '%s' "$o" | grep -q -- '_missing' || fail "a compdef to an undefined function (_missing) must be flagged (got [$o])"
+grep -q -- '_missing' <<<"$o" || fail "a compdef to an undefined function (_missing) must be flagged (got [$o])"
 ok "a dangling compdef (_missing) is flagged"
 
 # CLEAN: a defined function + its matching compdef is not flagged

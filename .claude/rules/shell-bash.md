@@ -105,7 +105,25 @@ and cannot join it: `tests/check_patterns_test.sh` plants real `curl|sh` and
 scanning `tests/` would make those arms fail on the suite itself. The one
 exception is the GNU-regex arm, which does scan `tests/`, the `Makefile` and the
 workflows, and does not scan `config/`, where editor configs use their own regex
-dialects. Under `tests/` every other rule on this page is discipline, not a gate.
+dialects. The early-exit-reader arm (next section) scans `tests/` and the
+workflows too. Under `tests/` every other rule on this page is discipline, not a
+gate.
+
+## Never pipe into a reader that exits early
+
+`install.sh`, `bin/`, every test and every workflow step run under `pipefail`.
+`grep -q` (and `-m`, `-l`), `head` and an awk `exit` stop reading at their first
+answer and close the pipe while the writer may still be writing. bash
+line-buffers a builtin `printf`, so a multi-line value is one `write(2)` per
+line, and whether the reader has already gone is scheduling. When it has, the
+writer dies of SIGPIPE (or prints `printf: write error: Broken pipe`), and the
+pipeline FAILS although grep matched: an assertion goes red at random, and a
+negated one (`if cmd | grep -q x; then fail`) goes silently green. Remove the
+concurrent writer instead: `grep -q x <<<"$var"`, `grep -q x <<<"$(cmd)"`,
+`[ -n "$(find ...)" ]`, or a reader that drains its input (`sed -n 1p`, awk
+without `exit`). `make check-patterns` flags `grep -q/-m/-l` and `head` after a
+`|` in `install.sh`, `lib/`, `bin/`, `tests/` and the workflows; an awk `exit`
+is discipline, not a gate.
 
 ## Leave the user's .local files alone
 

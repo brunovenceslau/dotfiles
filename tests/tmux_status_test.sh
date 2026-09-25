@@ -75,13 +75,13 @@ pass=$((pass + 2))
 
 # --- load segment: a bar + an integer percentage (format, not a fixed value) ---
 run_ts "$nonrepo"
-if printf '%s' "$OUT" | LC_ALL=C grep -qE '[0-9]+%'; then
+if LC_ALL=C grep -qE '[0-9]+%' <<<"$OUT"; then
   # FIXED-STRING match on the exact block glyphs the helper emits (U+2588 █ filled /
   # U+2591 ░ empty). A bracket char-class is unsafe: under LC_ALL=C it degrades to a
   # BYTE set and matches the shared 0xe2 lead byte of unrelated glyphs (even ⎇). At
   # low CI load the bar is all ░, so the █-or-░ fallback is load-bearing.
-  printf '%s' "$OUT" | LC_ALL=C grep -qF "$(printf '\xe2\x96\x88')" \
-    || printf '%s' "$OUT" | LC_ALL=C grep -qF "$(printf '\xe2\x96\x91')" \
+  LC_ALL=C grep -qF "$(printf '\xe2\x96\x88')" <<<"$OUT" \
+    || LC_ALL=C grep -qF "$(printf '\xe2\x96\x91')" <<<"$OUT" \
     || fail "load percentage present but neither █ nor ░ bar glyph: [$OUT]"
   pass=$((pass + 1))
 else
@@ -112,7 +112,7 @@ pass=$((pass + 2))
 # Strip comment lines first so the header's own note is not matched.
 code="$(LC_ALL=C grep -vE '^[[:space:]]*#' "$TS")"
 for bad in 'top ' 'ps aux' 'ps -e' 'vmstat' 'iostat' 'sleep '; do
-  if printf '%s\n' "$code" | LC_ALL=C grep -qF "$bad"; then
+  if LC_ALL=C grep -qF "$bad" <<<"$code"; then
     fail "cost: bin/tmux-status invokes a heavy/sampling command ('$bad')"
   fi
 done
@@ -125,7 +125,7 @@ pass=$((pass + 1))
 # - the helper fetches the pane path from tmux itself. And the helper path must be
 # inlined (a shell var is clobbered to empty by tmux's parse-time $VAR expansion, so
 # the helper silently never runs). Both RED against the pre-fix wiring.
-sr_line="$(LC_ALL=C grep '^set -g status-right ' "$conf" | LC_ALL=C grep 'tmux-status' | head -1)"
+sr_line="$(LC_ALL=C grep '^set -g status-right ' "$conf" | LC_ALL=C grep 'tmux-status' | sed -n 1p)"
 [ -n "$sr_line" ] || fail "could not find the status-right helper line in $conf"
 body="${sr_line#*#(}"; body="${body%%)*}"
 case "$body" in

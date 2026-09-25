@@ -256,7 +256,10 @@ _cache_shell_inits() {
 ensure_submodules() {
   command -v git >/dev/null 2>&1 || return 0
   [ -f "$DOTFILES/.gitmodules" ] || return 0
-  git -C "$DOTFILES" submodule status 2>/dev/null | grep -q '^-' || return 0
+  # A here-string, not `git ... | grep -q`: under pipefail, grep -q exiting on
+  # the first `-` line can SIGPIPE git mid-output, and the failed pipeline would
+  # read as "nothing missing" and skip the init.
+  grep -q '^-' <<<"$(git -C "$DOTFILES" submodule status 2>/dev/null)" || return 0
   log "initializing SHA-pinned plugin submodules (a non-recursive clone left them empty)"
   git -C "$DOTFILES" -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
     submodule update --init \

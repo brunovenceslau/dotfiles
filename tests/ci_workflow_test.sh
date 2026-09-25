@@ -52,7 +52,7 @@ grep -Eq 'make[[:space:]]+local-ci[[:space:]]+STRICT=1' <<<"$commands" \
 
 # --- the gate must not be exit-suppressed -------------------------
 # `make local-ci || true` (or `; true`) would green a failed lint/test/smoke.
-if grep -E 'make[[:space:]]+local-ci' <<<"$commands" | grep -Eq '\|\|[[:space:]]*(true|:)'; then
+if grep -Eq '\|\|[[:space:]]*(true|:)' <<<"$(grep -E 'make[[:space:]]+local-ci' <<<"$commands")"; then
   fail "ci.yml suppresses the exit of 'make local-ci' (|| true) - the gate must block"
 fi
 

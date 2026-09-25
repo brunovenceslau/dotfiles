@@ -71,7 +71,7 @@ git -C "$super" commit -qm "add demo plugin submodule"
 # A NON-recursive clone - the failure mode: the submodule dir exists but is empty.
 clone="$work/clone"
 git clone -q "$super" "$clone"
-git -C "$clone" submodule status | grep -q '^-' \
+grep -q '^-' <<<"$(git -C "$clone" submodule status)" \
   || fail "an uninitialized submodule was not detected by the '-' prefix"
 [ -z "$(ls -A "$clone/zsh/plugins/demo" 2>/dev/null)" ] \
   || fail "the submodule was unexpectedly populated by a plain clone"
@@ -84,7 +84,7 @@ git -C "$clone" $allow submodule update --init >/dev/null 2>&1 \
   || fail "the pinned submodule content is absent after the heal"
 
 # A healthy checkout is a strict no-op: the detection guard must NOT fire.
-if git -C "$clone" submodule status | grep -q '^-'; then
+if grep -q '^-' <<<"$(git -C "$clone" submodule status)"; then
   fail "a healed checkout is still flagged as missing (guard would loop)"
 fi
 
@@ -118,7 +118,7 @@ out="$(
 )" || true
 [ ! -e "$bclone/zsh/plugins/bad/a" ] \
   || fail "ensure_submodules populated a submodule whose pinned commit is malformed (fsck not forced)"
-printf '%s\n' "$out" | grep -q 'submodule init failed' \
+grep -q 'submodule init failed' <<<"$out" \
   || fail "a refused corrupt submodule did not warn: $out"
 
 echo "ensure_submodules_test: OK (wiring + detect-and-heal + no-op on healthy + corrupt object refused)"
