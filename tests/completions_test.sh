@@ -63,7 +63,7 @@ export FUNCS
 # Each completion registers against its command (order-independent membership).
 reg_out="$(zsh "$work/unit.zsh" reg)"
 for want in "_dotfiles-uninstall dotfiles-uninstall" "_dotfiles-upgrade dotfiles-upgrade"; do
-  if printf '%s\n' "$reg_out" | grep -qxF -- "$want"; then
+  if grep -qxF -- "$want" <<<"$reg_out"; then
     ok "compdef registers: $want"
   else
     fail "compdef did not register '$want'"$'\n'"$reg_out"
@@ -107,7 +107,7 @@ expect_in(){     # label buffer literal-pattern (retried; tolerates pty timing)
   local out n
   for (( n=0; n<6; n++ )); do
     out="$(capture "$2")"
-    if print -r -- "$out" | grep -qF -- "$3"; then print -r -- "CASE $1 PASS"; return; fi
+    if grep -qF -- "$3" <<<"$out"; then print -r -- "CASE $1 PASS"; return; fi
   done
   print -r -- "CASE $1 FAIL"
 }
@@ -120,8 +120,8 @@ expect_absent(){ # label buffer negative-pattern - the token must NOT be offered
   local out n
   for (( n=0; n<6; n++ )); do
     out="$(capture "$2")"
-    if print -r -- "$out" | grep -qF -- "${2% }"; then
-      if print -r -- "$out" | grep -qF -- "$3"; then print -r -- "CASE $1 FAIL"; else print -r -- "CASE $1 PASS"; fi
+    if grep -qF -- "${2% }" <<<"$out"; then
+      if grep -qF -- "$3" <<<"$out"; then print -r -- "CASE $1 FAIL"; else print -r -- "CASE $1 PASS"; fi
       return
     fi
   done
@@ -140,12 +140,12 @@ zpty -d CT
 ZSH_ZPTY_EOF
 
 zpty_out="$(zsh "$work/zpty.zsh" "$FUNCS" || true)"
-if printf '%s\n' "$zpty_out" | grep -q ZPTY_UNAVAILABLE; then
+if grep -q ZPTY_UNAVAILABLE <<<"$zpty_out"; then
   if [ -n "${STRICT:-}" ]; then fail "zsh/zpty unavailable and STRICT=1 - dotfiles-* completion e2e not run"; fi
   echo "SKIP: zsh/zpty unavailable - dotfiles-* completion end-to-end (PART 2) not run"
 else
   ck_case() {   # label human-description
-    if printf '%s\n' "$zpty_out" | grep -qx "CASE $1 PASS"; then
+    if grep -qx "CASE $1 PASS" <<<"$zpty_out"; then
       ok "$2"
     else
       fail "$2 (zpty case '$1' did not PASS)"$'\n'"$zpty_out"

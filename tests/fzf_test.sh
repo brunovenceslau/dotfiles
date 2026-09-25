@@ -116,7 +116,7 @@ ck "existing FZF_DEFAULT_OPTS preserved" "$(field "$out" OPTS)" "--custom"
 
 # --- 6. no `fzf --zsh` subprocess anywhere in CODE -------------
 # Strip comments first - the file's header explains why it avoids `fzf --zsh`.
-if sed 's/#.*//' "$repo_root/zsh/fzf.zsh" | grep -qE 'fzf --zsh|fzf --bash|<\(fzf'; then
+if grep -qE 'fzf --zsh|fzf --bash|<\(fzf' <<<"$(sed 's/#.*//' "$repo_root/zsh/fzf.zsh")"; then
   fail "fzf.zsh uses a subprocess form (fzf --zsh / process substitution) on the startup path"
 fi
 pass=$((pass + 1))

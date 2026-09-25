@@ -119,8 +119,8 @@ ok
 # cannot see them on a host without canga. Comment lines are stripped first,
 # because zshrc explains this very contract in prose. POSIX classes, not `\s`,
 # so the check means the same thing under BSD grep on macOS.
-if grep -vE '^[[:space:]]*#' "$repo_root/zsh/zshrc" \
-  | grep -qE '(^|[^[:alnum:]_-])canga[[:space:]]+completion'; then
+if grep -qE '(^|[^[:alnum:]_-])canga[[:space:]]+completion' \
+  <<<"$(grep -vE '^[[:space:]]*#' "$repo_root/zsh/zshrc")"; then
   fail "zsh/zshrc runs 'canga completion' as a subprocess - the startup path must source the cached script"
 fi
 ok

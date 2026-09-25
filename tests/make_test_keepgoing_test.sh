@@ -39,17 +39,17 @@ out="$(keepgoing 2>&1)" && krc=0 || krc=$?
 # 1) overall rc is nonzero - a failure is still a failure.
 [ "$krc" -ne 0 ] && ok || fail "keep-going must exit nonzero when a test fails (got rc=$krc)"
 # 2) BOTH failing files are reported - the whole point (early-abort masked the second).
-if printf '%s\n' "$out" | grep -q 'a_fail.sh' && printf '%s\n' "$out" | grep -q 'c_fail.sh'; then ok
+if grep -q 'a_fail.sh' <<<"$out" && grep -q 'c_fail.sh' <<<"$out"; then ok
 else fail "keep-going must report BOTH failing files, not stop at the first: $out"; fi
 # 3) it kept RUNNING past the first failure (the `run …c_fail.sh` line appears).
-printf '%s\n' "$out" | grep -q '^run .*c_fail.sh' && ok \
+grep -q '^run .*c_fail.sh' <<<"$out" && ok \
   || fail "keep-going must run every test file even after an earlier failure: $out"
 
 # RED contrast: the OLD early-abort variant (`|| return 1`) reports ONLY the first failure -
 # the regression this closes. Assert it does NOT reach c_fail.sh (it aborts at a_fail.sh).
 earlyabort() { local t; for t in $files; do echo "run $t"; bash "$t" || return 1; done; }
 oout="$(earlyabort 2>&1)" || true
-printf '%s\n' "$oout" | grep -q 'c_fail.sh' \
+grep -q 'c_fail.sh' <<<"$oout" \
   && fail "test bug: early-abort should abort at a_fail.sh and never reach c_fail.sh: $oout" \
   || ok
 
@@ -58,7 +58,7 @@ printf '%s\n' "$oout" | grep -q 'c_fail.sh' \
 printf '#!/usr/bin/env bash\necho D; exit 0\n' > "$work/t/d_ok.sh"
 files="$work/t/b_ok.sh $work/t/d_ok.sh"
 pout="$(keepgoing 2>&1)" && prc=0 || prc=$?
-{ [ "$prc" -eq 0 ] && printf '%s\n' "$pout" | grep -q 'test: all passed'; } && ok \
+{ [ "$prc" -eq 0 ] && grep -q 'test: all passed' <<<"$pout"; } && ok \
   || fail "keep-going all-pass path must exit 0 and print the summary (got rc=$prc): $pout"
 
 echo "PASS: make_test_keepgoing_test ($pass assertions)"

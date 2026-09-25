@@ -44,7 +44,7 @@ if command -v zsh >/dev/null 2>&1; then
   before="$(cd "$repo_root" && git status --porcelain 2>/dev/null || true)"
 
   out="$("$smoke" 2>&1)" || fail "smoke end-to-end exited nonzero: $out"
-  printf '%s\n' "$out" | grep -q 'PASS' || fail "smoke did not report PASS: $out"
+  grep -q 'PASS' <<<"$out" || fail "smoke did not report PASS: $out"
 
   after="$(cd "$repo_root" && git status --porcelain 2>/dev/null || true)"
   [ "$before" = "$after" ] \
@@ -92,7 +92,7 @@ if command -v zsh >/dev/null 2>&1; then
   cp "$repo_root/zsh/zshenv" "$fix/zsh/zshenv"
   printf 'print -u2 "smoke-fixture: noisy startup"\n' > "$fix/zsh/zshrc"
   fout="$("$smoke" "$fix" 2>&1)" && { rm -rf "$fix"; fail "smoke must exit nonzero when the installed zsh dirties stderr"; }
-  printf '%s\n' "$fout" | grep -q 'dirtied stderr' \
+  grep -q 'dirtied stderr' <<<"$fout" \
     || { rm -rf "$fix"; fail "noisy fixture failed for the WRONG reason (fixture rot?): $fout"; }
   rm -rf "$fix"
 
@@ -119,7 +119,7 @@ if command -v zsh >/dev/null 2>&1; then
   printf 'uninstall_links() { return 0; }\nuninstall_purge() { return 0; }\n' \
     > "$fix2/lib/uninstall.sh"
   fout="$("$smoke" "$fix2" 2>&1)" && { rm -rf "$fix2"; fail "smoke must fail when uninstall leaves traces (no-op stub passed!)"; }
-  printf '%s\n' "$fout" | grep -q 'left a trace' \
+  grep -q 'left a trace' <<<"$fout" \
     || { rm -rf "$fix2"; fail "noop-uninstall fixture failed for the WRONG reason: $fout"; }
   rm -rf "$fix2"
 
@@ -191,7 +191,7 @@ grep -Eq '^smoke:' "$mk" || fail "Makefile has no 'smoke' target"
 grep -q 'bin/smoke' "$mk" || fail "Makefile 'smoke' target must call bin/smoke"
 # smoke is a blocking gate, so it MUST be a local-ci prerequisite (the inverse of
 # the bench test's assertion). grep -w is supported by GNU and macOS BSD grep.
-if ! grep -E '^local-ci:' "$mk" | grep -qw smoke; then
+if ! grep -qw smoke <<<"$(grep -E '^local-ci:' "$mk")"; then
   fail "smoke must be a local-ci prerequisite (it is a runnable gate)"
 fi
 

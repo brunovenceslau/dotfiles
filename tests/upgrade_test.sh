@@ -108,7 +108,7 @@ refuse_clean() {   # $1 = label, $2 = optional regex the refusal's stderr must m
   fi
   ck "$1: refused, HEAD+tree+submodules untouched" "$(snap_state)" "$snap"
   if [ -n "${2:-}" ]; then
-    printf '%s\n' "$out" | grep -Eq "$2" \
+    grep -Eq "$2" <<<"$out" \
       || fail "$1: refused for the WRONG reason (want /$2/), got: $out"
   fi
 }
@@ -152,7 +152,7 @@ mkdir -p "$XDG_STATE_HOME/dotfiles"; mkdir "$lock"
 # Guard the assignment with `if` so `set -e` does not abort on the (expected)
 # nonzero exit of the lock-refused upgrade.
 if lout="$(bash "$B/install.sh" upgrade </dev/null 2>&1)"; then lrc=0; else lrc=$?; fi
-if [ "$lrc" -eq 0 ] || ! printf '%s\n' "$lout" | grep -q 'in progress'; then
+if [ "$lrc" -eq 0 ] || ! grep -q 'in progress' <<<"$lout"; then
   rmdir "$lock" 2>/dev/null || :; fail "held lock did not refuse the upgrade"
 fi
 ck "held lock refuses a concurrent upgrade" ok ok
@@ -296,7 +296,7 @@ uptodate_at="$(bhead)"
 if uout="$(bash "$B/install.sh" upgrade </dev/null 2>&1)"; then :; else
   fail "relink case 2: an up-to-date upgrade returned nonzero: $uout"
 fi
-printf '%s\n' "$uout" | grep -q 'already up to date' \
+grep -q 'already up to date' <<<"$uout" \
   || fail "relink case 2: the run did NOT take the up-to-date branch (unproven), got: $uout"
 pass=$((pass + 1)); echo "  ok: relink case 2: the run took the FETCH_HEAD == HEAD branch"
 ck "relink case 2: HEAD did not move" "$(bhead)" "$uptodate_at"
@@ -322,7 +322,7 @@ if bout="$(bash "$B/install.sh" upgrade </dev/null 2>&1)"; then
   fail "case 22: a failing post-merge relink child was SWALLOWED - the upgrade reported success"
 fi
 pass=$((pass + 1)); echo "  ok: case 22: a failing relink child makes the upgrade exit non-zero"
-printf '%s\n' "$bout" | grep -q 'relink reported problems' \
+grep -q 'relink reported problems' <<<"$bout" \
   || fail "case 22: the failure was not attributed to the relink, got: $bout"
 pass=$((pass + 1)); echo "  ok: case 22: the failure is attributed to the relink child"
 # The MERGE still happened - the failure is post-merge, and reporting it must not be

@@ -140,7 +140,7 @@ is_link_to "$HOME/.local/bin/dotfiles-hello" "$root/bin/dotfiles-hello" \
   [ -n "$gates" ] || fail "drift guard: found no bin/ tool in the Makefile (pattern rot?)"
   for f in "$repo_root"/bin/*; do
     b="${f##*/}"
-    if printf '%s\n' "$gates" | grep -qxF -- "$b"; then
+    if grep -qxF -- "$b" <<<"$gates"; then
       { [ -e "$HOME/.local/bin/$b" ] || [ -L "$HOME/.local/bin/$b" ]; } \
         && fail "drift guard: bin/$b is a Makefile gate but was linked onto PATH - add it to _link_bin_tree's exclusions"
     else
@@ -169,7 +169,7 @@ cp "$manifest_out" "$work/manifest.run1"
 run_engine
 diff -u "$work/manifest.run1" "$manifest_out" \
   || fail "manifest changed on a re-run (must be byte-stable)"
-if find "$HOME" -name '*.bak' | grep -q .; then   # no -quit: BSD find lacks it
+if [ -n "$(find "$HOME" -name '*.bak')" ]; then   # no -quit: BSD find lacks it
   fail "a re-run created a spurious .bak somewhere under HOME"
 fi
 is_link_to "$HOME/.config/tmux" "$root/config/tmux" \

@@ -108,8 +108,8 @@ jobs:
           zsh --version
           tmux -V
           jq --version
-          xz --version | head -1
-          reuse --version | head -1
+          xz --version | sed -n 1p
+          reuse --version | sed -n 1p
           gitleaks version
           python3 -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
 

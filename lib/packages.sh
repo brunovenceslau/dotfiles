@@ -73,7 +73,12 @@ _packages_gh_extensions() {
   while IFS=' ' read -r repo pin; do
     [ -n "$repo" ] || continue
     # "-" marks "not installed"; an installed extension with no version prints "".
-    cur="$(printf '%s\n' "$installed" | awk -F '\t' -v r="$repo" '$2 == r { print $3; found = 1; exit } END { if (!found) print "-" }')"
+    # NO pipe and NO awk `exit` here: install.sh runs under pipefail, and a
+    # reader that stops at the first match leaves a `printf | awk` writer to hit
+    # a closed pipe on the next line (SIGPIPE, or "printf: write error: Broken
+    # pipe" where SIGPIPE is ignored) - timing- and awk-dependent (Linux mawk
+    # happens to drain its input first). The here-string has no writer process.
+    cur="$(awk -F '\t' -v r="$repo" '$2 == r && !found { print $3; found = 1 } END { if (!found) print "-" }' <<<"$installed")"
     if [ "$cur" = "$pin" ] || { [ "${#pin}" -eq 40 ] && [ "$cur" = "$(printf '%s' "$pin" | cut -c1-8)" ]; }; then
       log "packages: gh extension already installed at its pin: $repo ($pin)"
       continue

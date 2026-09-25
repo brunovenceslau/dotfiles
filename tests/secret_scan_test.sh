@@ -50,8 +50,8 @@ printf '%s\n' "$pem_begin" > "$key"
 printf 'b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\n' >> "$key"
 printf '%s\n' "$pem_end" >> "$key"
 if out="$("$scan" "$key" 2>&1)"; then fail "scanner did NOT flag a planted private key"; fi
-printf '%s\n' "$out" | grep -q 'private-key-block' || fail "planted key not labeled private-key-block: $out"
-printf '%s\n' "$out" | grep -q "$(basename "$key")" || fail "scanner did not name the leaking file"
+grep -q 'private-key-block' <<<"$out" || fail "planted key not labeled private-key-block: $out"
+grep -q "$(basename "$key")" <<<"$out" || fail "scanner did not name the leaking file"
 pass=$((pass + 2))
 
 # A credential assignment with a real-looking value and a provider token are also
@@ -130,7 +130,7 @@ pass=$((pass + 1))
 mk="$repo_root/Makefile"
 grep -Eq '^secret-scan:' "$mk" || fail "Makefile has no 'secret-scan' target"
 grep -q 'bin/secret-scan' "$mk" || fail "secret-scan target must call bin/secret-scan"
-if ! grep -E '^local-ci:' "$mk" | grep -qw secret-scan; then
+if ! grep -qw secret-scan <<<"$(grep -E '^local-ci:' "$mk")"; then
   fail "secret-scan must be a local-ci prerequisite"
 fi
 pass=$((pass + 3))

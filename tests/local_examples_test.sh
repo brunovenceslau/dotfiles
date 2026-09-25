@@ -63,7 +63,9 @@ grep -qF 'zsh/.zshrc.local.example" "$zdotdir/.zshrc.local.example"' "$repo_root
 ok
 
 # 5. no real secret in the template - every op:// ref MUST be commented out (a placeholder).
-if grep 'op://' "$repo_root/zsh/.zshrc.local.example" | grep -vqE '^[[:space:]]*#'; then
+# `grep -v` drains its input (no early exit), and `|| true` covers the no-hit
+# case; a here-string would feed -v an empty line, which matches.
+if [ -n "$(grep 'op://' "$repo_root/zsh/.zshrc.local.example" | grep -vE '^[[:space:]]*#' || true)" ]; then
   fail "an op:// ref in zsh/.zshrc.local.example is not commented out (looks like a real secret)"
 fi
 ok
