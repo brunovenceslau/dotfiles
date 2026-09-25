@@ -6,10 +6,14 @@
 
 #
 # Integration test for `install.sh upgrade` / do_upgrade - the whole
-# fetch -> verify -> continuity -> ff-only -> relink chain, exercised end to end
-# against a scratch A/B repo pair signed by an EPHEMERAL ed25519 key (never a
-# real signing key). Enforced mode, so the refusals are load-bearing. Proves the
-# gates and that EVERY refusal leaves HEAD untouched.
+# fetch -> ff-only merge -> submodules -> relink chain, exercised end to end
+# against a scratch A (origin) / B (install) repo pair. Covers the up-to-date and
+# merge paths, the refusals (diverged history, dirty tree, a held lock, a failed
+# fetch, a malformed object), the non-interactive credential handling, the
+# scrubbing of ambient git config (url.insteadOf, GIT_CONFIG_PARAMETERS), the
+# post-merge relink running the NEW engine, and that EVERY refusal leaves HEAD
+# untouched. There is no signature verification on this path (see
+# docs/architecture.md#the-upgrade-path), so no signing key is involved.
 # Hermetic: a mktemp origin, clone, and scratch HOME; the real $HOME is never
 # touched. Not part of the shellcheck surface.
 #
@@ -342,5 +346,51 @@ fi
 pass=$((pass + 1)); echo "  ok: case 23: the retired reseed-settings arm exists and no-ops cleanly"
 rrc=0; bash "$B/install.sh" reseed-settings extra-arg </dev/null >/dev/null 2>&1 || rrc=$?
 ck "case 23: reseed-settings rejects arguments with exit 2" "$rrc" "2"
+
+# --- 24. ambient url.insteadOf cannot redirect the upgrade fetch --------------
+# A hostile global git config (and the GIT_CONFIG_PARAMETERS env family) rewrites
+# origin's URL to an attacker repo E that carries an extra commit. vgit scrubs
+# both channels, so the fetch still reads the real origin: A is unchanged, so the
+# upgrade is an up-to-date no-op and HEAD never reaches E's commit.
+E="$work/E"; git clone -q "$A" "$E"
+git -C "$E" -c user.name=e -c user.email=e@x commit -q --allow-empty -m evil
+evil="$(git -C "$E" rev-parse HEAD)"
+origin_url="$(git -C "$B" config --get remote.origin.url)"
+printf '[url "%s"]\n\tinsteadOf = %s\n' "$E" "$origin_url" > "$work/evil.gitconfig"
+# Precondition: the rewrite is live for a plain git, or this case proves nothing.
+[ "$(GIT_CONFIG_GLOBAL="$work/evil.gitconfig" git -C "$B" ls-remote origin HEAD | awk '$2 == "HEAD" { print $1 }')" = "$evil" ] \
+  || fail "case 24 fixture: the hostile insteadOf does not redirect a plain git (case would be vacuous)"
+before="$(bhead)"
+GIT_CONFIG_GLOBAL="$work/evil.gitconfig" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 \
+  || fail "case 24: upgrade under a hostile ~/.gitconfig failed"
+ck "case 24: a hostile global url.insteadOf did not redirect the fetch" "$(bhead)" "$before"
+GIT_CONFIG_PARAMETERS="'url.$E.insteadof'='$origin_url'" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 \
+  || fail "case 24: upgrade under a hostile GIT_CONFIG_PARAMETERS failed"
+ck "case 24: a hostile GIT_CONFIG_PARAMETERS insteadOf did not redirect the fetch" "$(bhead)" "$before"
+
+# --- 25. a malformed object on origin is refused at fetch time -----------------
+# A commit whose tree carries a duplicate entry (git fsck: duplicateEntries). The
+# upgrade forces fetch/transfer.fsckObjects on through vgit, so the fetch fails,
+# the upgrade exits 1, and HEAD is untouched - even with an ambient config that
+# turns object fsck OFF.
+blob="$(printf x | git -C "$A" hash-object -w --stdin)"
+raw="$(printf '%s' "$blob" | sed 's/../\\x&/g')"
+# shellcheck disable=SC2059  # the format IS the payload: \xHH escapes of the blob id
+{ printf '100644 a\0'; printf "$raw"; printf '100644 a\0'; printf "$raw"; } > "$work/duptree"
+badtree="$(git -C "$A" hash-object -t tree --literally -w "$work/duptree")"
+badc="$(git -C "$A" -c user.name=a -c user.email=a@x commit-tree "$badtree" -p HEAD -m malformed)"
+git -C "$A" update-ref HEAD "$badc"
+# fsck exits non-zero on the finding, so capture first: under pipefail a
+# `fsck | grep` pipeline would fail on fsck's status, not on the match.
+fsck_out="$(git -C "$A" fsck 2>&1 || true)"
+case "$fsck_out" in
+  *duplicateEntries*) : ;;
+  *) fail "case 25 fixture: origin's new commit is not malformed (case would be vacuous): $fsck_out" ;;
+esac
+printf '[fetch]\n\tfsckObjects = false\n[transfer]\n\tfsckObjects = false\n' > "$work/nofsck.gitconfig"
+GIT_CONFIG_GLOBAL="$work/nofsck.gitconfig" refuse_clean "case 25: malformed object on origin" 'fetch failed'
+git -C "$B" cat-file -e "$badc" 2>/dev/null \
+  && fail "case 25: the malformed commit entered the object store"
+pass=$((pass + 1)); echo "  ok: case 25: the malformed commit never entered the object store"
 
 echo "PASS: upgrade_test ($pass assertions)"

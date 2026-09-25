@@ -207,6 +207,27 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "purge must return nonzero when a tree cannot be removed"
   fi
   chmod -R u+w "$XDG_STATE_HOME" 2>/dev/null || true
+
+  # Privilege boundary: run as "root" (an `id` shim printing 0 first on PATH)
+  # over a manifest owned by this non-root user. The uninstall must refuse with
+  # exit 1, name the owning uid, and remove nothing - a reflexive
+  # `sudo ./install.sh uninstall` must never let a user-writable manifest drive
+  # root-privileged rm/mv.
+  shim="$work/idshim"; mkdir -p "$shim"
+  printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > "$shim/id"
+  chmod u+x "$shim/id"
+  keep="$HOME/.rootguard"; ln -s "$repo_root/zsh/zshrc" "$keep"
+  mkdir -p "$manifest_dir"; printf '%s\n' "$keep" > "$manifest"
+  rc=0; out="$(PATH="$shim:$PATH" "$repo_root/install.sh" uninstall 2>&1)" || rc=$?
+  [ "$rc" -eq 1 ] || fail "root over a user-owned manifest must exit 1 (got $rc): $out"
+  printf '%s\n' "$out" | grep -q "refusing to run as root over a manifest owned by uid $(id -u)" \
+    || fail "root refusal did not name the manifest owner: $out"
+  [ -L "$keep" ] || fail "the root refusal still removed a manifest link"
+  rm -f "$keep"
+else
+  # Root: permissions do not bind, and the manifest is root-owned, so neither the
+  # failed-removal nor the root-refusal case can be staged. CI runs non-root.
+  echo "SKIP: uninstall exit-code and root-refusal cases (running as root)"
 fi
 
 echo "PASS: uninstall_test"

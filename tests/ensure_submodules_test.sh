@@ -88,4 +88,37 @@ if git -C "$clone" submodule status | grep -q '^-'; then
   fail "a healed checkout is still flagged as missing (guard would loop)"
 fi
 
-echo "ensure_submodules_test: OK (wiring + detect-and-heal + no-op on healthy)"
+# --- (3) the heal refuses a corrupt plugin object, whatever the config says ---
+# ensure_submodules forces fetch/transfer.fsckObjects with -c, because the
+# tracked config that sets them is not reached through a pre-existing real
+# ~/.config/git/config. Here the ONLY global config turns fsck OFF (and allows
+# the file:// transport the fixture needs); the pinned plugin commit carries a
+# tree with a duplicate entry. The real ensure_submodules, sourced from
+# install.sh, must fail to populate the submodule.
+bad="$work/badplugin.git"; git init -q --bare -b main "$bad"
+bwt="$work/badplugin-wt"; git init -q -b main "$bwt"
+blob="$(printf x | git -C "$bwt" hash-object -w --stdin)"
+raw="$(printf '%s' "$blob" | sed 's/../\\x&/g')"
+# shellcheck disable=SC2059  # the format IS the payload: \xHH escapes of the blob id
+{ printf '100644 a\0'; printf "$raw"; printf '100644 a\0'; printf "$raw"; } > "$work/duptree"
+t="$(git -C "$bwt" hash-object -t tree --literally -w "$work/duptree")"
+c="$(git -C "$bwt" commit-tree "$t" -m malformed)"
+git -C "$bwt" update-ref refs/heads/main "$c"
+git -C "$bwt" push -q "$bad" main
+bsuper="$work/badsuper"; git init -q -b main "$bsuper"
+git -C "$bsuper" $allow submodule add -q "file://$bad" zsh/plugins/bad >/dev/null 2>&1 \
+  || fail "fixture: could not vendor the malformed plugin (fsck on during setup?)"
+git -C "$bsuper" commit -qm "add malformed plugin"
+bclone="$work/badclone"; git clone -q "$bsuper" "$bclone"
+printf '[protocol "file"]\n\tallow = always\n[fetch]\n\tfsckObjects = false\n[transfer]\n\tfsckObjects = false\n' > "$work/nofsck.gitconfig"
+out="$(
+  GIT_CONFIG_GLOBAL="$work/nofsck.gitconfig" GIT_CONFIG_NOSYSTEM=1 bash -c '
+    . "$1"                       # functions only: the dispatch is guarded
+    DOTFILES="$2"; ensure_submodules' _ "$installer" "$bclone" 2>&1
+)" || true
+[ ! -e "$bclone/zsh/plugins/bad/a" ] \
+  || fail "ensure_submodules populated a submodule whose pinned commit is malformed (fsck not forced)"
+printf '%s\n' "$out" | grep -q 'submodule init failed' \
+  || fail "a refused corrupt submodule did not warn: $out"
+
+echo "ensure_submodules_test: OK (wiring + detect-and-heal + no-op on healthy + corrupt object refused)"
