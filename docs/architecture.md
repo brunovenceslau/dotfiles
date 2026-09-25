@@ -18,29 +18,32 @@ Four constraints shape every decision here.
    under the XDG base directories.
 2. **Keep the interactive startup path free of subprocesses and network calls.**
    Integrations that ship as `eval "$(tool init zsh)"` are pre-compiled at
-   install time instead.
+   install time instead. The one exception is a detached, non-blocking update
+   fetch at most every few days (see
+   [the one sanctioned background spawn](#the-one-sanctioned-background-spawn)).
 3. **Keep the supply chain small.** No plugin manager, no runtime downloads,
    plugins pinned to exact commits.
 4. **Make the install exactly reversible.** Every link is recorded, every
-   overwritten file is backed up, and a purge leaves no trace.
+   overwritten file is backed up, and a purge leaves no trace except the
+   machine-local `~/.config/git/config` (see [Exceptions](#exceptions)).
 
 ## Repository layout
 
 ```
 ~/.config/dotfiles
 ├── install.sh          bootstrap: install | link | packages | upgrade | uninstall
-├── Makefile            quality gates: lint, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci
+├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
 │   ├── uninstall.sh    the manifest-driven reverse of link.sh
 │   └── packages.sh     brew bundle plus pinned gh extensions
-├── bin/                repo tools, all linked onto PATH at ~/.local/bin
-│   ├── check-patterns  static lint gate
-│   ├── secret-scan     secret-shaped content scanner
-│   ├── smoke           scratch-home install, idempotency and no-trace proof
-│   ├── startup-fork-gate   proves the startup path invokes no external binary
-│   └── tmux-status     dynamic tmux status segments
+├── bin/                repo tools; only tmux-status is linked onto PATH
+│   ├── check-patterns  static lint gate (dev only, run by make)
+│   ├── secret-scan     secret-shaped content scanner (dev only)
+│   ├── smoke           scratch-home install, idempotency and no-trace proof (dev only)
+│   ├── startup-fork-gate   proves the startup path invokes no external binary (dev only)
+│   └── tmux-status     dynamic tmux status segments, linked to ~/.local/bin
 ├── zsh/
 │   ├── zshenv          linked to ~/.zshenv, the only framework file in $HOME
 │   ├── zshrc           linked to $XDG_CONFIG_HOME/zsh/.zshrc
@@ -72,17 +75,19 @@ below and records every link it creates in
 | `config/<prog>/` | `~/.config/<prog>` | XDG-native programs get their whole config directory. |
 | `config/<name>@suffix/` | Skipped, with a warning | macOS is the only target, so there is no OS to gate on. Any `@suffix` is treated as a typo. |
 | `home/<file>` | `~/.<file>` | Escape hatch for tools that refuse XDG paths. Unused today. |
-| `bin/*` | `~/.local/bin/*` | Repository tools on `PATH`. |
+| `bin/*` | `~/.local/bin/*` | Runtime tools on `PATH`. Today that is only `tmux-status`: the dev gates are an exception (below). |
 
 ### Exceptions
 
-Three programs do not follow the whole-directory convention.
+Three programs do not follow the whole-directory convention, and four `bin/`
+tools are never linked.
 
 | Program | Behavior | Why |
 | --- | --- | --- |
 | `config/gnupg/` | Only `gpg.conf` and `gpg-agent.conf` are linked into `~/.gnupg`. The directory is created with mode 0700 if the framework creates it. | `~/.gnupg` holds live secret keyrings. It must never become a symlink into the repository. |
 | `config/git/` | `~/.config/git/config` is created as a real local file that `[include]`s the tracked config by absolute path and `config.local` by relative path. `config/git/ignore` is linked normally. | `~/.config/git/config` is the path `git config --global` writes to. If it were a symlink into the repository, every global write would land in the tracked, published config. |
 | `config/rclone/`, `config/restic/` | Never linked. | They hold secrets. The repository keeps only a README and `*.example` templates. See [backup and restore](backup-restore.md). |
+| `bin/check-patterns`, `bin/secret-scan`, `bin/smoke`, `bin/startup-fork-gate` | Never linked. `make` runs them from the checkout. | They are the repository's own quality gates. Linked, their generic names (`smoke`) would shadow other tools on a user's `PATH`, and they locate the repository from their own path, so they fail when run through a link. `tests/link_engine_test.sh` fails when a `bin/` tool the Makefile calls is missing from this list. A host that linked them under an older release gets those links pruned as orphans on its next clean relink. |
 
 `~/.config/git/config` is deliberately not recorded in the manifest, because
 uninstall must not delete a machine-local file. `~/.config/git/ignore` is
@@ -125,7 +130,9 @@ which is what makes the idempotency check in `make smoke` meaningful.
    tampered manifest naming an arbitrary path cannot delete it.
 2. Restores `DEST.bak` if one exists and nothing occupies `DEST`.
 3. Prunes the now-empty parent directories, stopping at the first directory that
-   still holds a file and never removing `$HOME`.
+   still holds a file and never removing `$HOME`. A parent that was already
+   empty before the install (an empty `~/.local/bin`, say) is removed too: the
+   manifest records links, not directories.
 
 `--purge` additionally removes `$XDG_CACHE_HOME/zsh`, `$XDG_STATE_HOME/zsh` and
 `$XDG_STATE_HOME/dotfiles`. It refuses any path outside `$HOME` and refuses
@@ -148,14 +155,18 @@ The ordering rule is the same everywhere: the tracked file loads first, the
 `~/.zshenv` runs for every zsh, including scripts and git hooks, so it holds only
 exports: the XDG variables, `ZDOTDIR`, `EDITOR`, `PAGER`, `LESS`,
 `STARSHIP_CONFIG`, `STARSHIP_CACHE`, a self-resolving `$DOTFILES`, and Go paths
-when present. It
-uses zsh parameter expansion and `-d` tests only, so it forks nothing.
+when present. It uses zsh parameter expansion, `$commands` lookups and `-d`
+tests only, so it forks nothing. `EDITOR`, `VISUAL` and `LESSOPEN` depend on
+which tools are on `PATH`, and `PATH` is not final yet (the Homebrew prefix is
+added by the zshrc), so the zshrc resolves those three a second time after it
+builds `PATH`. The second pass only changes a value `zshenv` itself defaulted.
 
 `$ZDOTDIR/.zshrc` runs for interactive shells, in this order. The order is
 load-bearing, and the reasons are noted where they are not obvious.
 
 1. Load the `zsh/files` module for a fork-free `mkdir`, and repair the state and
-   cache directories if they are missing.
+   cache directories if they are missing. The builtin `mkdir` is handed back to
+   the real binary at the end of startup (step 17).
 2. Fall back to `TERM=xterm-256color` when the current `$TERM` has no local
    terminfo entry. This is detected in-process through the `zsh/terminfo`
    module. Without it, an SSH session from a Ghostty client doubles typed input
@@ -163,7 +174,8 @@ load-bearing, and the reasons are noted where they are not obvious.
 3. Build `PATH`. The Homebrew prefix is found by testing whether
    `/opt/homebrew/bin/brew` or `/usr/local/bin/brew` exists, never by running
    `brew shellenv`. `~/.local/bin` goes first, and `typeset -gU` removes
-   duplicates.
+   duplicates. Then re-resolve `EDITOR`, `VISUAL` and `LESSOPEN` against the
+   final `PATH`.
 4. Configure history under `$XDG_STATE_HOME/zsh/history` and set the interactive
    options, including `AUTO_PUSHD`, which the directory-stack aliases depend on.
 5. Set terminal window and tab titles through `precmd` and `preexec` hooks.
@@ -173,14 +185,18 @@ load-bearing, and the reasons are noted where they are not obvious.
    insecure-directory audit runs at most once every 24 hours, gated on a
    dedicated stamp file rather than the dump's own mtime. During this block the
    `zsh/files` builtin `mv` shadows the external one, because the compdump helper
-   calls `mv` and that was the last fork on the path.
+   calls `mv` and that was the last fork on the path. The audit itself forks
+   `getent` when an fpath directory is group- or world-writable, so `install.sh`
+   (the `install` and `link` subcommands) removes those permissions from
+   `zsh/plugins`, the only framework-owned directories on `fpath`.
 8. Apply completion styling: menu selection, four matchers, `_approximate`
    correction on Tab, grouped and colored listings. The `list-colors` style uses
    the evaluated form because `$LS_COLORS` is exported later, by `aliases.zsh`.
 9. Source `lib/os.sh`, then `functions.zsh`, `aliases.zsh` and
    `restic.zsh`. Functions load before aliases so an alias can wrap a helper.
-10. Source the cached `starship` and `zoxide` inits. The zoxide cache must come
-    after `compinit`, because it registers a completion through `compdef`.
+10. Source the cached `starship` and `zoxide` inits and the cached `canga`
+    completion. The zoxide and canga caches must come after `compinit`, because
+    both register a completion through `compdef`.
 11. Pin `FAST_WORK_DIR` under `$XDG_CACHE_HOME/zsh`, pre-seed its
     `secondary_theme.zsh` guard file, then source `zsh-autosuggestions` and
     `fast-syntax-highlighting`, in that order. Highlighting loads last because it
@@ -193,8 +209,12 @@ load-bearing, and the reasons are noted where they are not obvious.
 14. Source Ghostty's shell integration manually. Automatic injection works by
     driving `ZDOTDIR`, which this framework already owns.
 15. Source `$ZDOTDIR/.zshrc.local`, the machine's last word.
-16. Source `update-check.zsh` last, so a host can tune or disable it from
-    `.zshrc.local` first.
+16. Source `update-check.zsh` after `.zshrc.local`, so a host can tune or
+    disable it there first.
+17. Disable the `zsh/files` builtin `mkdir` again (unless it was already a
+    builtin before step 1). It knows only `-p` and `-m`, so leaving it enabled
+    would break `mkdir -v` in every session. `tests/startup_state_test.sh`
+    asserts that `mkdir`, `mv` and `uname` are the real commands after startup.
 
 ### The prompt and `z` are cached, not evaluated
 
@@ -230,6 +250,20 @@ notifies on one prompt per shell and stays quiet afterwards. It has two notices,
 and a host can hit both on that prompt: updates are available, and no fetch has
 succeeded within the staleness window. Defaults are 3 days and 30 days, and both are
 configurable. See [troubleshooting](troubleshooting.md#update-notices-do-not-go-away).
+
+This is the only network access a shell start can cause. The fetch contacts the
+`origin` remote of your clone and nothing else: like the upgrade (below), it
+scrubs the global and system git config and the `GIT_CONFIG_*` environment
+families, so an ambient `url.insteadOf` cannot redirect it, and it re-reads only
+the credential helper from the XDG config. It forces object fsck on, runs
+non-interactively (it fails instead of prompting for credentials), and writes
+only into the clone's object store and `$XDG_STATE_HOME/dotfiles`.
+`tests/update_check_test.sh` cases 10 and 11 cover the redirect and a malformed
+object. `make forkgate` pre-seeds a fresh
+stamp, so the gate measures the cadence check and never the fetch itself. To
+turn the check off, set `DOTFILES_UPDATE_DISABLE` to any non-empty value, in the
+environment or in `$ZDOTDIR/.zshrc.local`, which zshrc sources before
+`update-check.zsh`.
 
 ## Plugins and the supply chain
 
@@ -309,11 +343,18 @@ non-descendant history.
 ## Platform differences
 
 Apple Silicon and Intel are both first-class targets. Architecture differences
-never appear in link names. They live in exactly three places:
+never appear in link names. They are allowed in four places:
 
-- shell guards that call `is-arm64` or `is-amd64` from `lib/os.sh`,
+- shell guards that call `is-arm64` or `is-amd64` from `lib/os.sh` (no tracked
+  file needs one today),
 - `on_arm` and `on_intel` blocks in the Brewfile (none are needed today),
-- untracked `.local` files.
+- untracked `.local` files,
+- `config/gnupg/gpg-agent.conf`, whose `pinentry-program` line is the absolute
+  Apple Silicon path `/opt/homebrew/bin/pinentry-mac`. gpg-agent.conf has no
+  variable expansion, so the file cannot choose a prefix. `make check-patterns`
+  allowlists this one file. On Intel the path does not exist and needs a manual
+  edit (see
+  [pinentry does not appear on Intel](troubleshooting.md#pinentry-does-not-appear-on-intel)).
 
 The Homebrew prefix is detected by directory existence, so no code needs to know
 which architecture it runs on to find it.

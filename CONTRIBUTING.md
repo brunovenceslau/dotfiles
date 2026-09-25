@@ -56,8 +56,10 @@ What each target proves is in [development, The gates](docs/development.md#the-g
 - **No em dash anywhere in the repository.** Use a comma, a colon, a
   parenthesis, or a plain `-`.
 - **Documentation follows its own standard.** One reader per page, one content
-  type per page, and no claim that the source does not back up. See
-  `.claude/rules/docs.md`.
+  type per page, no claim that the source does not back up, active voice, and no
+  em dash. The full text of the standard is
+  [the documentation rules](.claude/rules/docs.md), a file that coding agents
+  working in this repository also load.
 
 ## Commits
 
@@ -77,15 +79,18 @@ attribution lines.
 
 ## Signed commits are required
 
-Every commit on `main` must carry a valid signature. The branch ruleset enforces
-it on the server, so an unsigned commit cannot be merged, and no maintainer can
-wave it through. Sign your commits before you push, not after: re-signing means
-rewriting the branch.
+Every commit on `main` must carry a valid signature. A branch ruleset on `main`
+enforces it on the server, with no bypass actors, so an unsigned commit cannot be
+merged and no maintainer can wave it through. The same ruleset blocks force
+pushes to `main` and blocks deleting it, so published history cannot be
+rewritten or removed. Sign your commits before you push, not after: re-signing
+means rewriting the branch.
 
 This project signs with SSH. If you have no signing key yet:
 
 ```sh
 ssh-keygen -t ed25519 -C "signing key" -f ~/.ssh/id_signing
+gh auth refresh -h github.com -s admin:ssh_signing_key   # gh auth login does not grant this scope
 gh ssh-key add ~/.ssh/id_signing.pub --type signing --title "signing"
 git config --global gpg.format ssh
 git config --global user.signingkey ~/.ssh/id_signing.pub
@@ -107,18 +112,20 @@ for a good SSH signature unless git can see an allowed-signers file. See
 - **State the dependency in the body instead**, as "stacked on #N, review only
   the last K commits". The reasoning and the re-sync commands are in
   [stacked pull requests](docs/stacked-prs.md).
-- **Both CI legs must be green**, `macos-arm64` and `macos-intel`. They are
-  required checks.
-- **Merges use a merge commit.** Squash and rebase merging are off, because a
-  rebase merge lands without signature verification.
+- **Both CI legs must be green**: `local-ci (macos-arm64)` and
+  `local-ci (macos-intel)` are required status checks in the `main` ruleset.
+- **Merges use a merge commit.** Squash and rebase merging are off, because both
+  rewrite your commits: GitHub signs a squash commit with its own key instead of
+  yours, and does not sign a rebase-merged commit at all. The head branch is
+  deleted automatically after the merge.
 
 ### Pull requests from a fork need CI approved by the maintainer
 
 CI runs `make smoke`, which executes the branch's own `install.sh` on a macOS
-runner. For a fork that means running a stranger's code, so this repository
-requires maintainer approval before any workflow runs on a pull request from an
-external contributor. Your checks stay queued until then. That is expected, not
-a fault in your branch.
+runner. For a fork that means running a stranger's code, so the repository's
+Actions setting requires maintainer approval before any workflow runs on a pull
+request from an outside collaborator (anyone without write access). Your checks
+stay queued until then. That is expected, not a fault in your branch.
 
 ## Ask before you build any of these
 

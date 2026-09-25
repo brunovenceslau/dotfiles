@@ -35,9 +35,11 @@ There is no separate specification. The code and its comments are the spec.
   creates in `$HOME`.
 - Run `make lint` before every commit and `make local-ci STRICT=1` before every
   push. Sign every commit.
-- Treat a local green as unproven until you check it. Tool-availability skips in
-  `tests/` exit 0 even under `STRICT=1`, so a pass proves what ran, not what was
-  covered. When a suite matters, confirm it did not skip.
+- Treat a local green as unproven until you check it. Under `STRICT=1` a
+  missing tool fails the suite, but platform and privilege skips in `tests/` (a
+  case only a given OS, architecture or root can stage) still exit 0, so a pass
+  proves what ran, not what was covered. When a suite matters, confirm it did
+  not skip.
 - Open every PR against `main`, stacked or not, and state the dependency in the
   body ("stacked on #N, review only the last K commits"). A `--base <branch>`
   child races its parent's branch deletion on merge and can lose, which CLOSES

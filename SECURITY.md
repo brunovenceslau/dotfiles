@@ -31,9 +31,10 @@ credited in the advisory unless you ask not to be.
 | Version | Supported |
 | --- | --- |
 | `main` | Yes |
-| The latest release tag | Yes |
+| The latest release tag, once one exists | Yes |
 | Any earlier tag | No |
 
+No release has been tagged yet, so today `main` is the only supported version.
 There is no backport branch. A fix lands on `main` and is carried by the next
 tag. If you run an older tag, upgrade rather than wait for a patch release.
 
@@ -41,7 +42,7 @@ tag. If you run an older tag, upgrade rather than wait for a patch release.
 
 A report is in scope when it weakens one of the properties the framework
 claims. These are the same surfaces that require a maintainer decision before
-any change, and they are listed in `CLAUDE.md` and in
+any change, listed in
 [CONTRIBUTING.md](CONTRIBUTING.md#ask-before-you-build-any-of-these):
 
 - **The plugin supply chain.** The three zsh plugins are submodules pinned to
@@ -51,20 +52,26 @@ any change, and they are listed in `CLAUDE.md` and in
 - **The SSH signing setup.** A way to land an unsigned or wrongly attributed
   commit on `main`.
 - **Object checking on fetch.** `transfer`, `fetch` and `receive.fsckObjects`
-  are on in the tracked git config, and the upgrade path re-asserts them after
-  scrubbing ambient configuration. A way to turn any of that off from outside
+  are on in the tracked git config, and the upgrade path, the background update
+  check and the installer's plugin submodule step each force them on the
+  command line, whatever the ambient configuration says. A way to turn any of that off from outside
   the repository is in scope.
-- **The git-config scrubbing on the upgrade path.** The `vgit` wrapper in
-  `install.sh` runs the upgrade with `GIT_CONFIG_GLOBAL` and
-  `GIT_CONFIG_SYSTEM` pointed at `/dev/null`. A way to inject configuration back
-  into that path is in scope.
+- **The git-config scrubbing on the upgrade path and the update check.** The
+  `vgit` wrapper in `install.sh` runs the upgrade, and `zsh/update-check.zsh`
+  runs its background fetch, with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
+  pointed at `/dev/null` and the `GIT_CONFIG_*` environment families removed.
+  A way to inject configuration back into either path is in scope.
 - **The anti-rollback merge.** `dotfiles-upgrade` merges `--ff-only`. A way to
   make it accept a rewound or diverged history is in scope.
 - **The link engine and the manifest.** Overwriting a user file without the
   `.bak` copy, writing outside the paths the installer declares, or making
   `dotfiles-uninstall` remove something it did not create.
 - **The startup path.** Getting a subprocess or a network call onto the path to
-  the first prompt, in a way `make forkgate` does not catch.
+  the first prompt, in a way `make forkgate` does not catch. The one documented
+  exception, the detached background `git fetch` of the update check (see
+  [architecture](docs/architecture.md#the-one-sanctioned-background-spawn)), is
+  in scope only if it can be made to block the prompt, prompt for input, fetch
+  from anywhere but the clone's `origin`, or skip object checking.
 - **Secrets.** Anything secret-shaped that is committed, or a way past both
   `make secret-scan` and `make gitleaks`.
 

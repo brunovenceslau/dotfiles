@@ -98,10 +98,15 @@ clone without one can still commit:
 
 ```sh
 ssh-keygen -t ed25519 -C "dotfiles signing $(hostname -s)" -f ~/.ssh/id_signing
+gh auth refresh -h github.com -s admin:ssh_signing_key
 gh ssh-key add ~/.ssh/id_signing.pub --type signing --title "$(hostname -s) signing"
 git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.pub
 git config --file ~/.config/git/config.local commit.gpgsign true
 ```
+
+`gh auth login` does not grant the `admin:ssh_signing_key` scope, so without
+the `gh auth refresh` line `gh ssh-key add --type signing` fails and asks for
+it. The refresh opens the same browser flow as the login.
 
 Nothing in the framework verifies signatures. `dotfiles-upgrade` is a fetch plus
 a fast-forward merge. Signing exists for GitHub's Verified badge and for your own
@@ -139,10 +144,13 @@ cp ~/.gitconfig ~/.gitconfig.bak && rm ~/.gitconfig
 
 A legacy `~/.gitconfig` usually carried a global `commit.gpgsign = true`.
 Removing it turns signing off unless `config.local` sets it. If you did step 4,
-`config.local` already carries it. Verify, because nothing else will tell you:
+`config.local` already carries it. Verify, because nothing else will tell you.
+The commit below has no `-S` on purpose: it is signed only if signing is on by
+default, which is the property this checks.
 
 ```sh
-git -C ~/.config/dotfiles commit --allow-empty -S -m "signing smoke"
+git config --get --type=bool commit.gpgsign                       # want: true
+git -C ~/.config/dotfiles commit --allow-empty -m "signing smoke"
 git -C ~/.config/dotfiles cat-file commit HEAD | grep -c gpgsig   # want: 1
 git -C ~/.config/dotfiles reset --soft HEAD~1                     # discard it
 ```

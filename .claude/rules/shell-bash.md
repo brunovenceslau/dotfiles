@@ -42,7 +42,10 @@ version reports a PARSE error for them. What that pass does catch is the syntax
 
 ## Write every script the same way
 
-- Open with `set -euo pipefail`.
+- Open every EXECUTED script (`install.sh`, `bin/*`, `tests/*.sh`) with
+  `set -euo pipefail`. Two exemptions: the sourced `lib/*.sh` files, which must
+  not change their caller's shell options, and `bin/tmux-status`, which runs
+  `set -u` only because it must never error the tmux status line.
 - Report through the `log` and `warn` helpers the caller defines. A `lib/` file
   does not define them; it states in its header that the caller must.
 - Prefer a guard over a comment warning about the danger.
@@ -107,8 +110,9 @@ dialects. Under `tests/` every other rule on this page is discipline, not a gate
 ## Leave the user's .local files alone
 
 `lib/uninstall.sh` is manifest-driven: it removes only links the manifest
-records and that still point into the repo, restores any `*.bak`, and touches
-nothing else. `--purge` additionally clears generated state and cache, but never
+records and that still point into the repo, restores any `*.bak`, and then
+removes any directory those removals left empty (up to `$HOME`). It touches no
+other file. `--purge` additionally clears generated state and cache, but never
 a `.local` file. Those are the user's machine-local layer and the framework does
 not own them.
 

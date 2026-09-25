@@ -5,7 +5,8 @@
 # rclone.conf.example - placeholder template ONLY.
 #
 # This is NOT read by rclone. Copy it to the real, unmanaged location and edit:
-#     cp config/rclone/rclone.conf.example ~/.config/rclone/rclone.conf
+#     mkdir -p ~/.config/rclone
+#     cp "$DOTFILES/config/rclone/rclone.conf.example" ~/.config/rclone/rclone.conf
 #     chmod 600 ~/.config/rclone/rclone.conf
 # Prefer `rclone config` (interactive) to generate real, encrypted credentials.
 #

@@ -24,7 +24,8 @@ there is a cost the user pays on every prompt.
 - Never write `eval "$(<tool> init zsh)"`. `install.sh` runs `<tool> init zsh`
   once at install time and caches the output under `$XDG_CACHE_HOME/zsh`. The
   zshrc sources that cache, guarded on the file existing. starship and zoxide
-  both work this way. It is the house pattern, not a workaround.
+  (`<tool> init zsh`) and canga (`canga completion zsh`) all work this way. It
+  is the house pattern, not a workaround.
 - `make forkgate` (`bin/startup-fork-gate`) fails the build when an external
   binary is invoked during `zsh -i -c exit`. It is a blocking gate. Do not skip
   it.
@@ -51,6 +52,8 @@ rather than a hardcode.
 - Keep functions small. Declare variables `local`.
 - Send errors to stderr and return a non-zero code.
 - Name user-facing commands in `kebab-case`, such as `dotfiles-upgrade`.
+  `go_test` and `go_test_cover` are the legacy exceptions, kept under the names
+  users already type; do not add more.
 - Name internal helpers in `snake_case`.
 - The user-facing lifecycle commands are zsh functions in `zsh/functions.zsh`,
   not files in `bin/`. They are thin wrappers over `install.sh`, so the logic

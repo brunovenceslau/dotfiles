@@ -13,6 +13,11 @@ The framework does not run backups for you. It provides two things: the
 convention that keeps backup secrets off the repository, and two shell wrappers
 that resolve those secrets at call time.
 
+**Audience:** someone who has installed the framework and wants encrypted
+backups of a mac. **Prerequisites:** the framework installed, `./install.sh
+packages` run (for `restic` and `rclone`), a storage provider account, and a
+password manager with a CLI: Proton Pass (`pass-cli`) or 1Password (`op`).
+
 ## The model
 
 `config/restic/` and `config/rclone/` are never linked into `~/.config`. The
@@ -20,10 +25,21 @@ repository tracks only a README and `*.example` templates. Your real
 configuration is an ordinary, unmanaged file on the machine.
 
 Each restic repository gets one env file at
-`$XDG_CONFIG_HOME/restic/<name>.env`. Every value in it is a `pass://`
-reference, never a literal secret. A secret runner resolves the references and
-execs restic with the results in its environment only. Nothing is written to disk
-in the clear, and nothing is exported into your shell.
+`$XDG_CONFIG_HOME/restic/<name>.env`. Every value in it is a secret reference,
+never a literal secret. A secret runner resolves the references and execs restic
+with the results in its environment only. Nothing is written to disk in the
+clear, and nothing is exported into your shell.
+
+The reference scheme belongs to the runner, and neither runner understands the
+other's:
+
+| Wrapper | Runner | Reference scheme |
+| --- | --- | --- |
+| `restic-pass-cli` | Proton Pass CLI, `pass-cli run --env-file` | `pass://vault/item/field` |
+| `restic-op` | 1Password CLI, `op run --env-file` | `op://vault/item/field` |
+
+So an env file works with one wrapper only. A repository you reach through both
+needs two env files.
 
 Two rules follow from this:
 
@@ -44,8 +60,18 @@ restic version && rclone version
 ```
 
 The secret runner is not in the tracked Brewfile, because which one you use is a
-per-host choice. Install `pass-cli` or the 1Password CLI (`op`) yourself, and add
-it to `packages/Brewfile.local` so a re-provision keeps it.
+per-host choice. Install one yourself and add it to `packages/Brewfile.local`
+so a re-provision keeps it:
+
+- **1Password CLI (`op`):** `brew install --cask 1password-cli`, then
+  `op signin`.
+- **Proton Pass CLI (`pass-cli`):** `brew install protonpass/tap/pass-cli`,
+  from Proton's official Homebrew tap, then sign in with it. The
+  [Proton Pass CLI documentation](https://protonpass.github.io/pass-cli/) covers
+  the other install methods and the login. In `Brewfile.local` that is
+  `tap "protonpass/tap"` and `brew "protonpass/tap/pass-cli"`.
+
+Confirm the runner is on `PATH` (`command -v op` or `command -v pass-cli`).
 
 ## 2. Configure the rclone remote
 
@@ -60,22 +86,34 @@ rclone listremotes            # expect: backup:
 
 ## 3. Configure a restic repository
 
-Copy the per-repository template and fill in references:
+Copy the per-repository template and fill in references. `$DOTFILES` is the repository root, wherever you cloned it; the framework's
+`~/.zshenv` exports it in every zsh.
 
 ```sh
 mkdir -p ~/.config/restic
-cp ~/.config/dotfiles/config/restic/repo.env.example ~/.config/restic/photos_b2.env
+cp "$DOTFILES/config/restic/repo.env.example" ~/.config/restic/photos_b2.env
 $EDITOR ~/.config/restic/photos_b2.env
 chmod 600 ~/.config/restic/photos_b2.env
 ```
 
-The file names its values by reference:
+The file names its values by reference, in the scheme of the runner you will
+use. For `restic-pass-cli`:
 
 ```sh
 AWS_ACCESS_KEY_ID="pass://vault/BACKUP/EXAMPLE_ACCESS_KEY_ID"
 AWS_SECRET_ACCESS_KEY="pass://vault/BACKUP/EXAMPLE_ACCESS_KEY_SECRET"
 RESTIC_REPOSITORY="pass://vault/BACKUP/EXAMPLE_REPOSITORY"
 RESTIC_PASSWORD="pass://vault/BACKUP/EXAMPLE_PASSWORD"
+```
+
+For `restic-op`, the same keys with 1Password references, in a file of its own
+(for example `~/.config/restic/photos_b2_op.env`):
+
+```sh
+AWS_ACCESS_KEY_ID="op://vault/BACKUP/access-key-id"
+AWS_SECRET_ACCESS_KEY="op://vault/BACKUP/access-key-secret"
+RESTIC_REPOSITORY="op://vault/BACKUP/repository"
+RESTIC_PASSWORD="op://vault/BACKUP/password"
 ```
 
 Omit the two AWS values for a local or sftp repository. A repository reached
@@ -94,13 +132,15 @@ The wrappers take the repository name (the `.env` basename) followed by ordinary
 restic arguments. Tab completion offers the names you have.
 
 ```sh
-restic-pass-cli photos_b2 init         # once per repository
-restic-pass-cli photos_b2 snapshots
-restic-op       photos_b2 snapshots    # the same, through the 1Password CLI
+restic-pass-cli photos_b2    init         # once per repository
+restic-pass-cli photos_b2    snapshots    # photos_b2.env holds pass:// references
+restic-op       photos_b2_op snapshots    # photos_b2_op.env holds op:// references
 ```
 
 The wrappers are defined only when `restic` is on `PATH`, and each checks for its
-own runner before doing anything.
+own runner before doing anything. A missing repository name exits 2, and an
+unknown name or a missing runner exits 1. Otherwise the exit status is the
+runner's. See [shell reference](shell-reference.md#restic-wrappers).
 
 ## 5. Take a backup
 
@@ -157,6 +197,11 @@ mkdir -p /tmp/backup-mount
 restic-pass-cli photos_b2 mount /tmp/backup-mount
 ```
 
+`restic mount` needs a FUSE implementation on macOS, and the Brewfile installs
+none. Install macFUSE (`brew install --cask macfuse`, then approve its system
+extension in System Settings) before you use it. If `mount` still fails, use
+`restore` with `--include`, which needs nothing extra.
+
 The mount is a backup folder, so the untrusted-folder rule above applies to it.
 
 ## 8. Retention
@@ -180,8 +225,8 @@ working directory.
 ## Alternative: a plain env file
 
 If you do not use a secret runner, restic also reads its settings from the plain
-environment. Copy `config/restic/restic.env.example` to `~/.config/restic/env`,
-fill in `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_FILE`, `chmod 600` it, and load
+environment. Copy `$DOTFILES/config/restic/restic.env.example` to
+`~/.config/restic/env`, fill in `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_FILE`, `chmod 600` it, and load
 it from your `.local` layer:
 
 ```sh

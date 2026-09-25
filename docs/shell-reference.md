@@ -17,11 +17,11 @@ given.
 
 | Subcommand | Arguments | What it does |
 | --- | --- | --- |
-| `install` | none | Creates the state and cache directories, migrates a pre-XDG `~/.zsh_history` on a first install, creates every link, initializes missing plugin submodules, caches the shell integrations, and warns if commit signing is not configured. |
-| `link` | none | Creates links and rewrites the manifest, then refreshes the cached shell integrations. Nothing else. This is the arm an upgrade re-enters. |
+| `install` | none | Creates the state and cache directories, migrates a pre-XDG `~/.zsh_history` on a first install, creates every link, initializes missing plugin submodules with object checking forced on, caches the shell integrations, removes group and other write permission from `zsh/plugins`, and warns if commit signing is not configured. |
+| `link` | none | Creates links and rewrites the manifest, refreshes the cached shell integrations, and removes group and other write permission from `zsh/plugins`. Nothing else. This is the arm an upgrade re-enters. |
 | `packages` | none | `brew bundle` over `packages/Brewfile`, then `packages/Brewfile.local` if present, then the pinned `gh` extensions. Never runs a remote bootstrap script. |
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink, recompile. There is no bypass flag, and any argument is rejected. |
-| `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also removes generated cache and state. |
+| `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage line. |
 
@@ -30,8 +30,12 @@ reach the network, and only when `git submodule status` shows an uninitialized
 plugin: it then runs `git submodule update --init` to repair a non-recursive
 clone. On a healthy checkout it is a strict no-op.
 
-Exit codes: `2` for a usage error (unknown subcommand, unexpected argument,
-unknown uninstall option), `1` when the work could not complete, `0` on success.
+Exit codes: `2` for a usage error (unknown subcommand, an argument to a
+subcommand that takes none, unknown uninstall option), `1` when the work could
+not complete, `0` on success. A refused link makes `install` and `link` exit 1,
+but only after the other links and the cached integrations are in place.
+`install` then skips the plugin submodule step (its one network step) until a
+re-run links cleanly.
 
 ## Lifecycle commands
 
@@ -46,17 +50,28 @@ interactive shell that loaded this framework. Both have Tab completion.
 ## restic wrappers
 
 Defined in `zsh/restic.zsh`, and only when the `restic` binary is present. Each
-takes a repository name that maps to `$XDG_CONFIG_HOME/restic/<name>.env`. Tab
-completion offers the `.env` files you have.
+takes a repository name that maps to `$XDG_CONFIG_HOME/restic/<name>.env` and
+runs `<runner> run --env-file <that file> -- restic <args...>`. Tab completion
+offers the `.env` files you have.
 
-| Command | Secret runner |
+| Command | Secret runner | References it resolves |
+| --- | --- | --- |
+| `restic-pass-cli <repo> [restic args...]` | `pass-cli run --env-file` (Proton Pass CLI) | `pass://vault/item/field` |
+| `restic-op <repo> [restic args...]` | `op run --env-file` (1Password CLI) | `op://vault/item/field` |
+
+Every value in an env file is a secret reference, never a literal secret, and
+the runner resolves the references into restic's own environment only. Each
+runner understands only its own scheme, so an env file serves one runner: a
+repository reachable through both needs two files, such as `photos_b2.env`
+(`pass://`) and `photos_b2_op.env` (`op://`).
+
+| Exit code | Meaning |
 | --- | --- |
-| `restic-pass-cli <repo> [restic args...]` | `pass-cli run --env-file` |
-| `restic-op <repo> [restic args...]` | `op run --env-file` (1Password CLI) |
+| `2` | No repository name given. stderr shows `usage: pass-cli-backed wrapper <repo> [restic args...]` (`op-backed` for `restic-op`). An explicitly empty name (`restic-op ""`) prints `usage: <wrapper> <repo> [restic args...]` and the env directory to look in. |
+| `1` | `<name>.env` does not exist, or the runner is not on `PATH`. |
+| other | The runner's own exit status, which is restic's when the runner passes it through. |
 
-Every value in those env files is a `pass://` reference, never a literal secret.
-The runner resolves the references into restic's own environment only. See
-[backup and restore](backup-restore.md).
+See [backup and restore](backup-restore.md).
 
 ## Helper functions
 
@@ -64,8 +79,8 @@ The runner resolves the references into restic's own environment only. See
 | --- | --- |
 | `mkcd <dir>` | Create the directory with parents, then `cd` into it. |
 | `up [n]` | `cd` up `n` levels. Default 1. |
-| `extract <archive>` | Unpack into the current directory, dispatching on the extension: tar.bz2, tar.gz, tar.xz, tar, gz, bz2, xz, zip, 7z. Trusts the archive's member paths, so do not point it at untrusted archives. |
-| `serve [port]` | Serve the current directory over HTTP on `127.0.0.1`, port 8000 by default. Never binds `0.0.0.0`. Requires python3. |
+| `extract <archive>` | Unpack into the current directory, dispatching on the extension: `.tar.bz2`/`.tbz2`, `.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar`, `.gz`, `.bz2`, `.xz`, `.zip`, `.7z`. Exits 2 when the argument is missing or not a file, 1 for an unknown extension. Trusts the archive's member paths, so do not point it at untrusted archives. |
+| `serve [port]` | Serve the current directory over HTTP on `127.0.0.1`, port 8000 by default. Never binds `0.0.0.0`. Requires `python3`, or `python` when that is Python 3. |
 | `gcd [subpath]` | `cd` to the git repository root, or to a path beneath it. |
 | `finder` | `cd` to the directory of the frontmost Finder window. |
 | `go_test [args]` | `go test` with PASS, SKIP and FAIL colorized. Preserves go's exit status. |
@@ -177,37 +192,82 @@ always wins.
 
 | Alias | Behavior |
 | --- | --- |
-| `ip` | Public IP through a DNS TXT query. Needs `dig`. |
+| `ip` | Public IP through a DNS TXT query. Defined only when `dig` is present and no real `ip` command (such as iproute2mac) is on `PATH`. |
 | `ips` | Every local interface address. |
 | `flushdns` | Flush the DNS cache. Uses sudo. |
 | `hidedesktop`, `showdesktop` | Toggle Finder desktop icons. |
 | `afk` | `pmset displaysleepnow` |
-| `tailscale` | The CLI inside Tailscale.app. |
+| `tailscale` | The CLI inside Tailscale.app. Defined only when the app is installed and no `tailscale` command is on `PATH`. |
 | `stopwatch` | Time an interval. Stop with Ctrl-D. |
-| `uuid` | A lowercase UUID. |
+| `uuid` | A lowercase UUID. Defined only when `uuidgen` is present. |
 | `ducks`, `suducks` | Ten largest entries in the current directory, with and without sudo. |
 | `niceness` | Processes with their nice values. |
 | `ascii-rainbow` | Print the eight ANSI colors. |
 
+## Commands on `PATH`
+
+| Command | Where it comes from |
+| --- | --- |
+| `tmux-status` | `bin/tmux-status`, linked to `~/.local/bin`. The tmux status line runs it; you rarely call it yourself. It is the only `bin/` tool the installer links: `check-patterns`, `secret-scan`, `smoke` and `startup-fork-gate` are repository gates that `make` runs from the checkout. |
+| `z <dir>` | zoxide's jump command, from the cached `zoxide init zsh`. Present only when `zoxide` was on `PATH` at install, link or upgrade time. |
+| `is-arm64`, `is-amd64` | Shell functions from `lib/os.sh`: exit 0 on the matching CPU architecture. For a host's own `.local` files. |
+
+`PATH` is built by the zshrc in this order, with duplicates removed:
+`~/.local/bin`, then the Homebrew prefix (`bin` and `sbin` under `/opt/homebrew`
+or `/usr/local`, whichever holds `bin/brew`), then `$GOPATH/bin` and
+`/usr/local/go/bin` when they exist (added by `zshenv`), then the inherited
+`PATH`. On a macOS login shell, `/etc/zprofile` runs `path_helper` between
+`zshenv` and the zshrc, which can move the two Go directories after the system
+directories.
+
+## Key bindings
+
+| Keys | Action | Condition |
+| --- | --- | --- |
+| Ctrl-R | fzf history search | fzf's `key-bindings.zsh` found, and a terminal is attached |
+| Ctrl-T | fzf file picker, inserted at the cursor | The same |
+| Alt-C | fzf directory picker, then `cd` | The same |
+| tmux prefix | `C-a`, with `C-b` kept as a secondary prefix | tmux |
+| prefix `\|`, prefix `-` | Split the window side by side, or top and bottom, in the current directory | tmux |
+| prefix `c` | New window in the current directory | tmux |
+| prefix `r` | Reload `tmux.conf` | tmux |
+
+## Shell options
+
+The user-visible options the zshrc sets:
+
+| Option | Effect |
+| --- | --- |
+| `AUTO_CD` | Typing a directory name changes into it. |
+| `AUTO_PUSHD`, `PUSHD_IGNORE_DUPS`, `PUSHD_SILENT`, `PUSHD_TO_HOME` | Every `cd` pushes onto the directory stack that `d` and `1` to `9` use. |
+| `CDABLE_VARS` | `cd DOTFILES` works when a variable holds the path. |
+| `EXTENDED_GLOB`, `INTERACTIVE_COMMENTS` | The `#`, `~` and `^` glob operators, and `#` comments at the prompt. |
+| `RM_STAR_WAIT` | `rm *` waits 10 seconds before it runs. |
+| `NO_FLOW_CONTROL`, `NO_BEEP`, `NOTIFY` | Ctrl-S and Ctrl-Q reach the line editor, no bell, and a finished background job is reported at once. |
+| `EXTENDED_HISTORY`, `INC_APPEND_HISTORY`, `SHARE_HISTORY` | Timestamped history, written as commands run and shared across live shells. |
+| `HIST_IGNORE_ALL_DUPS`, `HIST_IGNORE_SPACE`, `HIST_REDUCE_BLANKS`, `HIST_VERIFY` | Keep only the newest duplicate, skip a command that starts with a space, normalize blanks, and show a history expansion before running it. |
+| `COMPLETE_IN_WORD`, `ALWAYS_TO_END`, `PATH_DIRS` | Completion from both ends of a word, cursor to the end afterwards, and path search for a command that contains a slash. |
+
 ## Environment variables
 
 Set by `zsh/zshenv`, which runs for every zsh. Most honor a value that is
-already set. Five do not: `ZDOTDIR`, `DOTFILES`, `STARSHIP_CONFIG`,
-`STARSHIP_CACHE` and `HOMEBREW_NO_ANALYTICS` are exported unconditionally and overwrite whatever the
-calling environment had. Override those from `$ZDOTDIR/.zshrc.local`, which runs
-later.
+already set. Six do not: `ZDOTDIR`, `DOTFILES`, `STARSHIP_CONFIG`,
+`STARSHIP_CACHE`, `HOMEBREW_NO_ANALYTICS` and, when `~/go` exists, `GOPATH` are
+exported unconditionally and overwrite whatever the calling environment had.
+Override those from `$ZDOTDIR/.zshrc.local`, which runs later.
+`tests/zshenv_contract_test.sh` pins both lists.
 
 | Variable | Value |
 | --- | --- |
 | `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` | The spec defaults under `$HOME`. |
 | `ZDOTDIR` | `$XDG_CONFIG_HOME/zsh` |
 | `DOTFILES` | The repository root, resolved from the `~/.zshenv` symlink with no fork. |
-| `EDITOR` | `nvim` when installed, otherwise `vim`. |
+| `EDITOR` | `nvim` when it is on `PATH`, otherwise `vim`. In an interactive shell this is re-checked after the zshrc adds the Homebrew prefix and `~/.local/bin`, so a Homebrew `nvim` is found on a GUI-launched terminal too. |
 | `VISUAL`, `PAGER` | `$EDITOR`, `less`. |
 | `LANG` | `en_US.UTF-8` |
 | `LESS` | `-g -i -M -R -w` |
-| `LESSOPEN` | Set when `lesspipe.sh` or `lesspipe` is installed. |
-| `BROWSER` | `open` |
+| `LESSOPEN` | Set when `lesspipe.sh` or `lesspipe` is on `PATH`, re-checked like `EDITOR`. |
+| `BROWSER` | `open`, on macOS only. |
 | `HOMEBREW_NO_ANALYTICS` | `1` |
 | `STARSHIP_CONFIG` | `$XDG_CONFIG_HOME/starship/starship.toml` |
 | `STARSHIP_CACHE` | `$XDG_CACHE_HOME/zsh/starship`. starship keeps its session logs here, and `--purge` removes the directory. `install.sh` sets the same value when it runs `starship init`. |
@@ -236,6 +296,9 @@ Read as configuration:
 ## Generated files
 
 Everything the framework generates, all removed by `dotfiles-uninstall --purge`.
+`$XDG_STATE_HOME/zsh/history` is your shell history: `--purge` deletes it too.
+`~/.config/git/config` is written once by the installer and then belongs to you
+(`git config --global` writes there), so no uninstall removes it.
 
 | Path | Contents |
 | --- | --- |
@@ -244,7 +307,7 @@ Everything the framework generates, all removed by `dotfiles-uninstall --purge`.
 | `$XDG_STATE_HOME/dotfiles/update-check.stamp` | Mtime of the last cadence check. |
 | `$XDG_STATE_HOME/dotfiles/update-last-fetch` | Mtime of the last successful background fetch. |
 | `$XDG_STATE_HOME/dotfiles/update-available` | Present when the remote was ahead at the last fetch. |
-| `$XDG_STATE_HOME/zsh/history` | Shell history. 1,000,000 entries, shared across live shells. |
+| `$XDG_STATE_HOME/zsh/history` | Shell history. 1,000,000 entries, shared across live shells. A pre-XDG `~/.zsh_history` is copied here, mode 600, on the first install. |
 | `$XDG_CACHE_HOME/zsh/zcompdump` and `.zwc`, `.stamp` | The completion dump, its compiled form, and the 24 hour audit clock. |
 | `$XDG_CACHE_HOME/zsh/zcompcache` | The completion system's own cache. |
 | `$XDG_CACHE_HOME/zsh/starship-init.zsh`, `zoxide-init.zsh`, `canga-completion.zsh` | Pre-compiled shell integrations. All three tools are optional. `starship` and `zoxide` come from the Brewfile; [canga](https://github.com/brunovenceslau/canga) is a separate project this framework never installs. Each cache is written only when its binary is on `PATH` at install, link or upgrade time, and removed once the binary is gone. |
