@@ -37,7 +37,17 @@
 #         fails at expansion, not at parse. This is their only gate.
 #     (8) GNU-only regex escapes (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface,
 #         tests/ and the workflows included - BSD sed/grep on macOS silently read
-#         them as something else, and no Linux run can see it.
+#         them as something else, and no Linux run can see it. Inside tests/ ONLY,
+#         `*.py` files are exempt by extension - the only content-independent
+#         language exemption this arm has, never a marker or a parse of the file
+#         (the arm's other two exclusions are the pinned plugins dir and this
+#         script by name, both unrelated to language). Python's own `re` module
+#         has a different regex dialect, where those escapes are portable, so
+#         non-shell code lives in its own `.py` file under tests/ rather than a
+#         heredoc inside a `.sh` script. bin/, lib/, zsh/, install.sh, the
+#         Makefile and the workflows keep no such exemption: lib/link.sh's
+#         _link_bin_tree links every bin/* file onto the live PATH by basename,
+#         so a `.py` file there could still run as shell-adjacent code.
 #     (9) an early-exit reader (`grep -q`/`-m`/`-l`, `head`) on the right of a
 #         pipe in the pipefail surface - the writer can die of SIGPIPE when the
 #         reader exits first, failing the pipeline at random.
@@ -376,7 +386,23 @@ fi
 # SURFACE: every file whose commands run on a mac - install.sh, lib/, bin/, zsh/,
 # tests/, the Makefile and the workflows (the macOS runner executes their `run:`
 # steps). config/ is NOT scanned: it holds editor configs whose own regex dialects
-# (vim's `\s`) are legitimate. Pinned plugins are upstream's code, excluded by name.
+# (vim's `\s`) are legitimate. Pinned plugins are upstream's code, excluded by
+# name, and this script excludes itself by name too - NEITHER is a language
+# exemption, both are content-independent path exclusions of THIRD-PARTY or
+# SELF-REFERENTIAL text.
+# `*.py` FILES UNDER tests/ ONLY ARE EXEMPT BY EXTENSION - the only
+# content-independent LANGUAGE exemption this arm has, and a fixed suffix,
+# never a marker comment or a parse of what is inside the file: Python's `re`
+# module is not the shell's regex dialect, GNU-style escapes are portable
+# there, so non-shell code that needs one lives in its own `.py` file under
+# tests/, never a heredoc embedded in a `.sh` script (a heredoc is still
+# shell-surface text to this arm - it has no notion of an embedded language).
+# The exemption stops at tests/: bin/, lib/, zsh/, install.sh, the Makefile and
+# the workflows are still fully scanned, because lib/link.sh's _link_bin_tree
+# links every bin/* file onto the live PATH by basename - a `bin/foo.py`
+# holding a shell-adjacent GNU-only regex would run on a mac unscanned if this
+# arm exempted it too. tests/ has no such path: nothing there is linked or run
+# except through a `*_test.sh` harness, which stays fully scanned.
 # TWO SHAPES, both tested on CODE only (the comment that explains the rule spells it):
 #   - a shorthand class anywhere in code. It is NOT tied to a sed/grep call word,
 #     because a gate's pattern often sits on a continuation line or in a variable
@@ -386,11 +412,13 @@ fi
 #     carry no -E/-r/-P. Under -E, `\|` is an ESCAPED literal bar and is portable.
 # PREMISE: a flag group before the pattern is short options only (`-qi`, `-e`); a
 # long option (`--posix`) in front of a BRE pattern hides it from the second shape.
-gnu=()
-for p in install.sh lib bin zsh tests Makefile .github/workflows; do
-  [ -e "$root/$p" ] && gnu+=("$root/$p")
+gnu_rest=()
+for p in install.sh lib bin zsh Makefile .github/workflows; do
+  [ -e "$root/$p" ] && gnu_rest+=("$root/$p")
 done
-if [ "${#gnu[@]}" -gt 0 ]; then
+gnu_tests=()
+[ -e "$root/tests" ] && gnu_tests+=("$root/tests")
+if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
   gnu_esc='(^|[^\\])\\[sSwWbB<>]'
   # The argument body excludes only its OWN closing quote: a `"` inside a
   # single-quoted pattern (or a `'` inside a double-quoted one) is pattern text.
@@ -398,19 +426,44 @@ if [ "${#gnu[@]}" -gt 0 ]; then
   gnu_bre='(^|[^[:alnum:]_-])(grep|sed)([[:space:]]+-[A-DF-OQ-Za-qs-z]+)*[[:space:]]+'
   gnu_bre="$gnu_bre($q([^$q]*[^\\\\$q])?|\"([^\"]*[^\\\\\"])?)"'\\[|+?]'
   gnu_re="$gnu_esc|$gnu_bre"
-  if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$gnu_re" "${gnu[@]}" 2>&1); then
-    viol=$(printf '%s\n' "$out" | _code_hits "$gnu_re")
-    if [ -n "$viol" ]; then
-      printf '%s\n' "$viol" >&2
-      printf '%s\n' 'check-patterns: a GNU-only regex escape - BSD sed/grep on macOS read \s \w \b \< \> and BRE \| \+ \? as something else; use a POSIX class ([[:space:]], [[:alnum:]_]) or the ERE operator under -E' >&2
-      bad=1
+  gnu_msg='check-patterns: a GNU-only regex escape - BSD sed/grep on macOS read \s \w \b \< \> and BRE \| \+ \? as something else; use a POSIX class ([[:space:]], [[:alnum:]_]) or the ERE operator under -E'
+  # TWO grep passes, not one with a conditional flag: `--exclude` applies to an
+  # entire invocation, so scoping the `*.py` exemption to tests/ ONLY means
+  # running tests/ and the rest of the surface as separate calls - the same
+  # `--exclude-dir`/`--exclude` flag family already proven on BSD grep (macOS)
+  # elsewhere in this arm, just split across two calls instead of one.
+  if [ "${#gnu_rest[@]}" -gt 0 ]; then
+    if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$gnu_re" "${gnu_rest[@]}" 2>&1); then
+      viol=$(printf '%s\n' "$out" | _code_hits "$gnu_re")
+      if [ -n "$viol" ]; then
+        printf '%s\n' "$viol" >&2
+        printf '%s\n' "$gnu_msg" >&2
+        bad=1
+      fi
+    else
+      rc=$?
+      if [ "$rc" -ge 2 ]; then
+        printf '%s\n' "$out" >&2
+        echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
+        bad=1
+      fi
     fi
-  else
-    rc=$?
-    if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
-      bad=1
+  fi
+  if [ "${#gnu_tests[@]}" -gt 0 ]; then
+    if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns --exclude='*.py' -- "$gnu_re" "${gnu_tests[@]}" 2>&1); then
+      viol=$(printf '%s\n' "$out" | _code_hits "$gnu_re")
+      if [ -n "$viol" ]; then
+        printf '%s\n' "$viol" >&2
+        printf '%s\n' "$gnu_msg" >&2
+        bad=1
+      fi
+    else
+      rc=$?
+      if [ "$rc" -ge 2 ]; then
+        printf '%s\n' "$out" >&2
+        echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
+        bad=1
+      fi
     fi
   fi
 fi
