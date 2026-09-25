@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# CI - the verification gate.
+#
+# Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint + test +
+# reuse + gitleaks + secret-scan + smoke + forkgate) - on both macOS legs, every
+# leg on a GITHUB-HOSTED runner: macOS arm64 + Intel. macOS is the only platform
+# the framework installs on, so there is no leg for any other OS. There is
+# deliberately NO QEMU/container emulation: each leg is real hardware of its own
+# architecture, which is what the Brewfile on_arm/on_intel blocks, the
+# Homebrew-prefix detection and the bash 3.2 + BSD-tools assumptions actually
+# exercise.
+#
+# Runner images: `macos-latest` is Apple Silicon. Intel has no rolling alias, so
+# that leg names `macos-15-intel` - GitHub's Intel image - explicitly; if it is
+# ever retired the leg fails loudly rather than silently dropping the Intel
+# coverage. Loudly is the right failure, but while the leg is a REQUIRED check a
+# retirement also deadlocks merging: see docs/development.md, "When a runner
+# image is retired", for the one manual step that breaks the deadlock.
+#
+# The gate is a `make` target (`make local-ci`), never inline YAML
+#   logic; setup steps only install the tools that target needs.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege: the workflow only reads the repo to verify it.
+permissions:
+  contents: read
+
+# Cancel superseded runs on rapid re-pushes/PR updates (each ref keeps its group).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local-ci:
+    name: local-ci (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            runs-on: macos-latest
+          - name: macos-intel
+            runs-on: macos-15-intel
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # On a PR, test the PR head - the commit under review, not a synthetic
+          # merge. On a push to main, github.sha is already the integrated tip.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          # smoke installs into a scratch HOME and loads the plugin submodules -
+          # check them out so it is the real path, not a degraded no-plugin one.
+          submodules: recursive
+          # no authenticated git after clone; don't leave GITHUB_TOKEN on the runner.
+          persist-credentials: false
+
+      # Setup, not a gate: make local-ci invokes shellcheck, zsh, reuse and
+      # gitleaks. The hosted image already ships make, zsh, python3 and jq;
+      # install ONLY what this particular image is missing - a blanket
+      # `brew install` would re-link the image's preinstalled python3 and fail
+      # the step. `reuse` and `gitleaks` are homebrew-core formulae; the reuse
+      # one installs the reuse[charset-normalizer] extra the tool needs to
+      # detect file encodings. This loop is the single list of what CI
+      # provisions: tests/dev_docs_prereqs_test.sh holds docs/development.md's
+      # Prerequisites section to it, so a tool added here without a docs entry
+      # fails the gate rather than stranding a contributor.
+      - name: Ensure gate tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          missing=''
+          for tool in make shellcheck zsh tmux fzf jq reuse gitleaks; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            # shellcheck disable=SC2086 # word splitting is the point: a formula list
+            brew install $missing
+          fi
+          # python3 ships with the image and is NOT brew-installed here (see above);
+          # if it is ever absent the gate must fail closed rather than fight brew.
+          command -v python3 >/dev/null 2>&1 \
+            || { echo "python3 missing from the runner image" >&2; exit 1; }
+          # openssh (ssh-keygen) is part of the macOS base. PyYAML is a Python module,
+          # not a brew formula: install it into the image's python3 if not already
+          # importable. PINNED (PyPI versions are immutable, so an upgrade cannot be
+          # trojaned under us; matches the repo's pin-everything ethos). A full
+          # per-wheel --require-hashes lock is a further-hardening follow-up.
+          python3 -c 'import yaml' >/dev/null 2>&1 \
+            || python3 -m pip install --quiet --break-system-packages 'pyyaml==6.0.3'
+
+      # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
+      # can never report green on a gate it did not actually run. local-ci =
+      # lint + test + reuse + gitleaks + secret-scan + smoke + forkgate;
+      # `make test` runs this workflow's contract test.
+      - name: make local-ci
+        run: make local-ci STRICT=1
