@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# startup-fork-gate - prove the interactive startup path invokes NO external
+# binary.
+#
+# A CI gate MUST prove `zsh -i -c exit` performs no subprocess or
+#   network access, run with a fresh update
+#   sentinel so the sanctioned detached fetch does not fire.
+# Methodology (a derived-assertion approach: prove the instrumentation itself
+#   works before trusting what it reports):
+#   every binary name reachable on the real PATH becomes a PATH-FIRST logging
+#   shim that records the invocation and execs the real tool, then a hermetic
+#   `zsh -i -c exit` runs against this repo's zshenv/zshrc and the log MUST be
+#   empty. The environment reports what was actually invoked - nothing is
+#   grepped for what someone remembered to forbid. The instrumentation proves
+#   ITSELF before the verdict counts: a canary invocation must reach the log
+#   (a sabotaged shim farm otherwise passes green with zero instrumentation -
+#   measured failure mode), and the measured shell must have actually run the
+#   repo zshrc (a broken ZDOTDIR yields a pristine shell that exits 0 -
+#   measured failure mode).
+#
+# What this gate does NOT cover, explicitly:
+#   * The precmd window. `precmd` never fires under `zsh -i -c exit` (measured
+#     with a positive control), so first-prompt activity (autosuggestions'
+#     widget rebind, any async prompt worker) is out of scope. A PATH shim could
+#     not see a zpty worker anyway: zpty forks the running zsh without
+#     traversing PATH.
+#   * Fork-without-exec subshells. `$(shell-function)` never resolves a PATH
+#     entry, so the accepted subshell inside f-sy-h's `$(uname -a)` guard is
+#     invisible here BY CONSTRUCTION - that is the documented measurement
+#     class, not a blind spot.
+#   * Absolute-path invocations. `/usr/bin/x` (or `command -p x`) never
+#     consults PATH, so no shim can see it. The repo config contains no such
+#     invocation today; a grep is the check for that class, not this gate.
+#   * The OS's global INTERACTIVE/LOGIN zsh rc - /etc/zshrc (and /etc/zprofile,
+#     /etc/zlogin for a login shell). scopes to "zshrc and
+#     everything IT sources"; these run BEFORE our config and are NOT sourced by
+#     it, so `--no-globalrcs` excludes them while still running OUR config via
+#     ZDOTDIR. (/etc/zshenv is NOT excludable - zsh always reads it - but the
+#     gate pins HOME/XDG/ZDOTDIR/PATH in its env, so a global zshenv cannot alter
+#     the measured PATH or shim coverage, and a fork there would be OVER-reported
+#     by the shims, never hidden.) Concretely on macOS, /etc/zshrc runs
+#     `locale LC_CTYPE` (to `setopt combiningchars`) on EVERY interactive zsh -
+#     a fork the framework neither owns nor can eliminate (verified 2026-08-06:
+#     `PS4='%x:%I> ' zsh -xic exit` attributed it to /etc/zshrc:8; a bare
+#     `zsh --no-globalrcs -i` does NOT fork it). If OUR config ever forks a
+#     binary it still runs under --no-globalrcs, so the gate keeps its teeth.
+#
+# Environment normalization (the gate's own RED phase depends on it):
+#   * SSH_CONNECTION is cleared, so the measured shell always takes the same
+#     branch of any ssh-aware integration and a green means the same thing
+#     whether the gate ran locally or over ssh.
+#   * `who` MUST be present on the real PATH, because it is the binary the
+#     instrumentation CANARY invokes below to prove the shim farm intercepts at
+#     all. Absent, the canary could not run and an empty fork log would be
+#     indistinguishable from broken instrumentation - so it is a HARD failure,
+#     never a quiet pass.
+#
+# Usage: startup-fork-gate [ROOT]
+# Exit: 0 clean; 1 findings or a broken measurement env; 2 usage error.
+#   zsh absent -> loud skip 0 (non-empty STRICT escalates to 1, matching
+#   bin/smoke's tool-availability semantics).
+#
+# Bash 3.2 compatible - no associative arrays, no mapfile,
+#   no ${var,,}.
+set -euo pipefail
+
+root="${1:-}"
+if [ -z "$root" ]; then
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+else
+  root="$(cd "$root" 2>/dev/null && pwd)" \
+    || { echo "startup-fork-gate: ROOT is not a directory" >&2; exit 2; }
+fi
+if [ ! -f "$root/zsh/zshenv" ] || [ ! -f "$root/zsh/zshrc" ]; then
+  echo "startup-fork-gate: $root does not look like the dotfiles repo" >&2
+  exit 2
+fi
+
+if ! command -v zsh >/dev/null 2>&1; then
+  if [ -n "${STRICT:-}" ]; then
+    echo "startup-fork-gate: FAIL zsh not found and STRICT set (nothing was measured)" >&2
+    exit 1
+  fi
+  echo "startup-fork-gate: SKIP zsh not found - nothing was measured (STRICT escalates)"
+  exit 0
+fi
+zsh_bin="$(command -v zsh)"
+
+# `who` present is a MEASUREMENT precondition, not an optional tool: it is the
+# canary binary below, and without it an empty fork log cannot be told apart from
+# instrumentation that never intercepted anything. Hard fail - loud, never quiet.
+if ! command -v who >/dev/null 2>&1; then
+  echo "startup-fork-gate: FAIL 'who' is not on PATH - it is the canary this gate" >&2
+  echo "startup-fork-gate:      uses to prove its shims intercept, so without it a" >&2
+  echo "startup-fork-gate:      green would prove nothing. Install it and re-run." >&2
+  exit 1
+fi
+
+# Mirror bench's guard: a checkout without submodules starts a DEGRADED plugin-
+# free shell that would pass vacuously. That is a broken measurement, so unlike
+# the informational bench this gate fails hard.
+for p in \
+  zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh; do
+  if [ ! -e "$root/$p" ]; then
+    echo "startup-fork-gate: FAIL plugin submodules not initialized ($p missing)" >&2
+    echo "startup-fork-gate:      a plugin-free shell passes vacuously; run" >&2
+    echo "startup-fork-gate:      'git submodule update --init' first." >&2
+    exit 1
+  fi
+done
+
+# --- Scratch tree (same locality contract as bench: in-repo, gitignored) ------
+scratch="$root/.forkgate/run"
+rm -rf "$scratch"
+mkdir -p "$scratch/config/zsh" "$scratch/cache/zsh" "$scratch/state/zsh" \
+         "$scratch/state/dotfiles" "$scratch/shims"
+ln -sf "$root/zsh/zshenv" "$scratch/config/zsh/.zshenv"
+ln -sf "$root/zsh/zshrc"  "$scratch/config/zsh/.zshrc"
+# macOS leg: the measured zshrc PREPENDS the Homebrew prefix to $path
+# (zsh/zshrc:38-46, real directories with hundreds of binaries), which would
+# displace the shim dir and let any brew-resolved fork bypass the
+# instrumentation - a PROVEN false-green on the mac legs. The zshrc then
+# front-loads "$HOME/.local/bin" (zshrc:49); $HOME here is the scratch, so
+# pointing that at the shim farm re-front-loads it AFTER the brew prepend. The
+# zshrc:42->49 window contains no forks (pure array assignments only).
+mkdir -p "$scratch/.local"
+ln -s "$scratch/shims" "$scratch/.local/bin"
+trap 'rm -rf "$scratch"; rmdir "$root/.forkgate" 2>/dev/null || true' EXIT INT TERM
+
+# Fresh update sentinel: a just-touched stamp is
+# inside the cadence window, so the sanctioned detached fetch never fires and
+# the code path that DECIDES that stays exercised (never DOTFILES_UPDATE_DISABLE
+# here - that would skip the very code under measurement).
+: > "$scratch/state/dotfiles/update-check.stamp"
+
+# --- PATH-first logging shims -------------------------------------------------
+# One logger; every executable name on the real PATH becomes a symlink to it.
+# The logger appends the invocation and execs the real tool via the ORIGINAL
+# PATH, so the measured shell still works and nested spawns of a logged binary
+# are attributed to it rather than double-counted.
+forklog="$scratch/fork.log"
+: > "$forklog"
+cat > "$scratch/logger" <<'EOF'
+#!/bin/sh
+printf '%s %s\n' "${0##*/}" "$*" >> "$GATE_FORKLOG"
+PATH="$GATE_REALPATH"
+export PATH
+exec "${0##*/}" "$@"
+EOF
+chmod +x "$scratch/logger"
+
+realpath_env="$PATH"
+# Build the farm inside ONE zsh child with the zsh/files `ln` builtin: a
+# symlink per PATH binary (~4k on a brew mac) at one fork per binary took ~16s;
+# the builtin loop takes ~1s. zsh is guaranteed present (asserted above).
+# First PATH hit wins, matching real resolution order.
+# shellcheck disable=SC2016
+"$zsh_bin" -f -c '
+  zmodload -F zsh/files b:ln || exit 1
+  logger="$1" shimdir="$2" dir= f= name=
+  for dir in ${(s.:.)3}; do
+    [[ -d $dir ]] || continue
+    for f in "$dir"/*(N-*); do
+      name="${f:t}"
+      [[ -e "$shimdir/$name" ]] || ln -s "$logger" "$shimdir/$name"
+    done
+  done
+' shimbuild "$scratch/logger" "$scratch/shims" "$realpath_env"
+
+# Instrumentation canary: prove the shims intercept BEFORE trusting an empty
+# log as a clean verdict. `who` must have a shim (it is on PATH - asserted above)
+# and a canary invocation through the shim PATH must reach the log.
+[ -e "$scratch/shims/who" ] || {
+  echo "startup-fork-gate: FAIL shim farm has no 'who' entry - instrumentation broken, not a clean pass" >&2
+  exit 1
+}
+env GATE_FORKLOG="$forklog" GATE_REALPATH="$realpath_env" \
+  PATH="$scratch/shims:$realpath_env" who >/dev/null 2>&1 || true
+grep -q '^who' "$forklog" || {
+  echo "startup-fork-gate: FAIL canary invocation never reached the fork log - instrumentation broken, not a clean pass" >&2
+  exit 1
+}
+: > "$forklog"
+
+# --- The measurement ----------------------------------------------------------
+# Controlled env: hermetic HOME/XDG/ZDOTDIR (the repo's real config via the
+# symlinks above), shims first on PATH, SSH detection vars cleared, TERM pinned.
+# `env -u` unsets are the normalization the RED phase depends on.
+set +e
+env -u SSH_CONNECTION -u TERM_PROGRAM \
+  HOME="$scratch" \
+  XDG_CONFIG_HOME="$scratch/config" \
+  XDG_CACHE_HOME="$scratch/cache" \
+  XDG_STATE_HOME="$scratch/state" \
+  XDG_DATA_HOME="$scratch/data" \
+  ZDOTDIR="$scratch/config/zsh" \
+  GATE_FORKLOG="$forklog" \
+  GATE_REALPATH="$realpath_env" \
+  PATH="$scratch/shims:$realpath_env" \
+  TERM=dumb \
+  "$zsh_bin" --no-globalrcs -i -c exit >"$scratch/stdout" 2>"$scratch/stderr"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  echo "startup-fork-gate: FAIL the measured shell exited $rc (broken startup):" >&2
+  cat "$scratch/stderr" >&2
+  exit 1
+fi
+
+# Subject sentinel: rc==0 alone does not prove the REPO zshrc ran - a broken
+# ZDOTDIR yields a pristine default shell that also exits 0 (measured failure
+# mode). The repo zshrc builds the compdump under the scratch cache on its
+# first run; its absence means the subject of the measurement never executed.
+[ -s "$scratch/cache/zsh/zcompdump" ] || {
+  echo "startup-fork-gate: FAIL the measured shell did not run the repo zshrc (no compdump was built) - broken measurement, not a clean pass" >&2
+  exit 1
+}
+
+# --- Verdict ------------------------------------------------------------------
+# The allowlist is EMPTY by design: the only sanctioned spawn is
+# suppressed by the fresh sentinel above, so any line in the log is a finding.
+if [ -s "$forklog" ]; then
+  echo "startup-fork-gate: FAIL external binaries invoked during 'zsh -i -c exit':" >&2
+  while IFS= read -r line; do
+    echo "startup-fork-gate:   $line" >&2
+  done < "$forklog"
+  echo "startup-fork-gate: the startup path must stay fork-free;" >&2
+  echo "startup-fork-gate: sourcing-file attribution is best-effort - grep the" >&2
+  echo "startup-fork-gate: named binary across zsh/ and zsh/plugins/." >&2
+  exit 1
+fi
+echo "startup-fork-gate: OK - no external binary invoked during 'zsh -i -c exit'"

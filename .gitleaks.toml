@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# gitleaks configuration - the second secret scanner, behind bin/secret-scan.
+#
+# The two are deliberately not redundant. bin/secret-scan is the
+# zero-dependency floor: grep and git only, a handful of high-signal shapes, so
+# the rule survives on a machine with nothing installed. gitleaks brings the
+# maintained rule set - provider-specific token formats and entropy scoring -
+# that a hand-written grep cannot keep up with. Either one failing fails
+# `make local-ci`.
+#
+# Scope: `make gitleaks` runs `gitleaks dir .`, which walks the working
+# directory as it is on disk. That is wider than `reuse lint`, which walks what
+# git tracks: an untracked scratch file is scanned too (a feature - it is
+# scanned BEFORE it can be committed), and so are the pinned plugin submodules.
+
+title = "dotfiles"
+
+[extend]
+# Start from gitleaks' own rule set and add nothing local. A rule this
+# repository invented would be a rule nobody maintains; the default set is the
+# reason the tool is here at all.
+useDefault = true
+
+[allowlist]
+description = "The repository's single, greppable per-line waiver token"
+# ONE waiver mechanism for both scanners: the same `secret-scan:allow` marker
+# bin/secret-scan honours (see its header). regexTarget = "line" matches the
+# whole source line rather than the captured secret, which is what lets the
+# marker sit beside the finding instead of inside it.
+#
+# This is the LAST resort, not the first. A marker is honoured here and by
+# bin/secret-scan, and by nothing on GitHub's side: a real literal reaches push
+# protection regardless, and removing it then costs a history rewrite. A fixture
+# that needs a secret SHAPE assembles it from fragments at run time instead -
+# see tests/secret_scan_test.sh - which is why no tracked file currently needs
+# this waiver at all.
+regexTarget = "line"
+regexes = ['secret-scan:allow']

@@ -1,0 +1,340 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+#
+# smoke - prove a fresh install yields a clean interactive zsh, idempotently.
+#
+# Install into a scratch HOME, run `zsh -i -c exit` (exit 0, empty
+#   stderr), re-run the installer and assert idempotency, then
+#   `dotfiles-uninstall --purge` and assert the HOME is byte-for-byte back to
+#   its pre-install state - bar the machine-local git write-back seed, which
+#   uninstall never removes and this driver sweeps itself first (see the audit).
+# A re-run is a no-op - no new `.bak`, identical links, and a
+#   byte-stable manifest. This driver asserts exactly that.
+# `make smoke` wires this into `make local-ci`. The scratch HOME/XDG
+#   tree lives under .smoke/ (gitignored, in-repo), so this driver never writes
+#   outside ~/.config/dotfiles and never needs a real $HOME.
+#
+# Kept bash 3.2 compatible (no associative arrays, no mapfile, no
+#   ${var,,}) so it behaves identically on the macOS CI legs. But note the
+#   enforcement mechanism does NOT cover this file: `make smoke` execs it via its
+#   own shebang (`#!/usr/bin/env bash`) - the first bash on PATH, a Homebrew bash 5
+#   on the macOS runners, not /bin/bash - and the `/bin/bash -n` gate
+#   scopes to install.sh + lib/ only. So staying 3.2-clean here is a discipline,
+#   not a CI-caught property. The installer UNDER TEST is separately invoked via an
+#   explicit /bin/bash, which on the macOS legs IS the real 3.2 - so the smoke does
+#   exercise the 3.2 interpreter at install time.
+#
+# This PRE-SEEDS the compinit 24h stamp so the zshrc takes its warm
+# `compinit -C` path from the very first shell. Two reasons, the second decisive:
+#   1. `-C` still builds a usable dump on the first run; it only skips compaudit's
+#      insecure-directory scan.
+#   2. That scan is the problem in CI. With no TTY, compaudit's "ignore insecure
+#      dirs?" prompt fails to stderr and aborts compinit. It audits EVERY fpath dir
+#      - not just the repo's, but the system/Homebrew completion dirs the runner's
+#      zsh ships (e.g. /usr/local/share/zsh/site-functions), which are outside our
+#      control and on a shared CI host runner are sometimes group/other-writable (a
+#      real abort observed on ubuntu-latest). A first login on a sanely-permissioned
+#      real machine runs the audited path fine; a CI runner audits the RUNNER's
+#      fpath hygiene, not the dotfiles. Forcing `-C` makes the smoke deterministic
+#      on every leg. (An earlier revision instead normalized perms with `chmod
+#      go-w "$root/zsh"`; that only covers the repo's own fpath dirs, so the runner's
+#      system dirs still aborted it. Proving the FULL startup path forks nothing
+#      is a separate gate, bin/startup-fork-gate via `make forkgate`, not this
+#      driver.)
+#
+# Usage: smoke [--keep] [ROOT]
+#   --keep   leave the scratch tree in place after a run (debugging)
+#   ROOT     repo root (default: this script's repo)
+#
+# Env: STRICT (non-empty) turns a missing zsh from a loud skip into a hard
+#   failure, mirroring `make lint`'s STRICT handling so CI never greens a gate it
+#   did not actually run. The Makefile passes it through.
+
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+smoke - fresh-install smoke test in a scratch HOME.
+
+Usage: smoke [--keep] [ROOT]
+  --keep   leave the scratch tree under .smoke/ after the run (debugging)
+  ROOT     repo root (default: this script's repo)
+
+Exit: 0 pass (or zsh absent + not STRICT -> loud skip); 1 a check failed;
+2 usage error.
+EOF
+}
+
+fail() { echo "smoke: FAIL - $*" >&2; exit 1; }
+
+keep=0
+root=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep)      keep=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    --)          shift; break ;;
+    -*)          echo "smoke: unknown option: $1" >&2; usage >&2; exit 2 ;;
+    *)           break ;;
+  esac
+done
+[ $# -gt 0 ] && { root="$1"; shift; }
+
+# Resolve the repo root: default to this script's repo, else canonicalize the
+# supplied ROOT (a relative arg must not become a dangling symlink target).
+if [ -z "$root" ]; then
+  root="$(cd "$(dirname "$0")/.." && pwd)"
+else
+  root="$(cd "$root" 2>/dev/null && pwd)" \
+    || { echo "smoke: ROOT is not a directory" >&2; exit 2; }
+fi
+if [ ! -f "$root/install.sh" ] || [ ! -f "$root/zsh/zshrc" ]; then
+  echo "smoke: $root does not look like the dotfiles repo (no install.sh)" >&2
+  exit 2
+fi
+
+# zsh is the subject: the smoke's whole point is that the shell starts clean.
+# Without it there is nothing to prove - a loud skip locally, a hard fail in CI.
+if ! command -v zsh >/dev/null 2>&1; then
+  if [ -n "${STRICT:-}" ]; then
+    echo "smoke: zsh not found and STRICT=1 - failing closed" >&2; exit 1
+  fi
+  echo "smoke: zsh not found - skipping (install zsh to run the smoke; CI enforces it)"
+  exit 0
+fi
+
+# The zshrc guards every plugin on existence, so a checkout whose submodules were
+# never `update --init`'d starts cleanly but exercises a DEGRADED no-plugin path.
+# Warn loudly; the CI smoke checks out submodules recursively.
+missing=""
+for p in \
+  zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh \
+  zsh/plugins/zsh-completions/src; do
+  [ -e "$root/$p" ] || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+  echo "smoke: WARN plugin submodules not initialized - smoking a DEGRADED" >&2
+  echo "smoke:      no-plugin path (run 'git submodule update --init'). Missing:$missing" >&2
+fi
+
+# --- Scratch HOME under .smoke/ (gitignored, in-repo) -------------------------
+# A real first install derives XDG from $HOME, so we set only HOME and unset any
+# inherited XDG_* - the installer and zshenv then default them under the scratch
+# HOME, exactly as on a fresh machine. ZDOTDIR is unset for the same reason and is
+# load-bearing: a shell that launched the process (e.g. a local run from an
+# interactive zsh) exports ZDOTDIR, and a leaked one makes the
+# probe `zsh -i` read the developer's REAL ~/.config/zsh instead of the scratch
+# install - a fresh machine has no ZDOTDIR, so clearing it matches that exactly.
+# All of it lives inside the repo, so the locality invariant holds: this driver
+# writes nothing outside ~/.config/dotfiles.
+base="$root/.smoke/run"
+scratch="$base/home"    # the scratch HOME - audited for no-trace, so nothing the
+logs="$base/logs"       # harness itself writes may live inside it (err captures).
+rm -rf "$base"
+mkdir -p "$scratch" "$logs"
+if [ "$keep" -eq 0 ]; then
+  trap 'rm -rf "$base"' EXIT
+else
+  echo "smoke: --keep set; scratch retained at $base"
+fi
+
+export HOME="$scratch"
+unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_DATA_HOME ZDOTDIR
+# macOS Terminal.app sources /etc/zshrc_Apple_Terminal, whose "Save/Restore Shell
+# State" hook writes "Saving session..." to stderr when an interactive shell exits
+# - which would dirty the `zsh -i -c exit` stderr this driver asserts is empty.
+# SHELL_SESSIONS_DISABLE=1 is Apple's documented opt-out (honoured
+# since 10.7); a harmless no-op on Linux and on non-Terminal.app terminals. The
+# scratch HOME does NOT cover it - /etc/zshrc is system-wide, independent of $HOME.
+export SHELL_SESSIONS_DISABLE=1
+xdg_config="$HOME/.config"
+xdg_cache="$HOME/.cache"
+xdg_state="$HOME/.local/state"
+manifest="$xdg_state/dotfiles/manifest"
+
+# Plant a pre-existing user file BEFORE the pristine snapshot: install must back
+# it up (link()'s .bak contract) and uninstall must restore it byte-for-byte -
+# this turns the unit-level .bak fidelity check into an end-to-end one.
+printf 'PRE-EXISTING USER ZSHENV - must survive the round-trip byte-for-byte\n' \
+  > "$HOME/.zshenv"
+
+# Snapshot the pristine HOME before anything else touches it - the baseline for
+# the no-trace audit: after `dotfiles-uninstall --purge` the tree must match
+# this exactly. Composite capture: the full path list (a stray empty dir is as
+# much a trace as a file), file CONTENT checksums (a truncated/altered restore
+# must fail the audit, backing the README's byte-identical claim), and symlink
+# targets (a repointed survivor must too).
+snap_home() {
+  find "$HOME" 2>/dev/null | LC_ALL=C sort
+  find "$HOME" -type f -exec cksum {} + 2>/dev/null | LC_ALL=C sort
+  find "$HOME" -type l -exec sh -c \
+    'for l; do printf "%s -> %s\n" "$l" "$(readlink "$l")"; done' _ {} + 2>/dev/null | LC_ALL=C sort
+}
+pre_install="$(snap_home)"
+# A snapshot of a HOME holding a planted file can never be empty; an empty one
+# means find itself failed - which would make the final comparison vacuously
+# true (empty == empty). Fail closed instead.
+[ -n "$pre_install" ] || fail "pre-install snapshot is empty (find failed?)"
+
+# umask 022 so every dir the installer/zshrc creates is group/other-write clean -
+# the sane perms a real machine has. The compinit stamp pre-seeded after the
+# install (below) is what actually keeps the no-TTY audit from firing on the
+# runner's own fpath dirs; the umask just keeps our scratch tidy.
+umask 022
+
+# Installer under test, always via an explicit /bin/bash so the macOS legs run the
+# real 3.2 interpreter, never a Homebrew bash 5 on PATH. No args: the
+# default `install` subcommand is what a fresh machine runs.
+run_installer() { /bin/bash "$root/install.sh"; }
+
+# --- First install ------------------------------------------------------------
+echo "smoke: installing into scratch HOME ($scratch)"
+run_installer >/dev/null || fail "first install.sh exited nonzero"
+
+[ -L "$HOME/.zshenv" ]           || fail "the .zshenv link is missing after install"
+[ -L "$xdg_config/zsh/.zshrc" ]  || fail "the \$ZDOTDIR/.zshrc link is missing after install"
+[ -s "$manifest" ]               || fail "manifest is missing or empty after install"
+# One representative convention link: bin/* -> ~/.local/bin/*. Asserts the
+# convention walker (link_tree) actually placed a link, so a walker that silently
+# no-ops on both runs (idempotently producing zero convention links) is caught,
+# not just the two core links above.
+[ -L "$HOME/.local/bin/smoke" ]  || fail "the bin convention did not link ~/.local/bin/smoke (link_tree no-op?)"
+# Real-repo link audit: a plain config dir
+# (lazygit) links by convention, while the secret-bearing ones (rclone, restic) are
+# skipped by the exceptions table - proven end-to-end here, not only against the
+# unit fixture. Conditioned on the ROOT actually shipping each dir, so the minimal
+# synthetic fixtures in smoke_test.sh (which carry no config/ tree) are unaffected.
+# The "must never link" check tests both -e and -L so a hypothetical DANGLING link
+# would still trip it (a repointed/broken link is a trace, not an absence).
+[ ! -d "$root/config/lazygit" ] || [ -L "$xdg_config/lazygit" ] \
+  || fail "config/lazygit did not link to ~/.config/lazygit"
+for secret in rclone restic; do
+  [ ! -d "$root/config/$secret" ] || { [ ! -e "$xdg_config/$secret" ] && [ ! -L "$xdg_config/$secret" ]; } \
+    || fail "config/$secret was linked into ~/.config - secrets must never link"
+done
+
+# Pre-seed the compinit 24h stamp (see the header) so the first interactive shell
+# takes the warm `compinit -C` path and never hits the no-TTY audit abort on the
+# runner's own fpath dirs. The installer created $XDG_CACHE_HOME/zsh; this mirrors
+# the zshrc's stamp path exactly.
+: > "$xdg_cache/zsh/zcompdump.stamp"
+# Pre-seed the update-check stamp too, so the sanctioned detached
+# `git fetch` does not fire during the smoke - no network, no write to the real
+# repo's .git, and a clean idempotency snapshot. mkdir -p defensively
+# (the installer already created it) so a future manifest-path change can't abort
+# the smoke here under set -e.
+mkdir -p "$xdg_state/dotfiles"
+: > "$xdg_state/dotfiles/update-check.stamp"
+
+# --- Clean interactive start (exit 0, empty stderr) ---------------------------
+# The core assertion. Warm `compinit -C` path (stamp pre-seeded above).
+zsh_clean() {
+  local label="$1" err="$logs/zsh.$1.err"
+  if ! zsh -i -c exit </dev/null 2>"$err"; then
+    echo "smoke: interactive zsh exited nonzero ($label):" >&2
+    cat "$err" >&2 || :
+    fail "zsh -i -c exit nonzero ($label)"
+  fi
+  if [ -s "$err" ]; then
+    echo "smoke: interactive zsh wrote to stderr ($label):" >&2
+    cat "$err" >&2
+    fail "zsh -i -c exit dirtied stderr ($label)"
+  fi
+}
+echo "smoke: starting interactive zsh (warm compinit -C path)"
+zsh_clean first
+
+# The clean start above proves *a* shell started, not that OUR config loaded. If
+# ~/.zshenv were dangling or misdirected, ZDOTDIR would stay unset, zsh would look
+# for $HOME/.zshrc (never linked), and the whole config would silently no-op - yet
+# `zsh -i -c exit` would still exit 0 with empty stderr. Sentinel: a real load
+# exports ZDOTDIR to $XDG_CONFIG_HOME/zsh (zsh/zshenv), which mirrors $xdg_config
+# here. This turns the core assertion from "a shell started" into "our shell did".
+loaded_zdotdir="$(zsh -i -c 'print -rn -- ${ZDOTDIR-}' </dev/null 2>/dev/null || :)"
+[ "$loaded_zdotdir" = "$xdg_config/zsh" ] \
+  || fail "interactive zsh did not load ~/.zshenv (ZDOTDIR='$loaded_zdotdir') - config never loaded"
+
+# --- Idempotency snapshot -----------------------------------------------------
+# A re-run changes nothing. Capture the three things a re-run must
+# preserve - the manifest bytes, the exact set of links (path AND target) in HOME,
+# and the set of backups - then re-install and diff. `find -type l` in the scratch
+# HOME is exactly the framework's links (nothing else creates symlinks there).
+# snap_links records `path -> target`, not just the path: the manifest and a bare
+# path-set are the SAME dimension (dest paths), so without the target a re-run that
+# repointed a link would pass every check. `readlink`/`find -exec +` are GNU+BSD
+# portable; LC_ALL=C for a locale-independent order.
+snap_links() {
+  find "$HOME" -type l -exec sh -c \
+    'for l; do printf "%s -> %s\n" "$l" "$(readlink "$l")"; done' _ {} + 2>/dev/null | LC_ALL=C sort
+}
+snap_baks()  { find "$HOME" -name '*.bak' 2>/dev/null | LC_ALL=C sort; }
+
+links_before="$(snap_links)"
+baks_before="$(snap_baks)"
+manifest_before="$(LC_ALL=C cksum < "$manifest")"
+
+# Exactly ONE .bak must exist: the planted ~/.zshenv the installer backed up.
+# More means the backup contract regressed (spurious backups); none means the
+# planted user file was clobbered without a backup - both are failures.
+[ "$baks_before" = "$HOME/.zshenv.bak" ] \
+  || fail "expected exactly the planted ~/.zshenv.bak after install, got: ${baks_before:-none}"
+
+# --- Re-run: must be a no-op --------------------------------------------------
+echo "smoke: re-running installer (idempotency)"
+run_installer >/dev/null || fail "second install.sh exited nonzero"
+
+links_after="$(snap_links)"
+baks_after="$(snap_baks)"
+manifest_after="$(LC_ALL=C cksum < "$manifest")"
+
+[ "$manifest_before" = "$manifest_after" ] \
+  || fail "manifest changed on re-run: install.sh is not idempotent"
+[ "$links_before" = "$links_after" ] \
+  || fail "the set of links changed on re-run: install.sh is not idempotent"
+[ "$baks_before" = "$baks_after" ] \
+  || fail "a re-run created new .bak files: install.sh is not idempotent"
+
+# Belt-and-suspenders: the shell must still start clean after the second install.
+zsh_clean second
+
+# --- Uninstall --purge: no trace --------------------------------------------
+# Exercise the user-facing `dotfiles-uninstall` (a zsh function) exactly as a real
+# user would - `zsh -i -c` loads it via the installed .zshrc, so this proves the
+# whole chain (zsh wrapper -> install.sh uninstall -> lib/uninstall.sh). The `zsh
+# -i` here also regenerates cache/state, which --purge must then sweep along with
+# everything the installs created. Captured via command substitution so no error
+# file lands in HOME and skews the post-uninstall snapshot.
+echo "smoke: uninstalling (--purge) via dotfiles-uninstall, then auditing for traces"
+if ! uout="$(zsh -i -c 'dotfiles-uninstall --purge' </dev/null 2>&1)"; then
+  printf '%s\n' "$uout" >&2
+  fail "dotfiles-uninstall --purge exited nonzero"
+fi
+
+# The write-back closure SEEDS a machine-local file that uninstall
+# intentionally NEVER removes - the same machine-local class as a `.local` file:
+# ~/.config/git/config (a real file that [include]s the tracked config, so
+# `git config --global` never writes the published source). It legitimately
+# survives the round-trip. Assert it is a REAL file (never a symlink
+# back into the repo - that would mean the write-back was not closed), then remove
+# it and rmdir the dirs the installer created to hold it. rmdir only removes an
+# EMPTY dir, so any OTHER survivor keeps the dir non-empty and still fails the audit
+# below - leak detection is preserved, only the intended machine-local seed is swept.
+seed="$xdg_config/git/config"
+[ ! -e "$seed" ] || { [ -f "$seed" ] && [ ! -L "$seed" ]; } \
+  || fail "write-back seed is not a real machine-local file: $seed"
+rm -f "$seed"
+rmdir "$xdg_config/git" "$xdg_config" 2>/dev/null || :
+post_uninstall="$(snap_home)"
+if [ "$pre_install" != "$post_uninstall" ]; then
+  echo "smoke: HOME is not back to its pre-install state - leftover traces:" >&2
+  diff <(printf '%s\n' "$pre_install") <(printf '%s\n' "$post_uninstall") >&2 || :
+  fail "dotfiles-uninstall --purge left a trace: HOME did not return to its pre-install state"
+fi
+
+link_count="$(printf '%s\n' "$links_before" | grep -c . || :)"
+echo "smoke: PASS - clean install, idempotent re-run, --purge leaves no trace ($link_count links)"
