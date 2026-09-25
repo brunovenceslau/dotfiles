@@ -20,6 +20,7 @@ this page no longer exists in the code.
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
 | `git pull` asks `Username for github.com` | [Git prompts for a username](#git-prompts-for-a-username) |
+| `git: ~/.config/git/config exists - leaving the machine-local file intact` on a first install | [Framework git settings do not apply](#framework-git-settings-do-not-apply) |
 | `upgrade: tracked files have local modifications` | [Upgrade refuses a dirty tree](#upgrade-refuses-a-dirty-tree) |
 | `upgrade: another upgrade appears to be in progress` | [Stale upgrade lock](#stale-upgrade-lock) |
 | `upgrade: fetch failed` | [Upgrade fetch fails](#upgrade-fetch-fails) |
@@ -242,6 +243,43 @@ Or add the block by hand. `config/git/config.local.example` shows it, commented,
 as the `[credential "https://github.com"]` stanza. This applies to HTTPS remotes
 only. An SSH remote authenticates with your SSH key (through the SSH agent) and
 needs no credential helper.
+
+## Framework git settings do not apply
+
+```
+install: git: ~/.config/git/config exists - leaving the machine-local file intact
+```
+
+**Cause.** `~/.config/git/config` was already a real file when you first ran the
+installer. The installer never rewrites that file, so it does not add the
+`[include]` of the tracked `config/git/config`, and none of the framework's git
+settings apply: `fsckObjects` on every fetch, SSH signing, the pager and the
+rest. On a re-run the same line is expected and harmless, because the file is
+then the one the installer wrote.
+
+To check, ask git where `transfer.fsckObjects` comes from:
+
+```sh
+git -C ~ config --show-origin --get transfer.fsckObjects
+```
+
+The setting applies when the output names your checkout's `config/git/config`
+and the value `true`. Empty output means the tracked config is not included.
+
+**Fix.** Add the two includes the installer writes into a new file, at the top
+of your existing `~/.config/git/config`. Settings further down the file then
+still override the tracked ones. Use the absolute path of your checkout; a
+relative path would resolve against `~/.config/git`.
+
+```ini
+[include]
+	path = /Users/you/.config/dotfiles/config/git/config
+[include]
+	path = config.local
+```
+
+The second include reads `~/.config/git/config.local`, where your git identity
+and signing key go. Run the check again to confirm.
 
 ## Upgrade refuses a dirty tree
 

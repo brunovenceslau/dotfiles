@@ -57,8 +57,11 @@ Three details matter here:
 - `mkdir -p ~/.config/git` is required. git does not create the parent directory
   of a config file, and fails with `could not lock config file` if it is missing.
 - The `GIT_CONFIG_GLOBAL` prefix puts the helper in the untracked
-  `config.local`. Without it, the write lands in the tracked XDG config once the
-  framework is installed.
+  `~/.config/git/config.local`, which the `~/.config/git/config` the installer
+  writes in step 3 includes. Without the prefix, `gh auth setup-git` writes the
+  helper to `~/.gitconfig`. The framework keeps git config under XDG paths, and
+  `dotfiles-upgrade` reads only the XDG config when it fetches, so a helper in
+  `~/.gitconfig` never reaches the upgrade.
 
 ## 3. Clone and install
 
