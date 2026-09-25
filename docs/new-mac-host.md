@@ -36,8 +36,8 @@ brew install gh        # only for step 2 and for registering a signing key
 
 ## 2. Authenticate to GitHub (only if you will push)
 
-Skip this step if you only want to install the framework: the clone in step 3 is
-public and reads without credentials. Do it if you will push to your own fork,
+Skip this step if you only want to install the framework: the HTTPS clone in
+step 3 needs no credentials. Do it if you will push to your own fork,
 or if you will register a signing key with `gh` in step 4.
 
 Repository access and commit signing use separate keys. Cloning needs neither.
@@ -57,8 +57,11 @@ Three details matter here:
 - `mkdir -p ~/.config/git` is required. git does not create the parent directory
   of a config file, and fails with `could not lock config file` if it is missing.
 - The `GIT_CONFIG_GLOBAL` prefix puts the helper in the untracked
-  `config.local`. Without it, the write lands in the tracked XDG config once the
-  framework is installed.
+  `~/.config/git/config.local`, which the `~/.config/git/config` the installer
+  writes in step 3 includes. Without the prefix, `gh auth setup-git` writes the
+  helper to `~/.gitconfig`. The framework keeps git config under XDG paths, and
+  `dotfiles-upgrade` reads only the XDG config when it fetches, so a helper in
+  `~/.gitconfig` never reaches the upgrade.
 
 ## 3. Clone and install
 

@@ -20,6 +20,7 @@ this page no longer exists in the code.
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
 | `git pull` asks `Username for github.com` | [Git prompts for a username](#git-prompts-for-a-username) |
+| `git: ~/.config/git/config exists - leaving the machine-local file intact` on a first install | [Framework git settings do not apply](#framework-git-settings-do-not-apply) |
 | `upgrade: tracked files have local modifications` | [Upgrade refuses a dirty tree](#upgrade-refuses-a-dirty-tree) |
 | `upgrade: another upgrade appears to be in progress` | [Stale upgrade lock](#stale-upgrade-lock) |
 | `upgrade: fetch failed` | [Upgrade fetch fails](#upgrade-fetch-fails) |
@@ -228,8 +229,8 @@ existing backup, see [Install refuses a link](#install-refuses-a-link).
 **Cause.** The remote needs credentials and none are wired: you are pushing, or
 the remote is a private fork. Either `gh` is not wired as the credential helper,
 or the helper was written to `~/.gitconfig` and disappeared with the XDG-only
-cleanup. `gh auth login` alone is not enough. A read-only clone of the public
-repository never reaches this.
+cleanup. `gh auth login` alone is not enough. A read-only HTTPS clone of the
+upstream repository never reaches this.
 
 **Fix.**
 
@@ -242,6 +243,43 @@ Or add the block by hand. `config/git/config.local.example` shows it, commented,
 as the `[credential "https://github.com"]` stanza. This applies to HTTPS remotes
 only. An SSH remote authenticates with your SSH key (through the SSH agent) and
 needs no credential helper.
+
+## Framework git settings do not apply
+
+```
+install: git: ~/.config/git/config exists - leaving the machine-local file intact
+```
+
+**Cause.** `~/.config/git/config` was already a real file when you first ran the
+installer. The installer never rewrites that file, so it does not add the
+`[include]` of the tracked `config/git/config`, and none of the framework's git
+settings apply: `fsckObjects` on every fetch, SSH signing, the pager and the
+rest. On a re-run the same line is expected and harmless, because the file is
+then the one the installer wrote.
+
+To check, ask git where `transfer.fsckObjects` comes from:
+
+```sh
+git -C ~ config --show-origin --get transfer.fsckObjects
+```
+
+The setting applies when the output names your checkout's `config/git/config`
+and the value `true`. Empty output means the tracked config is not included.
+
+**Fix.** Add the two includes the installer writes into a new file, at the top
+of your existing `~/.config/git/config`. Settings further down the file then
+still override the tracked ones. Use the absolute path of your checkout; a
+relative path would resolve against `~/.config/git`.
+
+```ini
+[include]
+	path = /Users/you/.config/dotfiles/config/git/config
+[include]
+	path = config.local
+```
+
+The second include reads `~/.config/git/config.local`, where your git identity
+and signing key go. Run the check again to confirm.
 
 ## Upgrade refuses a dirty tree
 
@@ -288,7 +326,7 @@ neutralize a hostile `url.insteadOf` or `gpg.ssh.program`. It then re-injects
 only the credential helper it can read from the XDG config. A helper that lives
 anywhere else is not seen, and the fetch runs with `GIT_TERMINAL_PROMPT=0`, so
 it fails instead of prompting. Credentials only matter when the remote is a
-private fork or an SSH URL; the public HTTPS remote fetches without them.
+private fork or an SSH URL; the upstream HTTPS remote fetches without them.
 
 **Fix.** Check the network first. If the remote needs credentials, put the
 helper where the upgrade reads it:

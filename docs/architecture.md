@@ -86,13 +86,24 @@ tools are never linked.
 | Program | Behavior | Why |
 | --- | --- | --- |
 | `config/gnupg/` | Only `gpg.conf` and `gpg-agent.conf` are linked into `~/.gnupg`. The directory is created with mode 0700 if the framework creates it. | `~/.gnupg` holds live secret keyrings. It must never become a symlink into the repository. |
-| `config/git/` | `~/.config/git/config` is created as a real local file that `[include]`s the tracked config by absolute path and `config.local` by relative path. `config/git/ignore` is linked normally. | `~/.config/git/config` is the path `git config --global` writes to. If it were a symlink into the repository, every global write would land in the tracked, published config. |
+| `config/git/` | `~/.config/git/config` is created, when absent, as a real local file that `[include]`s the tracked config by absolute path and `config.local` by relative path. `config/git/ignore` is linked normally. | `~/.config/git/config` is the path `git config --global` writes to. If it were a symlink into the repository, every global write would land in the tracked, published config. |
 | `config/rclone/`, `config/restic/` | Never linked. | They hold secrets. The repository keeps only a README and `*.example` templates. See [backup and restore](backup-restore.md). |
 | `bin/check-patterns`, `bin/secret-scan`, `bin/smoke`, `bin/startup-fork-gate`, `bin/repo-settings-check` | Never linked. `make` runs them from the checkout. | They are the repository's own quality gates. Linked, their generic names (`smoke`) would shadow other tools on a user's `PATH`, and they locate the repository from their own path, so they fail when run through a link. `tests/link_engine_test.sh` fails when a `bin/` tool the Makefile calls is missing from this list. A host that linked them under an older release gets those links pruned as orphans on its next clean relink. |
 
 `~/.config/git/config` is deliberately not recorded in the manifest, because
 uninstall must not delete a machine-local file. `~/.config/git/ignore` is
 recorded, because nothing writes to it.
+
+The installer writes `~/.config/git/config` only when the path is absent or is a
+symlink into the repository (`_link_git` in `lib/link.sh`). It leaves a real
+file that already exists as it is and adds no `[include]` to it, and it leaves a
+symlink that points elsewhere alone too. In both cases the tracked
+`config/git/config` is not included, so none of its settings apply, including
+`fsckObjects` on every fetch. For a real file the installer logs
+`git: ~/.config/git/config exists - leaving the machine-local file intact`,
+which is also what a re-run prints over the file the installer wrote itself. To
+check and fix it, see
+[Framework git settings do not apply](troubleshooting.md#framework-git-settings-do-not-apply).
 
 ### What `link()` does at each destination
 

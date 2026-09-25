@@ -81,8 +81,8 @@ adapt it. It is a starting point you own, not a product you configure.
 
 ## Install
 
-Three lines on a machine that already has `git`. Cloning needs no
-authentication: the repository is public and read access is anonymous.
+Three lines on a machine that already has `git`. Cloning over HTTPS needs no
+credentials.
 
 ```sh
 git clone --recurse-submodules https://github.com/brunovenceslau/dotfiles.git ~/.config/dotfiles
@@ -219,7 +219,6 @@ To report a vulnerability, use the private advisory form linked from
 | [Troubleshooting](docs/troubleshooting.md) | Something is broken and you want the symptom, cause and fix. |
 | [Backup and restore](docs/backup-restore.md) | You are setting up or using the restic and rclone backups. |
 | [Development](docs/development.md) | You are changing the repository and need the quality gates. |
-| [Stacked pull requests](docs/stacked-prs.md) | You are landing a large change as a chain of small PRs. |
 
 ## Contributing
 
