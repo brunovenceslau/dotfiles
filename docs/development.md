@@ -401,81 +401,24 @@ One change is one branch off `main`. Write the failing test first, then the
 implementation, then get the gates green. Review the final diff before opening a
 pull request.
 
+A doc that quotes what a command prints is held to that output by a test:
+`tests/troubleshooting_messages_test.sh` for
+[troubleshooting.md](troubleshooting.md), and `tests/restic_wrappers_test.sh`
+for the `usage:` lines that `config/restic/README.md` and
+[shell-reference.md](shell-reference.md) quote. A new doc that quotes program output gets the same kind of
+test in the same pull request.
+
+Check every API-facing value a doc or a command uses, such as an enum a GitHub
+setting accepts, against that API's own reference before it lands.
+
+A change that touches a security surface (the list in
+[Ask before doing any of these](#ask-before-doing-any-of-these)) gets an
+independent review of its diff before it merges. No gate detects a diff that
+weakens a security property. Enforce a security invariant at its call site with
+an explicit flag, the way the installer passes `-c fetch.fsckObjects=true` to
+its own fetches, rather than inheriting it from a linked config file that a
+later change can drop.
+
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack
 targets `main`.
-
-## Lessons from the pre-public review
-
-Before this repository went public, a review pass found 81 issues: docs that
-claimed protections the repository did not have, docs that had drifted from
-what the code does, a coverage gap in the `STRICT=1` gate, and one fix that
-traded away a security invariant for a feature. All of them were fixed in one
-pull request. The five lessons below are worth keeping, each checked against
-whether a static gate can close that class of problem on its own.
-
-### Docs described GitHub settings the repository did not have
-
-Docs claimed server-side enforcement that was not configured: a signed-commit
-ruleset, required status checks, restricted merge methods,
-`delete_branch_on_merge`, private vulnerability reporting, and approval
-required on pull requests from forks. None of it was true at the time it was
-written.
-
-A static gate cannot fully close this class on its own. Reading a
-repository's live settings needs `gh api repos/<owner>/<repo>` calls
-authenticated against GitHub, and a pull request opened from a fork cannot run
-those calls without exposing a token to untrusted code.
-
-This class is now closed in two halves around one file,
-`.github/repo-settings.json`. `tests/repo_settings_test.sh` holds the docs and
-the CI check names to the file on every pull request, offline.
-`make repo-settings-check` diffs the file against the live repository and is
-run by a maintainer, not by CI. See [Repository settings](#repository-settings).
-
-### Docs drifted from what the code does
-
-A handful of docs had drifted from the code they described: usage strings that
-no longer matched, a 1Password reference scheme documented as `op://` where the
-code reads `pass://`, and a `--purge` flag whose deletion of shell history was
-never written down.
-
-This class is closed. `tests/restic_wrappers_test.sh` and
-`tests/troubleshooting_messages_test.sh` assert that every string a doc quotes
-from a command's output still appears in that command's actual output. Any doc
-that quotes program output earns the same kind of test.
-
-### A local green hid missing coverage
-
-Gates that skip when a tool is unavailable used to exit 0 even under
-`STRICT=1`, so a full local pass could still be a pass over code nobody ran.
-Only platform and privilege skips, the cases only a given OS, architecture, or
-root account can stage, are still allowed to pass under `STRICT=1`; a missing
-tool now fails it instead of skipping. See "`STRICT=1`" above.
-
-The exit code is closed by the gate rule itself, but a passing `STRICT=1` run
-can still contain a skip worth knowing about. Read the SKIP lines a gate
-prints, not just its exit status.
-
-### A fix regressed a security invariant
-
-One finding's fix, letting the installer continue past a refused link, removed
-the forced `fsck` on the submodule fetch it depended on. Nothing in the test
-suite caught it; an independent read of the diff did.
-
-A general "did this diff weaken a security property" gate is an open problem,
-not something static analysis solves outright. Two narrower practices do help:
-a fix that touches a security surface gets an independent review before it
-lands, and an invariant such as forced `fsck` is enforced at the call site with
-an explicit flag, not inherited from a linked config file that a later change
-can silently drop.
-
-### An API value was handed over unchecked
-
-An operator-facing command was documented with an invalid `approval_policy`
-value; the correct value is `all_external_contributors`. Nobody had checked it
-against the API's own documentation before writing it down.
-
-This class closes by process, not tooling: check any API-facing value against
-its source of truth before it ships. Guessing the shape of an enum is
-indistinguishable from getting it right until something exercises it.

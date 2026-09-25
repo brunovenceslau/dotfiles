@@ -9,10 +9,10 @@
 # the ONLINE half's diff logic.
 #
 # .github/repo-settings.json is the single statement of the GitHub settings the
-# repository relies on. Before it existed, the docs claimed server-side
-# protections that were not configured (docs/development.md, "Docs described
-# GitHub settings the repository did not have"). This test runs in every pull
-# request, forks included, with no network and no token, and fails when:
+# repository relies on, so a doc sentence that claims a server-side protection
+# is checked against that file instead of being trusted. This test runs in
+# every pull request, forks included, with no network and no token, and fails
+# when:
 #   1. the settings file is malformed or missing a section;
 #   2. the required status checks in the file are not exactly the check names
 #      .github/workflows/ci.yml generates (a renamed job or matrix leg would
