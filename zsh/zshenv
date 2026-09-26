@@ -112,3 +112,50 @@ export DOTFILES="${${(%):-%N}:A:h:h}"
 # BROWSER is macOS-only (`open` is not a portable command name).
 [[ -z ${BROWSER:-} && $OSTYPE == darwin* ]] && export BROWSER=open
 
+# Keep git from climbing out of a docker-sbx environment into the envs repo.
+# Gated on the envs directory, not `canga` on PATH: PATH is built later, in
+# zsh/zshrc.
+# Every zsh sources this file, scripts included: stay silent and fork-free.
+# Idempotent: a pre-set GIT_CEILING_DIRECTORIES is prepended to, never
+# replaced or duplicated.
+# CANGA_HOST_BASE_DIR is canga's host-side variable; unset falls back to
+# $HOME/src. Skipped if relative (CWD-dependent) or if the ceiling contains
+# `:` (would corrupt the colon-separated list).
+# LIMIT: an app launched from the Dock or Finder reads no zsh file.
+
+# _path_exists [-d] PATH - PATH exists (-e); -d requires a directory. An
+# unknown flag or a wrong argument count is rc 2, no output; a lone operand
+# starting with `-` counts as an unknown flag (internal helper, callers pass
+# absolute paths - no `--` support). Silent even on misuse: this runs on the
+# startup path, where a stray stderr line is worse than the rc. Lives here,
+# not lib/os.sh: zshenv is the first file sourced, so every later file and
+# script can reuse it for the rest of the session.
+_path_exists() {
+  local flag target
+  case $# in
+    1) case $1 in
+         -*) return 2 ;;
+         *)  flag=-e; target=$1 ;;
+       esac ;;
+    2) case $1 in
+         -d) flag=-d; target=$2 ;;
+         *)  return 2 ;;
+       esac ;;
+    *) return 2 ;;
+  esac
+  case $flag in
+    -d) [[ -d $target ]] ;;
+    *)  [[ -e $target ]] ;;
+  esac
+}
+() {
+  local ceiling="${CANGA_HOST_BASE_DIR:-$HOME/src}/github.com/brunovenceslau/docker-sbx/envs"
+  [[ $ceiling == /* ]] || return 0
+  case $ceiling in *:*) return 0 ;; esac
+  _path_exists -d "$ceiling" || return 0
+  case ":${GIT_CEILING_DIRECTORIES:-}:" in
+    *":$ceiling:"*) ;;
+    *) export GIT_CEILING_DIRECTORIES="$ceiling${GIT_CEILING_DIRECTORIES:+:$GIT_CEILING_DIRECTORIES}" ;;
+  esac
+}
+
