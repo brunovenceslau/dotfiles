@@ -83,7 +83,7 @@ EOF
 # keeps a failed python3 from reading as an empty literal.
 check_py="$repo_root/tests/release_workflow_check.py"
 if command -v python3 >/dev/null 2>&1 \
-  && py_expected="$(python3 "$check_py" --print-expected-run && echo x)"; then
+  && py_expected="$(python3 -I "$check_py" --print-expected-run && echo x)"; then
   [ "${py_expected%x}" = "$RELEASE_RUN_EXPECTED" ] \
     || fail "the pinned release run: literal drifted between release_workflow_test.sh and release_workflow_check.py"
   ok "the two copies of the pinned release run: literal are identical"
@@ -286,10 +286,59 @@ cliff_shell_check() {
 cliff_err="$(cliff_shell_check "$cliff")" || fail "$cliff_err"
 ok "cliff.toml runs no shell (raw file: no replace_command, escape or get_env; every *processors list empty)"
 
+# --- WIRING: the availability probe AND every real invocation of
+# release_workflow_check.py against $wf/$mut_wf/$mut_file/col0.yml must pass
+# -I. Grepped from THIS SCRIPT's own source, so reverting the probe or any
+# real call back to plain python3 turns this red without needing the
+# mismatched environment (a stray PYTHONPATH or site-packages PyYAML) that
+# would otherwise hide the regression. Excludes the one deliberate
+# un-isolated call further below, which exists to PROVE the shadow-import bug
+# is real and is asserted to FAIL, never to succeed.
+self="$repo_root/tests/release_workflow_test.sh"
+# Anchored on `^if`, the real probe's own shape, so this does not match a
+# PROSE mention of the same string (e.g. this very fail() message below).
+grep -Eq "^if command -v python3.*python3 -I -c 'import yaml'" "$self" \
+  || fail "wiring: the PyYAML availability probe must run python3 with -I when importing yaml"
+isolated_calls=$(grep -cE 'python3 -I "\$check_py"|python3 -I "\$shadow_dir/release_workflow_check\.py"' "$self")
+[ "$isolated_calls" -eq 9 ] \
+  || fail "wiring: expected exactly 9 isolated (-I) invocations of release_workflow_check.py, found $isolated_calls"
+ok "the PyYAML probe and every real release_workflow_check.py invocation pass -I"
+
+# --- NEGATIVE: no CODE line may call release_workflow_check.py via $check_py
+# without -I. Comment lines are stripped FIRST (`grep -v '^[[:space:]]*#'`) and
+# the shape is anchored to `python3` directly followed by whitespace then the
+# opening quote, so a comment or fail() message that merely QUOTES the
+# isolated form ("python3 -I \"$check_py\"") cannot inflate this count away
+# from zero - that quoted form always has `-I ` between `python3` and the
+# quote, which this pattern does not.
+uniso_calls=$(grep -vE '^[[:space:]]*#' "$self" | { grep -cE 'python3[[:space:]]+"\$check_py"' || true; })
+[ "$uniso_calls" -eq 0 ] \
+  || fail "wiring: found $uniso_calls plain (non -I) invocation(s) of \$check_py"
+ok "no code line invokes \$check_py without -I"
+
+# --- REGRESSION: the availability PROBE must be isolated (-I) the same way
+# the real run below is, or it can pass while the real, isolated run then
+# raises an ImportError instead of reaching the clean "PyYAML unavailable"
+# skip message below. Proven with PYTHONPATH and a throwaway module name, not
+# a real yaml.py - `-I` ignores PYTHONPATH for the same reason it ignores
+# user-site packages, and this holds whether or not PyYAML happens to be
+# installed here.
+if command -v python3 >/dev/null 2>&1; then
+  probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/release_workflow_probe_test.XXXXXX")"
+  trap 'rm -rf "$probe_dir"' EXIT INT TERM
+  printf 'SENTINEL = True\n' > "$probe_dir/_rwt_probe_sentinel.py"
+  PYTHONPATH="$probe_dir" python3 -c 'import _rwt_probe_sentinel' >/dev/null 2>&1 \
+    || fail "fixture bug: a PYTHONPATH-visible module must import under plain python3 -c"
+  if PYTHONPATH="$probe_dir" python3 -I -c 'import _rwt_probe_sentinel' >/dev/null 2>&1; then
+    fail "python3 -I must ignore PYTHONPATH (like it ignores user-site packages), but it saw the sentinel module"
+  fi
+  rm -rf "$probe_dir"
+  ok "python3 -I ignores PYTHONPATH - the same isolation a plain python3 -c probe would miss"
+fi
 
 # --- Well-formedness + structure (PyYAML; loud skip when absent) --------------
 have_yaml=0
-if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
+if command -v python3 >/dev/null 2>&1 && python3 -I -c 'import yaml' 2>/dev/null; then
   have_yaml=1
 fi
 
@@ -297,8 +346,9 @@ if [ "$have_yaml" -eq 1 ]; then
   # tests/release_workflow_check.py, not a `python3 - <<'PY'` heredoc: it keeps
   # the PyYAML checks (Python's regex dialect) out of a `.sh` file that
   # bin/check-patterns arm (8) scans for GNU-only SHELL-regex escapes. See that
-  # file's header for why.
-  python3 "$check_py" "$wf" || fail "PyYAML structural checks failed (see above)"
+  # file's header for why. `-I` here - see the shadow-import proof below for
+  # what it guards against.
+  python3 -I "$check_py" "$wf" || fail "PyYAML structural checks failed (see above)"
   ok "PyYAML structural checks pass on the real release.yml"
 
   # --- release_workflow_check.py's own failure contract ------------------------
@@ -309,15 +359,52 @@ if [ "$have_yaml" -eq 1 ]; then
   mut_wf="$mut_dir/release.yml"
   sed 's/ubuntu-latest/ubuntu-24.04/' "$wf" > "$mut_wf"
   grep -q 'ubuntu-24.04' "$mut_wf" || fail "fixture bug: the runs-on mutation did not apply"
-  if python3 "$check_py" "$mut_wf" >/dev/null 2>&1; then
+  if python3 -I "$check_py" "$mut_wf" >/dev/null 2>&1; then
     fail "release_workflow_check.py must fail on a mutated release.yml (runs-on changed), but it exited 0"
   fi
   ok "release_workflow_check.py fails on a mutated release.yml (runs-on changed)"
 
-  if python3 "$check_py" >/dev/null 2>&1; then
+  # --- missing argv[1] ----------------------------------------------------------
+  if python3 -I "$check_py" >/dev/null 2>&1; then
     fail "release_workflow_check.py must fail with no workflow path argument, but it exited 0"
   fi
   ok "release_workflow_check.py fails with no argv (IndexError on sys.argv[1])"
+
+  # --- sys.path[0] safety: a stray yaml.py next to the script must not shadow
+  # the real PyYAML -------------------------------------------------------------
+  # sys.path[0] is the invoked SCRIPT's own directory (tests/), so a stray
+  # tests/yaml.py would shadow the real PyYAML import silently - `-I` above is
+  # the fix. Proven in a SCRATCH copy of the script (never inside the real
+  # tests/, which must never carry a yaml.py of its own): the un-isolated run
+  # is shadowed first (proof the fixture actually reaches the fake module, not
+  # dead code), then the real `-I` invocation is proven immune to it.
+  shadow_dir="$(mktemp -d "${TMPDIR:-/tmp}/release_workflow_shadow_test.XXXXXX")"
+  trap 'rm -rf "$mut_dir" "$shadow_dir"' EXIT INT TERM
+  cp "$repo_root/tests/release_workflow_check.py" "$shadow_dir/"
+  cat > "$shadow_dir/yaml.py" <<'EOF'
+# A fake yaml.py. If sys.path[0] (the real script's own directory) is not
+# stripped before the "import yaml" in release_workflow_check.py, THIS module
+# shadows the real PyYAML instead of it.
+class _ShadowedPyYAML(Exception):
+    pass
+
+
+def safe_load(_):
+    raise _ShadowedPyYAML("tests/yaml.py shadowed the real PyYAML import")
+EOF
+
+  if shadow_out=$(python3 "$shadow_dir/release_workflow_check.py" "$wf" 2>&1); then
+    fail "fixture bug: expected the un-isolated run to be shadowed by the fake yaml.py, but it exited 0"
+  fi
+  case "$shadow_out" in
+    *_ShadowedPyYAML*) : ;;
+    *) fail "fixture bug: the un-isolated run did not reach the fake yaml.py: $shadow_out" ;;
+  esac
+  ok "sanity: a stray yaml.py next to the script shadows PyYAML without -I"
+
+  python3 -I "$shadow_dir/release_workflow_check.py" "$wf" >/dev/null 2>&1 \
+    || fail "python3 -I must still resolve the real PyYAML despite a stray yaml.py alongside the script"
+  ok "python3 -I resolves the real PyYAML even with a stray yaml.py alongside the script"
 else
   if [ -n "${STRICT:-}" ]; then fail "PyYAML unavailable and STRICT=1 - release.yml structural checks not run"; fi
   echo "SKIP: PyYAML unavailable - release.yml structural checks not run (the floor fixtures below still run)"
@@ -335,7 +422,7 @@ fi
 expect_both_reject() {
   local label="$1" mut_file="$2" py_msg="$3" sh_msg="$4" out
   if [ "$have_yaml" -eq 1 ]; then
-    if out="$(python3 "$check_py" "$mut_file" 2>&1)"; then
+    if out="$(python3 -I "$check_py" "$mut_file" 2>&1)"; then
       fail "release_workflow_check.py must reject $label, but it exited 0"
     fi
     grep -Fq -- "$py_msg" <<<"$out" \
@@ -352,7 +439,7 @@ expect_both_reject() {
 expect_both_accept() {
   local label="$1" mut_file="$2" out
   if [ "$have_yaml" -eq 1 ]; then
-    out="$(python3 "$check_py" "$mut_file" 2>&1)" \
+    out="$(python3 -I "$check_py" "$mut_file" 2>&1)" \
       || fail "release_workflow_check.py must accept $label, but it rejected it: $out"
   fi
   out="$(release_run_check "$mut_file")" \
@@ -686,7 +773,7 @@ expect_floor_only_reject() {
   grep -Fq -- "$sh_msg" <<<"$out" \
     || fail "release_run_check rejected $label for an unrelated reason (wanted: $sh_msg): $out"
   if [ "$have_yaml" -eq 1 ]; then
-    out="$(python3 "$check_py" "$mut_file" 2>&1)" \
+    out="$(python3 -I "$check_py" "$mut_file" 2>&1)" \
       || fail "release_workflow_check.py was expected to accept $label (the floor alone is stricter), but it rejected it: $out"
   fi
   ok "the floor alone rejects $label"
@@ -869,7 +956,7 @@ expect_both_accept "an unrelated change in another step" "$mut_dir/unrelated.yml
 mutate col0 's/sha256sum --check --strict -/sha256sum --strict -\
           # sha256sum --check/' '# sha256sum --check'
 if [ "$have_yaml" -eq 1 ]; then
-  if out="$(python3 "$check_py" "$mut_dir/col0.yml" 2>&1)"; then
+  if out="$(python3 -I "$check_py" "$mut_dir/col0.yml" 2>&1)"; then
     fail "release_workflow_check.py must reject a column-0 decoy comment standing in for --check, but it exited 0"
   fi
   grep -Fq -- 'no sha256 verification in any run: step' <<<"$out" \

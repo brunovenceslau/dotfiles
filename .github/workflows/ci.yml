@@ -95,7 +95,7 @@ jobs:
           # importable. PINNED and HASH-LOCKED: .github/ci-requirements.txt lists
           # the sha256 of every file pip may pick, and --require-hashes refuses
           # anything else.
-          python3 -c 'import yaml' >/dev/null 2>&1 \
+          python3 -I -c 'import yaml' >/dev/null 2>&1 \
             || python3 -m pip install --quiet --break-system-packages \
                  --require-hashes -r .github/ci-requirements.txt
 
@@ -111,7 +111,7 @@ jobs:
           xz --version | sed -n 1p
           reuse --version | sed -n 1p
           gitleaks version
-          python3 -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
+          python3 -I -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
 
       # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
       # can never report green on a gate it did not actually run. local-ci =
