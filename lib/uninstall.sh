@@ -8,8 +8,9 @@
 # lib/link.sh writes ($XDG_STATE_HOME/dotfiles/manifest) - the single source of
 # truth - so it can only ever remove links the installer actually
 # created, never anything else. Sourced by install.sh's `uninstall`
-# subcommand; the caller owns shell options and MUST define log()/warn() and set
-# $DOTFILES (install.sh does both).
+# subcommand; the caller owns shell options, MUST define log()/warn(), set
+# $DOTFILES and source lib/link.sh first for _link_restore_bak (install.sh does
+# all three).
 #
 # Bash 3.2 compatible (no associative arrays, no mapfile, no
 #   ${var,,}). No shebang / no `set` here.
@@ -19,12 +20,17 @@
 # uninstall_links MANIFEST - remove every manifest-listed link and restore its
 # backup, then prune the now-empty dirs the installer created.
 # Remove ONLY manifest-listed links, restore *.bak, touch nothing the
-#   installer did not create. A listed path is removed only if it is STILL a symlink
-#   pointing into $DOTFILES - so a manifest entry the user has since replaced with
-#   their own real file (or repointed elsewhere) is left untouched, and a tampered
-#   manifest naming an arbitrary path (e.g. /etc/passwd) can never delete it.
+#   installer did not create. A listed path is removed only if it is STILL the
+#   framework's by the one ownership predicate (_link_owned in lib/link.sh: a
+#   symlink into $DOTFILES, or one whose pair $LINK_TARGETS records - a link
+#   another checkout made) - so a manifest entry the user has since replaced with
+#   their own real file (or repointed elsewhere) is left untouched. A path
+#   _link_under_home refuses (not under $HOME, or reached through a symlinked
+#   parent out of it or into the checkout) is refused outright, removal and
+#   restore alike, and makes the uninstall return 1, so a tampered manifest
+#   naming an arbitrary path (e.g. /etc/passwd) can never touch it.
 uninstall_links() {
-  local manifest="$1" dest target rc=0
+  local manifest="$1" dest target r rc=0
   if [ ! -f "$manifest" ]; then
     warn "uninstall: no manifest at $manifest - nothing to remove"
     return 0
@@ -41,31 +47,31 @@ uninstall_links() {
       /*) ;;
       *) warn "uninstall: ignoring non-absolute manifest line: $dest"; continue ;;
     esac
+    if ! _link_under_home "$dest" "$DOTFILES"; then
+      warn "uninstall: refusing $dest - $LINK_REFUSAL"
+      rc=1; continue
+    fi
     if [ -L "$dest" ]; then
-      target="$(readlink "$dest")"
-      case "$target" in
-        "$DOTFILES"/*)
-          if rm -f -- "$dest"; then log "removed link $dest"; else rc=1; fi
-          ;;
-        *)
-          warn "uninstall: $dest no longer points into the repo (-> $target) - leaving it"
-          ;;
-      esac
+      if _link_owned "$dest" "$DOTFILES"; then
+        if rm -f -- "$dest"; then log "removed link $dest"; else rc=1; fi
+      else
+        # Exact (lib/link.sh _link_readlink): the report names the real target.
+        target="$(_link_readlink "$dest" && printf x)"; target="${target%x}"
+        warn "uninstall: $dest no longer points into the repo (-> $target) - leaving it"
+      fi
     elif [ -e "$dest" ]; then
       # A real file/dir sits where our link was: the user replaced it. Leave it.
       warn "uninstall: $dest is not our symlink anymore - leaving it"
     fi
-    # Restore the pre-framework file link() backed up, if any. Done
-    # after removing the link so the restored file lands on a clear path.
-    if [ -e "$dest.bak" ] || [ -L "$dest.bak" ]; then
-      if [ -e "$dest" ] || [ -L "$dest" ]; then
-        warn "uninstall: not restoring $dest.bak - something occupies $dest"
-      elif mv -- "$dest.bak" "$dest"; then
-        log "restored $dest from .bak"
-      else
-        rc=1
-      fi
-    fi
+    # Restore the pre-framework file or symlink link() backed up, if any, with
+    # the same helper prune uses. Done after removing the link so the restored
+    # copy lands on a clear path.
+    r=0; _link_restore_bak "$dest" || r=$?
+    case "$r" in
+      0) ;;
+      2) warn "uninstall: not restoring $dest.bak - something occupies $dest" ;;
+      *) rc=1 ;;
+    esac
     # Prune dirs the installer created once they are empty (rmdir only removes an
     # empty dir, so a dir still holding a user file - e.g. a .local - is preserved).
     _uninstall_prune_dirs "$(dirname "$dest")"
@@ -77,14 +83,12 @@ uninstall_links() {
 # _uninstall_prune_dirs DIR - rmdir DIR and its ancestors while each is empty,
 # stopping at $HOME (never removing $HOME itself). Best-effort: a non-empty dir
 # (rmdir fails) ends the climb, so a directory that still holds a user file - a
-# `.local`, a pre-existing config - is never removed.
+# `.local`, a pre-existing config - is never removed. The climb stays where
+# uninstall may act at all (_link_under_home: strictly under $HOME, never
+# through a parent inside the checkout).
 _uninstall_prune_dirs() {
   local dir="$1"
-  while [ -n "$dir" ] && [ "$dir" != "$HOME" ] && [ "$dir" != "/" ] && [ "$dir" != "." ]; do
-    case "$dir" in
-      "$HOME"/*) ;;                 # only ever prune under $HOME
-      *) return 0 ;;
-    esac
+  while _link_under_home "$dir" "${DOTFILES-}"; do
     rmdir -- "$dir" 2>/dev/null || return 0   # non-empty (or gone) -> stop
     dir="$(dirname "$dir")"
   done
@@ -109,10 +113,9 @@ uninstall_purge() {
     # under $HOME (also rejects relative values, which would resolve against the
     # CWD), and never the .local home ($XDG_CONFIG_HOME/zsh) even when a
     # misconfigured XDG var derives to it - "never touched".
-    case "$d" in
-      "$HOME"/*) ;;
-      *) warn "uninstall: refusing to purge $d - not under \$HOME"; rc=1; continue ;;
-    esac
+    if ! _link_under_home "$d" "$DOTFILES"; then
+      warn "uninstall: refusing to purge $d - not under \$HOME"; rc=1; continue
+    fi
     if [ "$d" = "$cfg_zsh" ]; then
       warn "uninstall: refusing to purge $d - the .local layer lives there"; rc=1; continue
     fi

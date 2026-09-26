@@ -19,6 +19,13 @@
 # no associative arrays, no mapfile, no ${var,,}. Not part of the shellcheck surface.
 set -euo pipefail
 
+# A privilege skip: install.sh refuses root for every subcommand, so nothing
+# below can run as root (tests/root_refusal_test.sh covers that refusal).
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+  echo "SKIP: ensure_submodules_test (running as root: install.sh refuses root)"
+  exit 0
+fi
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 installer="$repo_root/install.sh"
 fail() { echo "FAIL: $*" >&2; exit 1; }

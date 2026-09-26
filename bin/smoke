@@ -173,7 +173,7 @@ snap_home() {
   find "$HOME" 2>/dev/null | LC_ALL=C sort
   find "$HOME" -type f -exec cksum {} + 2>/dev/null | LC_ALL=C sort
   find "$HOME" -type l -exec sh -c \
-    'for l; do printf "%s -> %s\n" "$l" "$(readlink "$l")"; done' _ {} + 2>/dev/null | LC_ALL=C sort
+    'for l; do printf "%s -> " "$l"; readlink -n "$l"; printf "\n"; done' _ {} + 2>/dev/null | LC_ALL=C sort
 }
 pre_install="$(snap_home)"
 # A snapshot of a HOME holding a planted file can never be empty; an empty one
@@ -271,11 +271,14 @@ loaded_zdotdir="$(zsh -i -c 'print -rn -- ${ZDOTDIR-}' </dev/null 2>/dev/null ||
 # HOME is exactly the framework's links (nothing else creates symlinks there).
 # snap_links records `path -> target`, not just the path: the manifest and a bare
 # path-set are the SAME dimension (dest paths), so without the target a re-run that
-# repointed a link would pass every check. `readlink`/`find -exec +` are GNU+BSD
-# portable; LC_ALL=C for a locale-independent order.
+# repointed a link would pass every check. `readlink -n`/`find -exec +` are GNU+BSD
+# portable; LC_ALL=C for a locale-independent order. `readlink -n`, never
+# "$(readlink)": the substitution strips a target's trailing newline (and BSD
+# readlink's own terminator is not portable, see lib/link.sh _link_readlink), so
+# a link repointed from T to T<newline> would snapshot the same. snap_home too.
 snap_links() {
   find "$HOME" -type l -exec sh -c \
-    'for l; do printf "%s -> %s\n" "$l" "$(readlink "$l")"; done' _ {} + 2>/dev/null | LC_ALL=C sort
+    'for l; do printf "%s -> " "$l"; readlink -n "$l"; printf "\n"; done' _ {} + 2>/dev/null | LC_ALL=C sort
 }
 snap_baks()  { find "$HOME" -name '*.bak' 2>/dev/null | LC_ALL=C sort; }
 

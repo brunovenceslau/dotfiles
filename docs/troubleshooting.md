@@ -30,6 +30,7 @@ this page no longer exists in the code.
 | `link: backup already exists, refusing to overwrite` | [Install refuses a link](#install-refuses-a-link) |
 | `link: unknown OS suffix on config/...` | [Install refuses a link](#install-refuses-a-link) |
 | `one or more links could not be created` | [Install refuses a link](#install-refuses-a-link) |
+| `backed up <path> -> <path>.bak` for links another checkout made, or `link: not recording the target of` | [Links from another checkout were backed up](#links-from-another-checkout-were-backed-up) |
 | `packages: Homebrew is not installed` | [Packages will not install](#packages-will-not-install) |
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
@@ -389,8 +390,8 @@ DOTFILES_UPDATE_DISABLE=1             # turn the sentinel off (any non-empty val
 
 ## Install refuses a link
 
-The installer never silently destroys anything. Four warnings are possible. The
-first, second and fourth are refusals: the installer places every other link
+The installer never silently destroys anything. Six warnings are possible. All
+but the unknown `@suffix` are refusals: the installer places every other link
 and caches the shell integrations, skips initializing missing plugin submodules
 (it warns `skipping plugin submodule init because a link was refused`), then
 prints the message below and exits 1. The re-run after the fix completes the
@@ -400,15 +401,39 @@ submodule step.
 install: one or more links could not be created (see warnings above)
 ```
 
-The third, an unknown `@suffix`, skips that one directory and does not fail the
-install.
+The unknown `@suffix` skips that one directory and does not fail the install.
 
 | Message | Meaning | Fix |
 | --- | --- | --- |
 | `link: refusing to replace an existing directory: <path>` | A real directory sits where a link belongs. Backing up and restoring a directory is not idempotent, so this needs your decision. | Move or remove the directory, then re-run `./install.sh`. |
-| `link: backup already exists, refusing to overwrite: <path>.bak` | A previous install already saved the pristine file. That first backup is the one worth keeping. | Inspect both files, keep what you want, remove or rename the `.bak`, then re-run. |
+| `link: backup already exists, refusing to overwrite: <path>.bak` | A previous install already saved the pristine file or symlink. That first backup is the one worth keeping. | Inspect both, keep what you want, remove or rename the `.bak`, then re-run. |
 | `link: unknown OS suffix on config/<name>` | A `config/` subdirectory contains `@`. No suffix is recognized, because macOS is the only target. | Rename the directory without the `@` part. |
 | `link: source missing, skipping: <path>` | A link rule points at a file that is not in the checkout. | Usually an incomplete clone. Re-clone, or restore the file. |
+| `link: could not create the parent of <path>`, or `link: could not create <path>` | The parent directory could not be made, or the link could not be written. A dangling symlink on the path is the usual cause. Nothing is recorded for it. | Fix or remove the dangling symlink, then re-run. |
+| `link: refusing <path> - <reason>` | The `<reason>` is `outside the home directory` when the destination is not under `$HOME` or a directory on its path is a symlink that leads out of it, and `inside the checkout` when that symlink leads into the checkout. Uninstall could never remove such a link, so it is not created. Usually `XDG_CONFIG_HOME` points outside `$HOME`. | Point `XDG_CONFIG_HOME` under `$HOME`, or replace the symlinked directory with a real one, then re-run. |
+
+## Links from another checkout were backed up
+
+```
+install: backed up <path> -> <path>.bak
+install: link: not recording the target of <path> (tab or newline in the path) - another checkout will back it up
+install: link: <path> is a symlink - ignoring it, so links from another checkout are backed up
+```
+
+**Cause.** A relink replaces a link without a backup only when it points into
+the checkout running the install, or when `$XDG_STATE_HOME/dotfiles/targets`
+records that exact destination and target. A host installed before the targets
+file existed has no pairs yet, so the first relink from a second checkout backs
+up the first checkout's links once. The second message means a path holds a tab
+or a newline, so its pair is never written and that link is always backed up
+from another checkout. The third means the targets file is a symlink. It is
+never followed, so no pair counts until a relink writes a real targets file
+over the symlink.
+
+**Fix.** Check that each `.bak` is a link into your other checkout
+(`readlink <path>.bak`), then delete it. Later switches between checkouts
+replace the links without a backup. Uninstall would otherwise put such a `.bak`
+back.
 
 ## Packages will not install
 
@@ -432,11 +457,24 @@ A failing `gh` extension install only warns. It never fails the package step.
 install: uninstall: <path> no longer points into the repo (-> <target>) - leaving it
 install: uninstall: <path> is not our symlink anymore - leaving it
 install: uninstall: not restoring <path>.bak - something occupies <path>
+install: prune: could not remove orphan link <path> - keeping it recorded
+install: prune: <path> no longer produced but points outside the repo (-> <target>) - leaving it
+install: prune: <path> is not our symlink anymore - keeping it and its .bak recorded
+install: prune: not restoring <path>.bak - something occupies <path>
+install: uninstall: refusing <path> - <reason>
 ```
 
-**Cause.** These are safety refusals, not bugs. Uninstall removes a listed path
-only while it is still a symlink into the repository, so anything you replaced by
-hand survives.
+**Cause.** These are safety refusals, not bugs. Uninstall and prune remove a
+listed path only while it is still a framework link: a symlink into the
+repository, or one `$XDG_STATE_HOME/dotfiles/targets` records with exactly its
+current target. Anything you replaced or repointed by hand survives, and prune
+keeps it in the manifest so a later uninstall still sees it. Uninstall refuses,
+and exits 1 for, any listed path outside `$HOME` or reached through a symlinked
+directory that leads out of `$HOME` or into the checkout, and `<reason>` names
+which (`outside the home directory` or `inside the checkout`); for prune, see
+[Manifest keeps an entry the framework may not act on](#manifest-keeps-an-entry-the-framework-may-not-act-on).
+Prune's `not restoring` means something recreated the path between removing
+the link and restoring its `.bak`.
 
 **Fix.** Inspect the path and remove it yourself if you want it gone.
 
@@ -453,15 +491,46 @@ Two things are left on purpose, with no message:
 [Uninstalling](../README.md#uninstalling).
 
 ```
-install: uninstall: refusing to run as root over a manifest owned by uid <n>
+install: refusing to run as root - run it as the owning user; sudo is never needed here
+install: cannot tell who is running this (<path> is missing) - refusing to run
+install: cannot tell who is running this (<path> gave no uid) - refusing to run
 ```
 
-**Cause.** A user-writable manifest must never drive privileged deletions.
+**Cause.** `install.sh` refuses root for every subcommand, before it does
+anything else. As root it would act on files, directories and tools a normal
+user can change, and nothing it does needs root: Homebrew is user-scoped. The
+other two messages mean the check could not read the uid from `/usr/bin/id` (the
+`<path>`), so it refuses rather than guess. NixOS has no `/usr/bin/id`, so the
+installer does not run there.
 
-**Fix.** Run uninstall as the owning user. Sudo is never needed.
+**Fix.** Run the command as the owning user. Sudo is never needed.
 
 Directories are pruned only while they are empty, so a directory holding a
 `.local` file stays. That is intended: `.local` files are never removed.
+
+## Manifest keeps an entry the framework may not act on
+
+```
+install: prune: dropping <path> from the manifest - <reason>, and nothing is there
+install: prune: keeping <path> recorded - <reason>, and something is there
+install: the manifest keeps an entry the framework may not act on (see warnings above)
+```
+
+**Cause.** The manifest lists a path the framework may not act on. The
+`<reason>` says why: `inside the checkout` when the path is the checkout or one
+of its ancestors, or is reached through a symlinked directory that leads into
+the checkout; `outside the home directory` for every other refusal, such as a
+path outside `$HOME`, one spelled with `..`, or one reached through a symlinked
+directory that leads out of `$HOME`. The framework never writes such a line, so
+it comes from a `$HOME` that moved or a hand-edited manifest. When nothing
+exists at the path or at `<path>.bak`, a clean relink drops the line once and
+the next run is clean. When something exists there, the line is kept and every
+relink exits 1 with the third message, so nothing there is touched or
+forgotten.
+
+**Fix.** Look at the path and its `.bak` and keep or remove them yourself. Then
+delete that line from `$XDG_STATE_HOME/dotfiles/manifest` and its line, if any,
+from `$XDG_STATE_HOME/dotfiles/targets`, and re-run `./install.sh link`.
 
 ## Terminal type is not recognized
 

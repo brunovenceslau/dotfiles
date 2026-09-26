@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 # SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
 #
@@ -36,8 +36,61 @@
 #   byte-stable manifest); the smoke gate asserts this via its re-run diff.
 set -euo pipefail
 
+# Root is refused, always, for every subcommand (help and the no-op arms too:
+# one rule with no exception is the one that cannot drift). This is the first
+# thing the script runs, before any lib/ is sourced or any variable of its own
+# is read, so nothing a user controls reaches a root process through it: not the
+# checkout's code, not the state files, not a tool on the user's PATH. Bash
+# itself reads BASH_ENV, SHELLOPTS and BASHOPTS before line 1; sudo's default
+# env_delete strips them. The uid comes from the absolute /usr/bin/id, never
+# from PATH, where a user's fake `id` would answer, and never from $EUID/$UID,
+# which the environment can set. There is no override. Missing (NixOS has no
+# /usr/bin/id) or unreadable, it fails closed. The shebang is the absolute
+# /bin/bash for the same reason: `env bash` would run whatever bash comes first
+# on PATH before this line could refuse. It runs when the file is sourced too,
+# so every process holding these functions has passed it, and no function
+# below asks again.
+# A plain assignment, never read from the environment: the one seam a test
+# overrides, inside a subshell that sourced this file.
+_install_id_bin=/usr/bin/id
+_install_uid() { "$_install_id_bin" -u; }
+_install_refuse_root() {
+  local uid
+  if [ ! -x "$_install_id_bin" ]; then
+    printf '%s\n' "install: cannot tell who is running this ($_install_id_bin is missing) - refusing to run" >&2
+    return 1
+  fi
+  uid="$(_install_uid 2>/dev/null)" || uid=""
+  case "$uid" in
+    "" | *[!0-9]*)
+      printf '%s\n' "install: cannot tell who is running this ($_install_id_bin gave no uid) - refusing to run" >&2
+      return 1
+      ;;
+  esac
+  # A numeric compare, so "00" is root too.
+  if [ "$uid" -eq 0 ]; then
+    printf '%s\n' "install: refusing to run as root - run it as the owning user; sudo is never needed here" >&2
+    return 1
+  fi
+  return 0
+}
+_install_refuse_root || exit 1
+
 log()  { printf '%s\n' "install: $*"; }
 warn() { printf '%s\n' "install: $*" >&2; }
+
+# _link_failed RC - report a non-zero do_link status and succeed, so the caller
+# exits 1; a zero status fails, so the caller carries on. 2 is a manifest line
+# the framework may not act on (every link was placed); anything else is a
+# refused or failed link.
+_link_failed() {
+  case "$1" in
+    0) return 1 ;;
+    2) warn "the manifest keeps an entry the framework may not act on (see warnings above)" ;;
+    *) warn "one or more links could not be created (see warnings above)" ;;
+  esac
+  return 0
+}
 
 # Self-resolving repo root: resolve this script's own path (BASH_SOURCE, not $0,
 # so resolution is correct even when the file is SOURCED - e.g. a test calling a
@@ -66,6 +119,9 @@ xdg_state="${XDG_STATE_HOME:-$HOME/.local/state}"
 zdotdir="$xdg_config/zsh"
 manifest_dir="$xdg_state/dotfiles"
 manifest="$manifest_dir/manifest"
+# DEST<TAB>TARGET pairs for every manifest entry, kept beside the manifest so its
+# format stays one bare path per line (lib/link.sh, "The targets file").
+targets="$manifest_dir/targets"
 
 # vgit - git in the repo with ALL ambient config-injection channels neutralized:
 # the GLOBAL/SYSTEM files AND the GIT_CONFIG_COUNT/KEY_*/VALUE_* + GIT_CONFIG_
@@ -103,6 +159,8 @@ vgit() {
 # created into the existing manifest (a superset never orphans a link), then drop
 # the scratch so the state dir keeps only the manifest.
 LINK_MANIFEST=""
+LINK_TARGETS_SCRATCH=""
+LINK_TARGETS=""
 UPGRADE_LOCK=""
 _install_cleanup() {
   # Release a held upgrade lock (a mkdir dir) so an interrupted upgrade never
@@ -113,6 +171,9 @@ _install_cleanup() {
   # Best-effort: never let cleanup itself abort the trap under set -e.
   link_manifest_merge "$manifest" || :
   rm -f -- "$LINK_MANIFEST"
+  [ -z "$LINK_TARGETS_SCRATCH" ] || rm -f -- "$LINK_TARGETS_SCRATCH"
+  # A targets file staged but not yet renamed when the signal landed.
+  _link_targets_discard
 }
 trap _install_cleanup EXIT
 # Route INT/TERM through EXIT so the cleanup (lock release, manifest merge) actually
@@ -133,12 +194,14 @@ trap 'exit 143' TERM
 do_link() {
   mkdir -p "$manifest_dir"
   LINK_MANIFEST="$(mktemp "$manifest_dir/.manifest.XXXXXX")"
+  LINK_TARGETS_SCRATCH="$(mktemp "$manifest_dir/.targets.XXXXXX")"
+  LINK_TARGETS="$targets"
   local rc=0
 
   # ~/.zshenv is the only framework-managed file in $HOME; it
   # exports ZDOTDIR so the interactive config lives under $ZDOTDIR (XDG).
-  link "$DOTFILES/zsh/zshenv" "$HOME/.zshenv" || rc=1
-  link "$DOTFILES/zsh/zshrc"  "$zdotdir/.zshrc" || rc=1
+  link "$DOTFILES/zsh/zshenv" "$HOME/.zshenv" "$DOTFILES" || rc=1
+  link "$DOTFILES/zsh/zshrc"  "$zdotdir/.zshrc" "$DOTFILES" || rc=1
   # Surface the .zshrc.local TEMPLATE beside where the user creates
   # .zshrc.local (the packages/*.local.example are read in place, so need no link).
   # Best-effort - a per-file `[ -e ] && link`, NOT link_tree,
@@ -147,7 +210,7 @@ do_link() {
   # must not fail the install - it is an onboarding aid, not essential config. A real clone
   # always carries it, so it is linked there.
   [ -e "$DOTFILES/zsh/.zshrc.local.example" ] && \
-    { link "$DOTFILES/zsh/.zshrc.local.example" "$zdotdir/.zshrc.local.example" || rc=1; }
+    { link "$DOTFILES/zsh/.zshrc.local.example" "$zdotdir/.zshrc.local.example" "$DOTFILES" || rc=1; }
 
   # The convention set + exceptions table.
   link_tree "$DOTFILES" || rc=1
@@ -164,12 +227,15 @@ do_link() {
   # entry either - replacing would strand a rule-removal-during-a-partial-run orphan
   # OFF the manifest, so no later clean run could ever reclaim it. Union keeps every
   # prior entry so the next clean run reclaims what is genuinely gone.
+  # finalize's 2 (a refused manifest line kept, every link placed) passes
+  # through as do_link's own 2, so the caller can say what it means.
   if [ "$rc" -eq 0 ]; then
-    link_manifest_finalize "$manifest" "$DOTFILES"
+    link_manifest_finalize "$manifest" "$DOTFILES" || rc=$?
   else
     link_manifest_merge "$manifest"
   fi
-  rm -f -- "$LINK_MANIFEST"
+  rm -f -- "$LINK_MANIFEST" "$LINK_TARGETS_SCRATCH"
+  LINK_TARGETS_SCRATCH=""
   return "$rc"
 }
 
@@ -306,7 +372,7 @@ harden_plugin_perms() {
 # clears generated state/cache. Continue-and-report like do_link: attempt every
 # removal, return non-zero if any failed.
 do_uninstall() {
-  local purge=0 rc=0 owner
+  local purge=0 rc=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --purge) purge=1 ;;
@@ -314,18 +380,9 @@ do_uninstall() {
     esac
     shift
   done
-  # Privilege boundary: a user-writable manifest must never drive root-privileged
-  # rm/mv (e.g. a reflexive `sudo -E ./install.sh uninstall`). A root-owned
-  # manifest is fine - that is the CI container, where root created the scratch
-  # HOME. stat -c is GNU, -f is BSD; an unreadable owner fails closed.
-  if [ "$(id -u)" -eq 0 ] && [ -f "$manifest" ]; then
-    owner="$(stat -c %u "$manifest" 2>/dev/null || stat -f %u "$manifest" 2>/dev/null)"
-    if [ "$owner" != "0" ]; then
-      warn "uninstall: refusing to run as root over a manifest owned by uid ${owner:-unknown}"
-      warn "           run as the owning user instead (sudo is never needed here)"
-      return 1
-    fi
-  fi
+  # Uninstall reads the pairs too: a link another checkout made is still the
+  # framework's to remove (lib/link.sh, _link_owned). It never writes them.
+  LINK_TARGETS="$targets"
   uninstall_links "$manifest" || rc=1
   if [ "$purge" -eq 1 ]; then
     uninstall_purge || rc=1
@@ -541,14 +598,14 @@ case "$cmd" in
     shift
     [ $# -eq 0 ] || { warn "link takes no arguments (got: $*)"; exit 2; }
     link_rc=0
-    do_link || link_rc=1
+    do_link || link_rc=$?
     # After the links, so `starship` resolves its config through the freshly linked
     # ~/.config/starship. `link` is the arm the upgrade re-enters in a fresh process,
     # so caching here is what keeps the init current across a tool version bump.
     # It runs even when a link was refused, for the reason the install arm gives.
     _cache_shell_inits
     harden_plugin_perms
-    [ "$link_rc" -eq 0 ] || { warn "one or more links could not be created (see warnings above)"; exit 1; }
+    _link_failed "$link_rc" && exit 1
     log "links (re)created."
     ;;
   reseed-settings)
@@ -575,7 +632,7 @@ case "$cmd" in
     # depend on the refused link: skipping them left a first-time user with no
     # prompt until the conflict was fixed.
     link_rc=0
-    do_link || link_rc=1
+    do_link || link_rc=$?
     # Materialize the SHA-pinned plugin submodules if a non-recursive clone left
     # them empty. link-only stays pure. Skipped after a refused link: that run
     # already ends in exit 1 and a re-run the user has to make, and the re-run
@@ -583,7 +640,8 @@ case "$cmd" in
     # failing adds a network step (and its own failure modes) to a problem that
     # is purely local. Object fsck is not the reason - ensure_submodules forces
     # it itself.
-    if [ "$link_rc" -eq 0 ]; then
+    # A kept manifest line (2) placed every link, so it does not hold this back.
+    if [ "$link_rc" -eq 0 ] || [ "$link_rc" -eq 2 ]; then
       ensure_submodules
     else
       warn "skipping plugin submodule init because a link was refused - re-run ./install.sh once it is fixed"
@@ -593,9 +651,10 @@ case "$cmd" in
     # canga's completion) so `zsh -i` never forks to build one.
     _cache_shell_inits
     _signing_advisory   # warn if commit signing isn't set up yet
-    if [ "$link_rc" -ne 0 ]; then
-      warn "one or more links could not be created (see warnings above)"
-      warn "  fix each refused path, then re-run ./install.sh"
+    if _link_failed "$link_rc"; then
+      if [ "$link_rc" -eq 1 ]; then
+        warn "  fix each refused path, then re-run ./install.sh"
+      fi
       exit 1
     fi
     log "done - start a new zsh (e.g. \`exec zsh\`) to load the config."
