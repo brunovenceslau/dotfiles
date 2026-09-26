@@ -36,6 +36,14 @@ maintainer decision, and last the step-by-step recipes for common changes.
   and you have to ask for that extra yourself
   (`pipx install 'reuse[charset-normalizer]'`), or every `reuse` invocation
   fails before it reads a file.
+- git 2.31 or later. The smoke and its tests use
+  `git rev-parse --path-format=absolute`, which older versions lack.
+- The plugin submodules. Clone with `--recurse-submodules`, or run
+  `git submodule update --init` once in an existing checkout. `make test`,
+  `make smoke` and `make forkgate` never initialize them for you. Without them,
+  `tests/startup_fork_gate_test.sh` and `make forkgate` fail, and every
+  `make smoke` run fetches the plugins over the network into its disposable copy
+  unless another local checkout already holds them.
 
 One line covers the Homebrew-installable prerequisites:
 
@@ -159,15 +167,30 @@ bin/startup-fork-gate
 The whole run happens under `.smoke/` inside the repository, which is gitignored.
 Nothing is written outside `~/.config/dotfiles`.
 
-1. Create a scratch `HOME` and snapshot the pristine tree.
-2. Run `/bin/bash install.sh`, which on the macOS runners is the real bash 3.2.
-3. Assert the core links, one convention link, and a non-empty manifest.
-4. Pre-seed the completion stamp, then run `zsh -i -c exit` and require exit 0,
+When the repository root is the top level of a git checkout, which is the
+default, the installer runs against a disposable copy of the working tree under
+`.smoke/run/tree`, never against the checkout itself. A smoke run therefore
+leaves the checkout's submodules exactly as it found them. The copy borrows the
+checkout's objects, and an uninitialized submodule is filled from a local
+modules directory when one holds its pinned commit. Only when none does is it
+fetched, into the copy, by `install.sh`. A root that is not a checkout's top
+level, such as the synthetic fixtures in `tests/smoke_test.sh`, is installed in
+place, and the smoke says so.
+
+`--keep` retains the whole scratch tree, the staged copy included. That copy
+carries every gitignored file of the working tree, secret-bearing `.local`
+files among them, so delete `.smoke/run` once you are done debugging.
+
+1. Stage the disposable copy of the checkout described above.
+2. Create a scratch `HOME` and snapshot its pristine state.
+3. Run `/bin/bash install.sh`, which on the macOS runners is the real bash 3.2.
+4. Assert the core links, one convention link, and a non-empty manifest.
+5. Pre-seed the completion stamp, then run `zsh -i -c exit` and require exit 0,
    empty stderr, and a `ZDOTDIR` sentinel that proves this config loaded.
-5. Re-run the installer and assert idempotency: a byte-stable manifest, an
+6. Re-run the installer and assert idempotency: a byte-stable manifest, an
    identical set of links, and no new `.bak`.
-6. Run `dotfiles-uninstall --purge` through the real user-facing path.
-7. Diff the home directory against the pristine snapshot. Any difference fails
+7. Run `dotfiles-uninstall --purge` through the real user-facing path.
+8. Diff the home directory against the pristine snapshot. Any difference fails
    the gate and is printed.
 
 ### What `make forkgate` does
