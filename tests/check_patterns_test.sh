@@ -129,6 +129,15 @@ printf 'curl https://x | sh\n' > "$r/lib/boot.sh"
 [ "$(run "$r")" != "0" ] && ok || fail "an absent home/ must not mask a real violation (fail-open regression)"
 
 # --- FAIL CLOSED: an unreadable scanned dir errors the scan -> non-zero -------
+# `chmod 000` is bypassed by root (DAC_OVERRIDE), so this SKIPs under root.
+# Measured rejections of a portable, root-proof replacement:
+#   - a socket: grep -r skips it by TYPE, never opens it (exit 1, no error).
+#   - a FIFO: same skip, and opening one risks a hang if that ever changed.
+#   - a near-PATH_MAX path: grep's openat() traversal scanned a 4274-byte one
+#     clean (ENAMETOOLONG is a kernel limit, not a permission check - but this
+#     is Linux-only evidence; BSD grep on the real macOS target is untested).
+# No portable mechanism forces exit >= 2 for root, so the skip stays (allowed
+# by docs/development.md's "STRICT=1" privilege-skip rule).
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/failclosed"; mkdir -p "$r/lib/locked"
   printf 'noop() { : ; }\n' > "$r/lib/os.sh"
@@ -503,6 +512,66 @@ fails_with "$r" "$gnu_msg" "a \\s in x.py.sh (not a .py file) must still fail"
 r="$work/gnu-py-prefix-only"; seed "$r"; mkdir -p "$r/tests"
 printf '%s\n' "import re" "re.compile(r\"\\s+\")" > "$r/tests/xpy"
 fails_with "$r" "$gnu_msg" "a \\s in a file named xpy (no .py suffix) must still fail"
+
+# --- REGRESSION: a hit in BOTH gnu_rest and gnu_tests prints $gnu_msg ONCE ----
+# The two-block form used to gate each pass's OWN "if viol; then print
+# $gnu_msg", so a hit in both passes printed the message twice.
+r="$work/gnu-both-passes-hit"; mkdir -p "$r/lib" "$r/tests"
+printf 'noop() { : ; }\n' > "$r/lib/os.sh"
+printf '%s\n' "sed -E 's/\\s+//'" > "$r/lib/x.sh"
+printf '%s\n' "sed -E 's/\\s+//'" > "$r/tests/x_test.sh"
+out="$(STRICT= "$cp" "$r" 2>&1)" || true
+count=$(printf '%s\n' "$out" | grep -c "$gnu_msg")
+[ "$count" = "1" ] && ok || fail "\$gnu_msg must print exactly once even when both gnu-arm passes hit (got $count)"
+
+# --- FAIL CLOSED, each pass separately (its own call site, its own bug to
+# regress into) - a hit in one arm's grep call must not depend on the OTHER
+# call site's fail-closed handling still being wired up. Other arms (1, 2, 5,
+# 6, 9, 10...) also scan lib/ and tests/ and would fail closed on the same
+# unreadable dir, so a bare nonzero exit does not prove arm 8 is the one
+# failing - each pass's message names ITS OWN pass ("non-tests/" vs "tests/").
+# check-patterns's _gnu_fail (bin/check-patterns) couples that message to
+# `bad=1` as one call, so a call site that stops calling it loses its message
+# too, which these two fixtures catch; an inline reimplementation that keeps
+# the printf but drops `bad=1` would NOT be caught here. Root-skipped for the
+# same `chmod 000` reason as the general fail-closed case above - see that
+# comment for what was tried instead.
+gnu_rest_err_msg="check-patterns: GNU-regex scan (non-tests/ pass) errored"
+gnu_tests_err_msg="check-patterns: GNU-regex scan (tests/ pass) errored"
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/gnu-rest-failclosed"; seed "$r"; mkdir -p "$r/lib/locked"
+  chmod 000 "$r/lib/locked"
+  fails_with "$r" "$gnu_rest_err_msg" "arm 8's non-tests/ (gnu_rest) pass must fail closed on an unreadable dir"
+  chmod u+rwx "$r/lib/locked"
+else
+  echo "  SKIP: running as root - cannot exercise arm 8's gnu_rest fail-closed case"
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/gnu-tests-failclosed"; seed "$r"; mkdir -p "$r/tests/locked"
+  chmod 000 "$r/tests/locked"
+  fails_with "$r" "$gnu_tests_err_msg" "arm 8's tests/ (gnu_tests) pass must fail closed on an unreadable dir"
+  chmod u+rwx "$r/tests/locked"
+else
+  echo "  SKIP: running as root - cannot exercise arm 8's gnu_tests fail-closed case"
+fi
+
+# --- REGRESSION: hits print in a single STABLE (sorted) order, not pass order
+# or filesystem readdir order. gnu_rest's array lists zsh/ BEFORE Makefile, so
+# an unsorted combined result would show the zsh/ hit first; sorted (LC_ALL=C,
+# path then line number), Makefile sorts first ('M' < 'z'). Deterministic by
+# construction - it does not depend on readdir order at all.
+r="$work/gnu-sort-order"; seed "$r"; mkdir -p "$r/zsh"
+printf '%s\n' "sed -E 's/\\s+//'" > "$r/zsh/x.zsh"
+printf '%s\n' "y=\"\$(sed -E 's/\\s+//' <<<\"\$x\")\"" > "$r/Makefile"
+out="$(STRICT= "$cp" "$r" 2>&1)" || true
+makefile_pos=$(printf '%s\n' "$out" | grep -n '/Makefile:' | sed -n '1p' | cut -d: -f1)
+zsh_pos=$(printf '%s\n' "$out" | grep -n '/zsh/x\.zsh:' | sed -n '1p' | cut -d: -f1)
+if [ -n "$makefile_pos" ] && [ -n "$zsh_pos" ] && [ "$makefile_pos" -lt "$zsh_pos" ]; then
+  ok
+else
+  fail "gnu-arm hits must print in a stable sorted order (Makefile before zsh/x.zsh), got positions '$makefile_pos'/'$zsh_pos': $out"
+fi
 
 # === the early-exit-reader arm ===================================================
 # `grep -q` / `head` on the right of a pipe exit before the writer is done; under

@@ -24,6 +24,12 @@
 # still shares with it (same argv contract: sys.argv[1] is the workflow path;
 # same stdout summary line on success). The release command itself is now
 # pinned as a whole `run:` block - see EXPECTED_RUN below.
+#
+# The caller (tests/release_workflow_test.sh) invokes this file with
+# `python3 -I`, never plain `python3`: sys.path[0] is otherwise this script's
+# OWN directory (tests/), so a stray tests/yaml.py would shadow the "import
+# yaml" below with no error - `-I` (isolated mode) drops the script's
+# directory from sys.path before that import runs.
 import re, sys
 
 # The release step's ENTIRE `run:` block, byte for byte, trailing newline

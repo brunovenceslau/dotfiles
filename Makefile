@@ -12,8 +12,8 @@ SHELL := /bin/bash
 
 # Wildcards so a target stays valid when its scanned directory is empty.
 # Every bin/ and lib/ tool is a shell script, so the whole set routes to
-# shellcheck. A python tool would need a shebang-split back (it errors SC1071
-# here) plus a syntax gate of its own - both removed with the last python tool.
+# shellcheck; a .py file here would need excluding first (shellcheck errors
+# SC1071 on one). py-syntax below covers .py syntax separately, wherever it lives.
 SH_FILES     := $(wildcard install.sh) $(wildcard lib/*.sh) $(wildcard bin/*)
 # Bash-3.2 compatibility is scoped to install.sh + lib/ only; bin/
 # tools run on provisioned hosts/CI under a modern bash. The /bin/bash -n 3.2
@@ -27,11 +27,11 @@ TEST_FILES   := $(wildcard tests/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns test reuse gitleaks smoke secret-scan forkgate local-ci repo-settings-check
+.PHONY: help lint check-patterns py-syntax test reuse gitleaks smoke secret-scan forkgate local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
-	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns"
+	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns + python3 -I syntax check"
 	@echo "  make test                 unit tests for the repo tooling (tests/*.sh)"
 	@echo "  make reuse                REUSE 3.3 compliance: every file states its copyright and licence"
 	@echo "  make gitleaks             gitleaks' maintained secret rule set over the working directory"
@@ -43,8 +43,9 @@ help:
 
 # Lint = shellcheck (install.sh, lib/, bin/) + `zsh -n` over all
 #   .zsh + `/bin/bash -n` over the bash surface + static-pattern checks +
-#   MUST be green before commit.
-lint: check-patterns
+#   python3 -I compile() syntax check over every tracked and untracked-but-not-
+#   ignored .py file. MUST be green before commit.
+lint: check-patterns py-syntax
 	@if command -v shellcheck >/dev/null 2>&1; then \
 	  if [ -n "$(strip $(SH_FILES))" ]; then \
 	    echo "shellcheck $(SH_FILES)"; shellcheck $(SH_FILES); \
@@ -89,6 +90,92 @@ lint: check-patterns
 #   silently disabled both checks. Kept a make target so lint/CI wire it unchanged.
 check-patterns:
 	@bin/check-patterns
+
+# Syntax-only gate over the repo's .py files. Tracked AND untracked-but-not-
+#   ignored files count (--others --exclude-standard): the other lint passes
+#   above scan by WILDCARD, not by git tracking state, so a new .py file is
+#   caught before its first commit too. `-z` + a NUL-delimited read on the
+#   PYTHON side (never a shell word-list) is load-bearing: a shell-word file
+#   list breaks open on a space or a newline in a filename - either splits it
+#   into two argv entries that resolve to DIFFERENT files, one of which can be
+#   an attacker-controlled decoy the real, broken file's name never named.
+#   `git ls-files` writes to a temp file first (never the LEFT side of a pipe
+#   into python3), so its own exit status is checked directly instead of
+#   being hidden behind the pipe; its STDERR is captured too and fails closed
+#   on its own - git exits 0 and only warns (e.g. "could not open directory")
+#   when an unreadable subdirectory silently drops files from the listing, so
+#   a clean exit status alone is not enough. A `git ls-files` failure (or
+#   warning) fails closed unconditionally - that is a broken invocation, never
+#   an absent-tool skip. `-I` (isolated mode, see tests/release_workflow_check.py)
+#   drops the current directory from sys.path; the builtin `compile()`, not
+#   the py_compile module, never writes a __pycache__/*.pyc for the files it
+#   checks, nor for itself (only an IMPORTED module gets bytecode-cached, and
+#   this script imports only os, stat and sys). A file `git ls-files` lists
+#   but that is unreadable (deleted after being staged, say) fails with
+#   `OSError.strerror`, never an uncaught traceback. Before opening a listed
+#   path, it must be a REGULAR file (`os.stat` follows symlinks, so a tracked
+#   symlink to a device node such as /dev/zero is rejected without ever being
+#   read - reading one would hang the gate forever) whose `os.path.realpath`
+#   stays under the repo root (a tracked symlink pointing outside the repo,
+#   e.g. at /etc/hostname, must not be read transparently either). `compile()`
+#   also catches ValueError - a NUL byte in the source raises that, not
+#   SyntaxError, and would otherwise surface as a raw traceback. Both mktemp
+#   files are cleaned up by a trap on INT/TERM/EXIT. STRICT semantics
+#   otherwise match the shellcheck block.
+py-syntax:
+	@py_list="$$(mktemp "$${TMPDIR:-/tmp}/py-syntax-list.XXXXXX")" || { echo "ERROR: mktemp failed - failing closed" >&2; exit 1; }; \
+	err_list="$$(mktemp "$${TMPDIR:-/tmp}/py-syntax-err.XXXXXX")" || { rm -f "$$py_list"; echo "ERROR: mktemp failed - failing closed" >&2; exit 1; }; \
+	trap 'rm -f "$$py_list" "$$err_list"' INT TERM EXIT; \
+	git ls-files -z --cached --others --exclude-standard -- '*.py' > "$$py_list" 2>"$$err_list"; \
+	rc=$$?; \
+	if [ "$$rc" -ne 0 ] || [ -s "$$err_list" ]; then \
+	  echo "ERROR: 'git ls-files' failed (exit $$rc) or reported a warning - failing closed" >&2; \
+	  cat "$$err_list" >&2; \
+	  exit 1; \
+	fi; \
+	if [ -s "$$py_list" ]; then \
+	  if command -v python3 >/dev/null 2>&1; then \
+	    echo "python3 -I (compile(), NUL-delimited file list read from stdin, no bytecode written)"; \
+	    python3 -I <(printf '%s\n' \
+	      'import os, stat, sys' \
+	      'root = os.path.realpath(os.getcwd())' \
+	      'bad = 0' \
+	      'for f in sys.stdin.buffer.read().split(b"\0")[:-1]:' \
+	      '    f = f.decode(sys.getfilesystemencoding(), "surrogateescape")' \
+	      '    try:' \
+	      '        st = os.stat(f)' \
+	      '    except OSError as e:' \
+	      '        print(f"{f}: {e.strerror}", file=sys.stderr)' \
+	      '        bad = 1' \
+	      '        continue' \
+	      '    if not stat.S_ISREG(st.st_mode):' \
+	      '        print(f"{f}: not a regular file - refusing to read", file=sys.stderr)' \
+	      '        bad = 1' \
+	      '        continue' \
+	      '    real = os.path.realpath(f)' \
+	      '    if real != root and not real.startswith(root + os.sep):' \
+	      '        print(f"{f}: resolves outside the repository root - refusing to read", file=sys.stderr)' \
+	      '        bad = 1' \
+	      '        continue' \
+	      '    try:' \
+	      '        src = open(f, "rb").read()' \
+	      '    except OSError as e:' \
+	      '        print(f"{f}: {e.strerror}", file=sys.stderr)' \
+	      '        bad = 1' \
+	      '        continue' \
+	      '    try:' \
+	      '        compile(src, f, "exec")' \
+	      '    except (SyntaxError, ValueError) as e:' \
+	      '        print(f"{f}: {e}", file=sys.stderr)' \
+	      '        bad = 1' \
+	      'sys.exit(bad)') < "$$py_list"; \
+	    exit $$?; \
+	  elif [ -n "$(STRICT)" ]; then \
+	    echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
+	  else \
+	    echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
+	  fi; \
+	else echo "py-syntax: no .py files, skipping"; fi
 
 # Unit tests for the repo's own tooling. KEEP-GOING: run EVERY test and report ALL failures
 # at once, exiting nonzero iff any failed. The early-abort (`|| exit 1`) once MASKED a
@@ -166,9 +253,9 @@ forkgate:
 local-ci: lint test reuse gitleaks secret-scan smoke forkgate
 	@echo "----------------------------------------------------------------"
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns) + test + secret-scan + smoke + forkgate"; \
+	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test + secret-scan + smoke + forkgate"; \
 	else \
-	  echo "local-ci: PASS lint (zsh -n + patterns) + test + secret-scan + smoke + forkgate"; \
+	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test + secret-scan + smoke + forkgate"; \
 	  echo "local-ci: SKIP shellcheck (not installed locally; enforced in CI)"; \
 	fi
 	@# reuse reports on its own line, for the reason shellcheck does: without

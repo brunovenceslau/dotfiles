@@ -427,44 +427,77 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
   gnu_bre="$gnu_bre($q([^$q]*[^\\\\$q])?|\"([^\"]*[^\\\\\"])?)"'\\[|+?]'
   gnu_re="$gnu_esc|$gnu_bre"
   gnu_msg='check-patterns: a GNU-only regex escape - BSD sed/grep on macOS read \s \w \b \< \> and BRE \| \+ \? as something else; use a POSIX class ([[:space:]], [[:alnum:]_]) or the ERE operator under -E'
-  # TWO grep passes, not one with a conditional flag: `--exclude` applies to an
-  # entire invocation, so scoping the `*.py` exemption to tests/ ONLY means
-  # running tests/ and the rest of the surface as separate calls - the same
-  # `--exclude-dir`/`--exclude` flag family already proven on BSD grep (macOS)
-  # elsewhere in this arm, just split across two calls instead of one.
-  if [ "${#gnu_rest[@]}" -gt 0 ]; then
-    if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$gnu_re" "${gnu_rest[@]}" 2>&1); then
-      viol=$(printf '%s\n' "$out" | _code_hits "$gnu_re")
-      if [ -n "$viol" ]; then
-        printf '%s\n' "$viol" >&2
-        printf '%s\n' "$gnu_msg" >&2
-        bad=1
-      fi
+  # _gnu_scan PY_EXCLUDE ROOT... - one shared grep pass for this arm. PY_EXCLUDE
+  # is the literal `*.py` glob for the tests/ call, or "" for every other root
+  # (bin/, lib/, zsh/, install.sh, Makefile, workflows) - the `*.py` exemption
+  # is tests/-ONLY, never a blanket one, because lib/link.sh's _link_bin_tree
+  # links every bin/* file onto the live PATH by basename. On success (0),
+  # prints hits already re-tested by _code_hits. On a scan error (2), prints
+  # the RAW grep output for the CALLER to report - never a diagnostic of its
+  # own, so a call site that stops reading this function's result also loses
+  # the message (see _gnu_fail below, which couples that message to `bad=1`
+  # as one call).
+  # `out=$(...)` stays the DIRECT condition of the `if`, never a statement
+  # inside its body, so a clean pass (grep exit 1, no match) does not trip
+  # `set -e`.
+  _gnu_scan() {
+    local py="$1"; shift
+    [ "$#" -gt 0 ] || return 1
+    local -a exc=(--exclude-dir=plugins --exclude=check-patterns)
+    [ -n "$py" ] && exc+=(--exclude="$py")
+    local out rc
+    if out=$(grep -rHnIE "${exc[@]}" -- "$gnu_re" "$@" 2>&1); then
+      printf '%s\n' "$out" | _code_hits "$gnu_re"
+      return 0
     else
       rc=$?
       if [ "$rc" -ge 2 ]; then
-        printf '%s\n' "$out" >&2
-        echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
-        bad=1
+        printf '%s\n' "$out"
+        return 2
+      fi
+      return 1
+    fi
+  }
+  # _gnu_fail MSG - print MSG and set bad=1 as one call. A call site that
+  # stops calling _gnu_fail loses its pass-specific message, which the two
+  # arm-8 fixtures in tests/check_patterns_test.sh catch. That is the only
+  # guarantee this gives: an inline reimplementation that keeps the printf
+  # but drops `bad=1` is NOT caught by those fixtures.
+  _gnu_fail() {
+    printf '%s\n' "$1" >&2
+    bad=1
+  }
+  gnu_viol=""
+  if [ "${#gnu_rest[@]}" -gt 0 ]; then
+    if out=$(_gnu_scan "" "${gnu_rest[@]}"); then
+      [ -n "$out" ] && gnu_viol="${gnu_viol:+$gnu_viol$'\n'}$out"
+    else
+      rc=$?
+      if [ "$rc" -ge 2 ]; then
+        _gnu_fail "$out"$'\n'"check-patterns: GNU-regex scan (non-tests/ pass) errored (exit $rc) - failing closed"
       fi
     fi
   fi
   if [ "${#gnu_tests[@]}" -gt 0 ]; then
-    if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns --exclude='*.py' -- "$gnu_re" "${gnu_tests[@]}" 2>&1); then
-      viol=$(printf '%s\n' "$out" | _code_hits "$gnu_re")
-      if [ -n "$viol" ]; then
-        printf '%s\n' "$viol" >&2
-        printf '%s\n' "$gnu_msg" >&2
-        bad=1
-      fi
+    if out=$(_gnu_scan '*.py' "${gnu_tests[@]}"); then
+      [ -n "$out" ] && gnu_viol="${gnu_viol:+$gnu_viol$'\n'}$out"
     else
       rc=$?
       if [ "$rc" -ge 2 ]; then
-        printf '%s\n' "$out" >&2
-        echo "check-patterns: GNU-regex scan errored (exit $rc) - failing closed" >&2
-        bad=1
+        _gnu_fail "$out"$'\n'"check-patterns: GNU-regex scan (tests/ pass) errored (exit $rc) - failing closed"
       fi
     fi
+  fi
+  if [ -n "$gnu_viol" ]; then
+    # LC_ALL=C sort (byte order, not a locale collation - identical on BSD and
+    # GNU sort) by PATH then LINE NUMBER, the two fields grep -Hn always
+    # produces first: a hit's printed position stays independent of both
+    # which pass produced it and filesystem readdir order. check-patterns is
+    # a lint tool, not a startup-path script, so this fork is fine.
+    gnu_viol="$(printf '%s\n' "$gnu_viol" | LC_ALL=C sort -t: -k1,1 -k2,2n)"
+    printf '%s\n' "$gnu_viol" >&2
+    printf '%s\n' "$gnu_msg" >&2
+    bad=1
   fi
 fi
 
