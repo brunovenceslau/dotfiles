@@ -63,6 +63,16 @@ jobs:
           # cross-checked against the .sha512 sidecar published with it.
           GIT_CLIFF_VERSION: 2.14.2
           GIT_CLIFF_SHA256: fa21e2fc70046fcfd0e43e5e4613873ab799aff3d9dc8559c00d31b270e417d0
+        # The binary stays OFF the PATH: the notes step calls it by its
+        # absolute path, and no step here extends the PATH for later steps.
+        # A PATH entry written by an earlier step comes before /usr/bin in
+        # every later one, so a `gh` planted in that directory would run
+        # ahead of the real one in the release step, holding the token.
+        # tests/release_workflow_test.sh rejects any such write. That test is
+        # a tripwire for accidental edits, not an adversarial boundary: an
+        # earlier step could still plant a `gh` another way (a user-writable
+        # PATH directory, sudo into /usr/bin, ~/.config/gh). Review and
+        # commit signing are the control there.
         run: |
           set -euo pipefail
           # musl, so the binary does not depend on the runner image's glibc.
@@ -78,7 +88,6 @@ jobs:
           tar -xzf "$asset" --strip-components=1 \
               -C "$RUNNER_TEMP/bin" "git-cliff-${GIT_CLIFF_VERSION}/git-cliff"
           chmod u+x "$RUNNER_TEMP/bin/git-cliff"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       - name: Generate the release notes
         env:
@@ -97,12 +106,12 @@ jobs:
           # never a stray user-level cliff.toml on the runner.
           if [ -n "$prev" ]; then
             echo "notes: ${prev}..${TAG}"
-            git-cliff --config cliff.toml --tag "$TAG" "${prev}..${TAG}" \
-                      --output "$RUNNER_TEMP/notes.md"
+            "$RUNNER_TEMP/bin/git-cliff" --config cliff.toml --tag "$TAG" "${prev}..${TAG}" \
+                                         --output "$RUNNER_TEMP/notes.md"
           else
             echo "notes: first release, whole history up to ${TAG}"
-            git-cliff --config cliff.toml --tag "$TAG" --latest \
-                      --output "$RUNNER_TEMP/notes.md"
+            "$RUNNER_TEMP/bin/git-cliff" --config cliff.toml --tag "$TAG" --latest \
+                                         --output "$RUNNER_TEMP/notes.md"
           fi
           cat "$RUNNER_TEMP/notes.md"
 
