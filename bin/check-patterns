@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Ten checks across our OWN runtime surface
+#   `make lint` includes. Eleven checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
 #   we police our code, not upstream's):
 #     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
@@ -54,6 +54,12 @@
 #    (10) a `--` after the first operand of a file or text tool (`chmod -R go-w --`)
 #         - BSD getopt on macOS stops at the first operand and reads the `--` as a
 #         file, which GNU's argv permutation hides from every Linux run.
+#    (11) the Unicode em dash (U+2014) anywhere in the repo's own prose - the
+#         house style (CONTRIBUTING.md and .claude/rules/docs.md) is a plain
+#         hyphen. Unlike arms 5-10 it does NOT strip comments first: a comment
+#         is prose too, the same reasoning arms 1-2 use for curl|sh and
+#         uname -m. Vendored legal text and one auto-generated lockfile are
+#         allowlisted; see the arm itself.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -273,6 +279,19 @@ _shim_shape() {  # $1=file  $2=fixed-string shape  $3=human description
 }
 # shellcheck disable=SC2016  # the shapes are FIXED-STRING grep patterns: they MUST stay literal, not expand
 _shim_shape "$root/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh" '$(uname -a)' "f-sy-h uname probe (pinned-plugin shim premise)"
+
+# _re_escape LITERAL -> LITERAL's ERE-escaped form on stdout, used by the
+# exact-path exemptions below: `$root` is caller-supplied, not a literal this
+# file controls, so it cannot be assumed free of ERE metacharacters. A `sed`
+# bracket-expression class, not bash `${s//pat/repl}` substitution: a `}` in
+# the REPLACEMENT half of that form closes the `${...}` construct itself,
+# leaving a stray literal `}` in the result. `]` must be first in the class to
+# read as literal instead of closing it, and `^` must not be first, to the
+# same end; `\` needs no doubling, since a bracket expression is not an escape
+# context.
+_re_escape() {
+  printf '%s' "$1" | sed -e 's/[].[(){}^$*+?|\]/\\&/g'
+}
 
 # (5) forbid a LONE `/opt/homebrew`. The prefix is /opt/homebrew on Apple Silicon and
 # /usr/local on Intel, and it MUST be resolved by directory existence - a hardcoded
@@ -631,6 +650,118 @@ if [ "${#dd[@]}" -gt 0 ]; then
     if [ "$rc" -ge 2 ]; then
       printf '%s\n' "$out" >&2
       echo "check-patterns: '--' placement scan errored (exit $rc) - failing closed" >&2
+      bad=1
+    fi
+  fi
+fi
+
+# (11) forbid the Unicode em dash (U+2014, UTF-8 bytes E2 80 94) in the repo's
+# own prose. House style (CONTRIBUTING.md's community standards and
+# .claude/rules/docs.md's documentation standard) is a plain hyphen; this arm
+# looks for exactly that one character, nothing broader. The pattern is built
+# at RUNTIME from its UTF-8 bytes via bash's ANSI-C quoting ($'\xe2\x80\x94'),
+# never pasted as a literal em dash into this script. `LC_ALL=C` keeps the
+# match byte-oriented on both grep flavors, independent of the runner's
+# locale (a locale-aware BSD grep can otherwise mishandle a line that also
+# holds unrelated malformed UTF-8, which would silently skip the match).
+# SELF-EXCLUDE: this arm keeps `--exclude=check-patterns` on its RECURSIVE
+# scan below like every other recursive arm, but for a DIFFERENT reason than
+# arms (1)/(2)/(5)/(6)/(8)/(9)/(10) - their patterns spell the forbidden
+# literal directly in this file's own comments and code, so their
+# self-exclude prevents the arm from matching its own documentation. Arm 11's
+# pattern is raw bytes assembled at RUNTIME ($'\xe2\x80\x94'), so nothing in
+# THIS file's CURRENT source can match it either way. The flag is kept anyway
+# for UNIFORMITY: tests/plugins_test.sh asserts, by shape and by count (not a
+# fixed literal), that EVERY recursive grep line in this script carries both
+# `--exclude-dir=plugins` and `--exclude=check-patterns` - a project-wide
+# invariant that lets a future arm's author copy the pattern without having to
+# re-derive, case by case, whether their new arm happens to need it.
+# On its own, that self-exclude would leave a gap for THIS arm: the recursive
+# scan never reads this file, so a literal em dash pasted into a future edit
+# of it would pass. Measured before the narrow scan below existed: appending
+# an em dash to a scratch copy of this file and running the gate exited 0.
+# So arm 11 adds a second, NARROW, NON-recursive scan of exactly
+# "$root/bin/check-patterns" below - no `-r`/`-R` in its flags, so it neither
+# adds to tests/plugins_test.sh's recursive-scan count nor needs its own
+# self-exclude (there is nothing else at that exact path to exclude it from).
+# UNLIKE arms (5)-(10), this one does NOT strip comments through
+# _code_of/_code_hits: an em dash inside a COMMENT is exactly the shape this
+# rule forbids - a shell or Markdown comment is still repo prose - the same
+# reasoning arms (1)-(2) use for curl|sh and uname -m.
+# SURFACE: the shared ${scan[@]} (install.sh, lib/, bin/, zsh/, config/,
+# packages/, security/, home/) plus the rest of the repo's own prose that
+# `want` does not cover - docs/, tests/, .github/, .claude/, Makefile, the
+# top-level docs and metadata files, and the repo's own dotfiles
+# (.gitignore, .gitmodules, REUSE.toml, cliff.toml, .gitleaks.toml). No
+# `${#prose[@]}` emptiness guard here, unlike arms (7)-(10): `prose` starts as
+# a copy of `${scan[@]}`, and the check at the top of this script already
+# exits 2 before this point if `scan` is empty, so `prose` can never be empty
+# either - a guard here would be dead code, not defensive.
+# ALLOWLIST, both content-independent path exclusions, never a language or
+# comment exemption:
+#   - LICENSES/*.txt, COPYING and CODE_OF_CONDUCT.md are left OUT of the
+#     surface entirely, rather than scanned-then-exempted: verbatim upstream
+#     legal text this repo reproduces exactly and never edits for house style
+#     (the GPL text in COPYING; the Apache-2.0/MIT/FSFAP/CC-BY-SA-4.0 texts in
+#     LICENSES/; and CODE_OF_CONDUCT.md's Contributor Covenant, itself
+#     CC-BY-SA-4.0 - see docs/development.md's REUSE section). There is no
+#     first-party content in any of them to lose by the omission.
+#   - config/nvim/lazy-lock.json sits INSIDE the otherwise-scanned config/, so
+#     it is exempted the same way arm (5) exempts config/gnupg/gpg-agent.conf:
+#     a grep -v on the hit list, not a directory omission. REUSE.toml already
+#     records why: lazy.nvim rewrites the file wholesale on every plugin
+#     update, so a fix landed here would not survive the next sync. The
+#     exemption is ANCHORED to the EXACT path this scan reads it at
+#     (`$root/config/nvim/lazy-lock.json`, `_re_escape`d - see arm (5) above),
+#     never a substring or a bare suffix match: either would exempt a decoy
+#     file elsewhere ending in the same segments (e.g.
+#     tests/config/nvim/lazy-lock.json) too - fail OPEN.
+em_dash=$'\xe2\x80\x94'
+prose=("${scan[@]}")
+for p in docs tests .github .claude Makefile REUSE.toml cliff.toml \
+    .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
+    SECURITY.md THIRD-PARTY-NOTICES.md README.md; do
+  [ -e "$root/$p" ] && prose+=("$root/$p")
+done
+_lazy_lock_path=$(_re_escape "$root/config/nvim/lazy-lock.json")
+if out=$(LC_ALL=C grep -rHIn --exclude-dir=plugins --exclude=check-patterns \
+    -F "$em_dash" "${prose[@]}" 2>&1); then
+  viol=$(printf '%s\n' "$out" \
+    | grep -vE "^${_lazy_lock_path}:[0-9]+:" || true)
+  if [ -n "$viol" ]; then
+    printf '%s\n' "$viol" >&2
+    echo "check-patterns: an em dash (U+2014) in repo prose - house style is a plain '-'; replace it" >&2
+    bad=1
+  fi
+else
+  rc=$?
+  if [ "$rc" -ge 2 ]; then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: em-dash scan errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
+# NARROW SELF-SCAN, non-recursive, no self-exclude: the recursive scan above
+# never sees this exact path (`--exclude=check-patterns` skips it), so a
+# literal em dash pasted into a future edit of check-patterns itself would
+# otherwise never be caught. `-F`, no `-r`/`-R` - a single, explicit file, not
+# a directory walk - so this line is invisible to
+# tests/plugins_test.sh's recursive-grep invariant (confirmed: that test still
+# passes with this scan in place). Absent (a fixture
+# tree with no bin/check-patterns of its own) is a silent skip, the same as
+# every other optional path in this script.
+self_cp="$root/bin/check-patterns"
+if [ -f "$self_cp" ]; then
+  if out=$(LC_ALL=C grep -Fn -- "$em_dash" "$self_cp" 2>&1); then
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: an em dash (U+2014) in check-patterns' own source - house style is a plain '-'; replace it" >&2
+    bad=1
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      printf '%s\n' "$out" >&2
+      echo "check-patterns: check-patterns self-scan errored (exit $rc) - failing closed" >&2
       bad=1
     fi
   fi
