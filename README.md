@@ -162,10 +162,12 @@ dotfiles-uninstall --purge    # also delete generated cache and state
 ```
 
 Uninstall is driven by the manifest at `$XDG_STATE_HOME/dotfiles/manifest`. It
-removes the links the manifest lists (only while they still point into this
-repository), restores each `*.bak`, and then removes any directory those
-removals left empty, up to `$HOME`. It never removes your untracked `.local`
-files.
+removes the links the manifest lists, only while they are still the framework's:
+pointing into this repository, or recorded with exactly their current target in
+`$XDG_STATE_HOME/dotfiles/targets`, the file beside the manifest that remembers
+the links another checkout made. It restores each `*.bak`, and then removes any
+directory those removals left empty, up to `$HOME`. It never removes your
+untracked `.local` files.
 
 > **Warning:** `--purge` deletes `$XDG_STATE_HOME/zsh`, which holds your shell
 > history (`$XDG_STATE_HOME/zsh/history`, by default

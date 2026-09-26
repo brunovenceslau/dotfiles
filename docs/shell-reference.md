@@ -303,6 +303,7 @@ Everything the framework generates, all removed by `dotfiles-uninstall --purge`.
 | Path | Contents |
 | --- | --- |
 | `$XDG_STATE_HOME/dotfiles/manifest` | Every link the installer created. The only input uninstall reads. |
+| `$XDG_STATE_HOME/dotfiles/targets` | One `destination<TAB>target` pair per manifest entry. Lets a relink from another checkout recognize the framework's links. |
 | `$XDG_STATE_HOME/dotfiles/upgrade.lock` | A directory held for the duration of an upgrade. |
 | `$XDG_STATE_HOME/dotfiles/update-check.stamp` | Mtime of the last cadence check. |
 | `$XDG_STATE_HOME/dotfiles/update-last-fetch` | Mtime of the last successful background fetch. |

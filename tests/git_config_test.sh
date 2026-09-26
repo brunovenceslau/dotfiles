@@ -15,6 +15,13 @@
 # repo's shellcheck surface.
 set -euo pipefail
 
+# A privilege skip: install.sh refuses root for every subcommand, so nothing
+# below can run as root (tests/root_refusal_test.sh covers that refusal).
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+  echo "SKIP: git_config_test (running as root: install.sh refuses root)"
+  exit 0
+fi
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass=0; ck() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); else fail "$1: got [$2] want [$3]"; fi; }

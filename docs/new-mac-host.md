@@ -79,9 +79,9 @@ run, but cloning recursively avoids the detour. If you already cloned flat:
 git -C ~/.config/dotfiles submodule update --init --recursive
 ```
 
-`install.sh` writes nothing outside `$HOME`. It backs up any file it would
-overwrite to `<file>.bak` and records every link it creates in
-`$XDG_STATE_HOME/dotfiles/manifest`.
+`install.sh` writes nothing outside `$HOME`. It backs up any file, or any
+symlink pointing outside the repository, it would overwrite to `<file>.bak`,
+and records every link it creates in `$XDG_STATE_HOME/dotfiles/manifest`.
 
 The installer prints a warning if commit signing is not configured. That is
 expected on a fresh host. Step 4 fixes it.

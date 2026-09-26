@@ -131,6 +131,34 @@ if XDG_STATE_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.config" uninstall_purge
 fi
 [ -f "$HOME/.config/zsh/.zshrc.local" ] || fail "purge deleted the .local layer via a mispointed XDG var"
 
+# --- purge never reaches into the checkout ---------------------------------------
+# A checkout under $HOME, and XDG dirs that lead into it: a symlinked cache dir,
+# the cache dir BEING the checkout, a cache dir whose zsh/ IS the checkout (its
+# parent), and a state dir whose dotfiles/ IS the checkout. Each purge refuses
+# (rc 1) and every file in the checkout survives.
+purge_into() {  # CTX DOTFILES-dir [VAR=value...]
+  local ctx="$1" dots="$2"; shift 2
+  ( export DOTFILES="$dots" "$@"
+    rc=0; uninstall_purge 2>/dev/null || rc=$?
+    [ "$rc" -eq 1 ] || { echo "$ctx: purge into the checkout must return 1 (got $rc)"; exit 1; }
+    [ -f "$dots/tracked" ] || { echo "$ctx: purge removed the checkout"; exit 1; }
+    exit 0
+  ) || fail "$ctx"
+}
+mkdir -p "$HOME/.config/dotfiles/cache/zsh"; : > "$HOME/.config/dotfiles/tracked"
+: > "$HOME/.config/dotfiles/cache/zsh/keep"
+ln -s "$HOME/.config/dotfiles/cache" "$HOME/.cache-into"
+purge_into "symlinked cache dir" "$HOME/.config/dotfiles" XDG_CACHE_HOME="$HOME/.cache-into"
+[ -f "$HOME/.config/dotfiles/cache/zsh/keep" ] || fail "purge removed a file inside the checkout through a symlinked cache dir"
+mkdir -p "$HOME/.config/dotfiles/zsh"; : > "$HOME/.config/dotfiles/zsh/keep"
+purge_into "cache dir = checkout" "$HOME/.config/dotfiles" XDG_CACHE_HOME="$HOME/.config/dotfiles"
+[ -f "$HOME/.config/dotfiles/zsh/keep" ] || fail "purge removed the checkout's zsh/ with XDG_CACHE_HOME=\$DOTFILES"
+mkdir -p "$HOME/p/zsh"; : > "$HOME/p/zsh/tracked"
+purge_into "cache dir = parent of checkout" "$HOME/p/zsh" XDG_CACHE_HOME="$HOME/p"
+mkdir -p "$HOME/.local/state/dotfiles"; : > "$HOME/.local/state/dotfiles/tracked"
+purge_into "state dotfiles/ = checkout" "$HOME/.local/state/dotfiles" XDG_STATE_HOME="$HOME/.local/state"
+rm -rf -- "$HOME/.config/dotfiles" "$HOME/.cache-into" "$HOME/p" "$HOME/.local/state/dotfiles"
+
 # --- uninstall_links edge cases (ship hardening) ---------------------------------
 mkdir -p "$manifest_dir"     # purge removed it above; the cases below need it back
 
@@ -147,14 +175,69 @@ uninstall_links "$manifest" || fail "dir-symlink uninstall returned nonzero"
 [ -f "$DOTFILES/config/alacritty/alacritty.toml" ] \
   || fail "repo content was deleted THROUGH a dir symlink"
 
-# Prune must never climb outside $HOME: the (still-ours) link is removed, but the
-# now-empty out-of-HOME parent dir survives (the "$HOME"/* case guard).
-mkdir -p "$work/outside"
+# A tampered manifest line outside $HOME is refused outright, even for a link
+# into the repo: nothing there is removed or restored, and neither is a
+# "$HOME/../" spelling that passes a bare prefix match.
+mkdir -p "$work/outside" "$work/outside2"
 ln -s "$DOTFILES/zshrc" "$work/outside/link"
-printf '%s\n' "$work/outside/link" > "$manifest"
-uninstall_links "$manifest" || fail "outside-HOME uninstall returned nonzero"
-[ ! -e "$work/outside/link" ] || fail "outside link not removed"
-[ -d "$work/outside" ] || fail "prune escaped \$HOME and removed an outside dir"
+printf 'theirs\n' > "$work/outside/link.bak"
+ln -s "$DOTFILES/zshrc" "$work/outside2/link"
+printf '%s\n%s\n' "$work/outside/link" "$HOME/../outside2/link" > "$manifest"
+warnlog="$work/uwarn.log"; : > "$warnlog"
+warn() { printf '%s\n' "$*" >> "$warnlog"; }
+rc=0; uninstall_links "$manifest" || rc=$?
+warn() { :; }
+[ "$rc" -eq 1 ] || fail "an out-of-HOME refusal must make uninstall return 1 (got $rc)"
+[ -L "$work/outside/link" ] || fail "a link outside \$HOME was removed"
+[ "$(cat "$work/outside/link.bak")" = "theirs" ] || fail "a .bak outside \$HOME was restored"
+[ -L "$work/outside2/link" ] || fail "a \$HOME/../ manifest line was acted on"
+[ "$(grep -c 'outside the home directory' "$warnlog")" -eq 2 ] || fail "the out-of-HOME refusals were not reported"
+
+# A target spelled with ".." out of the repo is not the repo's, whatever its
+# prefix says: it is the user's and stays (the shared predicate, lib/link.sh).
+mkdir -p "$work/elsewhere"
+ln -s "$DOTFILES/../elsewhere" "$HOME/.dotdot"
+printf '%s\n' "$HOME/.dotdot" > "$manifest"
+uninstall_links "$manifest" || fail "dotdot uninstall returned nonzero"
+[ -L "$HOME/.dotdot" ] || fail "uninstall removed a link whose target only lexically starts with the repo"
+rm -f -- "$HOME/.dotdot"
+
+# A RELATIVE link into the repo is the framework's too (operator decision
+# 2026-09-26): uninstall removes it like the absolute one link() writes.
+ln -s "../repo/zshrc" "$HOME/.relative"
+[ -f "$HOME/.relative" ] || fail "test setup: the relative link does not resolve into the repo"
+printf '%s\n' "$HOME/.relative" > "$manifest"
+uninstall_links "$manifest" || fail "relative-link uninstall returned nonzero"
+{ [ ! -e "$HOME/.relative" ] && [ ! -L "$HOME/.relative" ]; } || fail "a relative link into the repo was not removed"
+
+# $HOME with a trailing slash names the same home: nothing is refused.
+ln -s "$DOTFILES/zshrc" "$HOME/.slash"
+printf '%s\n' "$HOME/.slash" > "$manifest"
+HOME="$HOME/" uninstall_links "$manifest" || fail "a trailing-slash HOME made uninstall fail"
+[ ! -L "$HOME/.slash" ] || fail "a trailing-slash HOME refused a link under it"
+# $HOME of "/" contains nothing: refused, with rc 1.
+ln -s "$DOTFILES/zshrc" "$HOME/.root"
+printf '%s\n' "$HOME/.root" > "$manifest"
+rc=0; HOME=/ uninstall_links "$manifest" || rc=$?
+[ "$rc" -eq 1 ] || fail "HOME=/ must refuse every entry with rc 1 (got $rc)"
+[ -L "$HOME/.root" ] || fail "HOME=/ let uninstall remove a link"
+rm -f -- "$HOME/.root"
+
+# A symlinked PARENT is resolved: uninstall never acts through one, whether it
+# leads into the checkout (a directory link the framework made) or out of $HOME
+# (a redirected directory). Both are refused with rc 1, nothing removed or restored.
+mkdir -p "$DOTFILES/config/inner" "$work/away"
+ln -s "$DOTFILES/zshrc" "$DOTFILES/config/inner/tracked-link"
+ln -s "$DOTFILES/config/inner" "$HOME/.inner"
+ln -s "$DOTFILES/zshrc" "$work/away/link"; printf 'away\n' > "$work/away/link.bak"
+ln -s "$work/away" "$HOME/.away"
+printf '%s\n%s\n' "$HOME/.inner/tracked-link" "$HOME/.away/link" > "$manifest"
+rc=0; uninstall_links "$manifest" || rc=$?
+[ "$rc" -eq 1 ] || fail "a symlinked parent must be refused with rc 1 (got $rc)"
+[ -L "$DOTFILES/config/inner/tracked-link" ] || fail "uninstall removed a file inside the checkout through a symlinked parent"
+[ -L "$work/away/link" ] || fail "uninstall removed a link outside \$HOME through a symlinked parent"
+[ "$(cat "$work/away/link.bak")" = "away" ] || fail "uninstall restored a .bak outside \$HOME through a symlinked parent"
+rm -f -- "$HOME/.inner" "$HOME/.away"
 
 # A relative manifest line can only mean tampering/corruption - ignored, never
 # resolved against the CWD (a .bak beside the CWD-relative path stays untouched).
@@ -184,7 +267,23 @@ printf '%s' "$HOME/.lastline" > "$manifest"
 uninstall_links "$manifest" || fail "no-trailing-newline manifest returned nonzero"
 [ ! -e "$HOME/.lastline" ] || fail "the final manifest line without a newline was silently skipped"
 
-# --- exit-code fidelity through install.sh (root-guarded: perms don't bind root) --
+# A user symlink link() backed up (a relative, dangling target) is restored as
+# THE SAME LINK - renamed back, never dereferenced or re-resolved - and the .bak
+# is consumed. link() is the real one, so this also covers the backup half.
+mkdir -p "$HOME/.config"
+ln -s "../elsewhere/my-tmux" "$HOME/.config/tmux"
+LINK_MANIFEST="$(mktemp "$manifest_dir/.m.XXXXXX")"
+link "$DOTFILES/zshrc" "$HOME/.config/tmux" "$DOTFILES" || fail "symlink-backup setup: link failed"
+link_manifest_finalize "$manifest"
+rm -f -- "$LINK_MANIFEST"; unset LINK_MANIFEST
+[ "$(readlink "$HOME/.config/tmux.bak")" = "../elsewhere/my-tmux" ] || fail "symlink-backup setup: no .bak link"
+uninstall_links "$manifest" || fail "symlink-restore uninstall returned nonzero"
+[ -L "$HOME/.config/tmux" ] || fail "the backed-up user symlink was not restored as a symlink"
+[ "$(readlink "$HOME/.config/tmux")" = "../elsewhere/my-tmux" ] || fail "restored user symlink has a different target"
+if [ -e "$HOME/.config/tmux.bak" ] || [ -L "$HOME/.config/tmux.bak" ]; then fail "symlink .bak not consumed"; fi
+rm -f -- "$HOME/.config/tmux"
+
+# --- exit-code fidelity through install.sh (non-root: perms don't bind root) ---
 if [ "$(id -u)" -ne 0 ]; then
   # A removal that fails (unwritable parent dir) must surface as exit 1 - not 0
   # (swallowed) and not 2 (usage) - through do_uninstall and the dispatch.
@@ -207,27 +306,11 @@ if [ "$(id -u)" -ne 0 ]; then
     fail "purge must return nonzero when a tree cannot be removed"
   fi
   chmod -R u+w "$XDG_STATE_HOME" 2>/dev/null || true
-
-  # Privilege boundary: run as "root" (an `id` shim printing 0 first on PATH)
-  # over a manifest owned by this non-root user. The uninstall must refuse with
-  # exit 1, name the owning uid, and remove nothing - a reflexive
-  # `sudo ./install.sh uninstall` must never let a user-writable manifest drive
-  # root-privileged rm/mv.
-  shim="$work/idshim"; mkdir -p "$shim"
-  printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > "$shim/id"
-  chmod u+x "$shim/id"
-  keep="$HOME/.rootguard"; ln -s "$repo_root/zsh/zshrc" "$keep"
-  mkdir -p "$manifest_dir"; printf '%s\n' "$keep" > "$manifest"
-  rc=0; out="$(PATH="$shim:$PATH" "$repo_root/install.sh" uninstall 2>&1)" || rc=$?
-  [ "$rc" -eq 1 ] || fail "root over a user-owned manifest must exit 1 (got $rc): $out"
-  grep -q "refusing to run as root over a manifest owned by uid $(id -u)" <<<"$out" \
-    || fail "root refusal did not name the manifest owner: $out"
-  [ -L "$keep" ] || fail "the root refusal still removed a manifest link"
-  rm -f "$keep"
 else
-  # Root: permissions do not bind, and the manifest is root-owned, so neither the
-  # failed-removal nor the root-refusal case can be staged. CI runs non-root.
-  echo "SKIP: uninstall exit-code and root-refusal cases (running as root)"
+  # Root: permissions do not bind, so the failed-removal cases cannot be staged,
+  # and install.sh refuses root outright (tests/root_refusal_test.sh). CI runs
+  # non-root.
+  echo "SKIP: uninstall exit-code cases (running as root)"
 fi
 
 echo "PASS: uninstall_test"

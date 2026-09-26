@@ -112,11 +112,112 @@ The rules are safety-first, and a re-run is always a no-op.
 | State of the destination | Action |
 | --- | --- |
 | Already a symlink to the intended source | Nothing changes, but the link is still recorded in the manifest. |
-| A symlink pointing elsewhere, including a dangling one | Replaced, with no backup. A symlink is not user data. |
+| A framework link (see [Who owns a link](#who-owns-a-link)), including a dangling one | Replaced, with no backup. It is not user data. |
+| Any other symlink, including a dangling one | Treated like a real file, below. It is yours: `DEST.bak` holds the same link with the same target. |
 | A real directory | Refused loudly. Backing up and restoring a directory is not idempotent, so this needs a human decision. |
 | A real file, with no `DEST.bak` yet | Moved to `DEST.bak`, then linked. |
 | A real file, with a `DEST.bak` already present | Refused loudly. The first `.bak` is the pristine pre-framework copy and is never overwritten. |
 | Nothing there | Parent directory created, symlink created, recorded. |
+
+### Who owns a link
+
+One predicate, `_link_owned` in `lib/link.sh`, decides whether a symlink is the
+framework's. Every site that removes a link without a backup asks it and
+nothing else:
+
+- `link()`, replacing a link at a destination;
+- prune, in `link_manifest_finalize`, removing an orphan;
+- uninstall, in `uninstall_links`;
+- both conversions in `_link_git` (a whole `~/.config/git` link, and a
+  `~/.config/git/config` link).
+
+Where the framework may act at all is one more shared predicate,
+`_link_under_home`. `link()` (and `_link_git`), prune, uninstall, its empty
+directory pruning and `--purge` all refuse a path unless:
+
+- `$HOME` is absolute and not `/` (it is compared without trailing slashes);
+- the path is spelled strictly under `$HOME`, does not end in `/`, and has no
+  `.` or `..` component;
+- its parent directory, resolved physically in full, is `$HOME` or below it;
+- that parent is not inside the checkout, unless `$HOME` itself is (the
+  scratch `HOME` of `make smoke`);
+- the path is not the checkout itself or one of its ancestors, so a purge of
+  `$XDG_STATE_HOME/dotfiles` can never be the checkout.
+
+So install never creates a link uninstall would refuse to remove. A refusal is
+a warning and a non-zero exit. `install.sh link` places every other link and
+exits 1. Uninstall skips the line and exits 1. Prune drops the line when
+nothing exists at the path or its `.bak` (checked without following links), and
+otherwise keeps it and exits 1 with a message of its own. See
+[Manifest keeps an entry the framework may not act on](troubleshooting.md#manifest-keeps-an-entry-the-framework-may-not-act-on).
+
+`install.sh` refuses to run as root, for every subcommand and with no
+override (`_install_refuse_root`, the first thing the script does). A root
+process must never be steered by anything a user controls, and here nearly
+everything is the user's: the checkout it sources and re-executes, the manifest
+and targets file it acts on, the `$HOME` and XDG directories it writes, and the
+tools it runs from the user's `PATH` (`starship` on `~/.local/bin`, `git`,
+`gh`). Guarding each of those was a list that kept growing, so there is one
+rule instead. The check runs before any `lib/` file is sourced and before the
+script reads any variable of its own. Bash itself reads `BASH_ENV`, `SHELLOPTS`
+and `BASHOPTS` before the first line; sudo's default `env_delete` strips them.
+It reads the uid from the absolute `/usr/bin/id`, not from `PATH` (where a
+user's fake `id` could answer) and not from `$EUID` or `$UID` (which the
+environment can set), and it fails closed when that uid cannot be read, as on
+NixOS, which has no `/usr/bin/id`. The shebang is the absolute `/bin/bash`
+(macOS's 3.2, the version the installer targets), not `env bash`, so a fake
+`bash` earlier on root's `PATH` never runs either. The check also runs when the
+file is sourced, so no function in `install.sh` needs to ask again. Nothing in
+the framework needs root: Homebrew is user-scoped.
+
+A root `dotfiles-upgrade` run from an older release still runs that release's
+own git steps (fetch, merge, submodule update) as root; only the new tree's
+`install.sh`, which the upgrade re-enters for the relink, refuses.
+
+A symlink is the framework's when either holds:
+
+1. **It points into the repository** (`_link_points_into`):
+   - A relative target is resolved against the link's own directory.
+   - The target and the repository root are compared as physical paths, with
+     every existing directory component resolved. A checkout reached through a
+     symlink (such as `~/.config/dotfiles` pointing at `~/src/...`) still counts
+     as the repository, and a target spelled `<root>/../elsewhere` does not.
+   - The target must lie strictly below the root. A link to the root itself is
+     outside, and so is a prefix lookalike such as `<root>-host`.
+   - The target's last component is not followed. A link to a symlink of your
+     own is yours, wherever that symlink points.
+   - A dangling target is resolved as far as its directories exist.
+   - Anything that cannot be resolved counts as outside.
+2. **`$XDG_STATE_HOME/dotfiles/targets` records it** (`_link_pair_recorded`):
+   the file holds the pair of that destination and exactly its current target.
+   This is how a second checkout recognizes, and uninstall removes, the links
+   the first checkout made, and how switching back works. A missing file, a
+   missing pair or a different target (you repointed the link) does not count.
+   A path that holds a tab or a newline never gets a pair, and the lookup
+   refuses one. A targets file that is itself a symlink is ignored with a
+   warning.
+
+Anything else is yours, so the doubtful case is backed up, never deleted.
+
+Known limits of these checks:
+
+- **Time of check to time of use.** A path is classified, then removed or
+  restored a moment later. Something that swaps it in between wins the race.
+  The installer runs as you, over your own `$HOME`, so whatever can race it can
+  already change those files directly.
+- **Intermediate symlinks.** In a link's target, every existing directory is
+  resolved but the last component is not followed. In a destination, the
+  parent directory is resolved in full, because the removal goes through it.
+- **awk operands.** The targets file is merged with awk, which reads an operand
+  of the form `name=value` as an assignment, not a file. The operands are the
+  state-directory paths, which begin with `/` whenever `$XDG_STATE_HOME` and
+  `$HOME` are absolute, as they must be. A relative `XDG_STATE_HOME` whose
+  first component contains `=` would be misread.
+
+The transition from a host installed before the targets file existed: that
+host has no pairs yet. Its first relink from a second checkout backs up the
+first checkout's links once, as `.bak` links into it. See
+[Links from another checkout were backed up](troubleshooting.md#links-from-another-checkout-were-backed-up).
 
 A refused link does not abort the walk. Every other link is still placed, and
 `install.sh` then exits non-zero so the failure is visible.
@@ -126,10 +227,28 @@ A refused link does not abort the walk. Every other link is still placed, and
 The manifest is written atomically and is byte-stable across identical runs,
 which is what makes the idempotency check in `make smoke` meaningful.
 
+`$XDG_STATE_HOME/dotfiles/targets` follows every manifest write: one
+`destination<TAB>target` pair per manifest entry, sorted, staged in a temporary
+file and renamed right after the manifest. The pairs live in their own file so
+the manifest stays one bare path per line: the previous release's uninstall
+reads each line as a path, and it never reads the targets file. Two renames are
+not atomic together. An interruption between them leaves a pair missing, which
+fails closed to a backup, or stale, which matches only a link still pointing
+exactly where the framework put it. Uninstall leaves the targets file in place,
+as it does the manifest, and `--purge` removes both with
+`$XDG_STATE_HOME/dotfiles`.
+
 - A **clean run** replaces the manifest with exactly the links it produced, then
   prunes orphans: a link the previous manifest recorded, that this run no longer
-  produces, and that is still a symlink into the repository, is removed. This is
-  how a deleted `config/<prog>` tree stops leaving a dead link behind.
+  produces, and that is still a framework link, is removed. This is how a
+  deleted `config/<prog>` tree stops leaving a dead link behind. A pruned link's
+  `DEST.bak` is restored the way uninstall restores it, since the entry leaves
+  the manifest and no later uninstall would see that `.bak`. An entry whose link
+  is already gone gets its `.bak` restored the same way. An orphan that is not a
+  framework link, a real file you put there while a `.bak` exists, one
+  `_link_under_home` refuses while something exists there (the run then exits
+  1), or one that could not be removed or restored stays in the manifest and
+  keeps its pair, so a later uninstall still sees it.
 - A **partial run** (a refused link, or an interrupt) merges instead of
   replacing. The result is a superset, which can never orphan a link. It does not
   prune, because on a partial run "not produced" does not imply "no longer
@@ -137,10 +256,13 @@ which is what makes the idempotency check in `make smoke` meaningful.
 
 `dotfiles-uninstall` reads the manifest and, for each entry:
 
-1. Removes the path only if it is still a symlink pointing into the repository. A
-   real file you put there, or an entry pointing elsewhere, is left alone. A
-   tampered manifest naming an arbitrary path cannot delete it.
-2. Restores `DEST.bak` if one exists and nothing occupies `DEST`.
+1. Removes the path only if it is still a framework link, including one another
+   checkout made. A real file you put there, or a link that is yours, is left
+   alone. An entry `_link_under_home` refuses (above) is refused outright,
+   removal and restore alike, and uninstall exits 1, so a tampered manifest
+   naming an arbitrary path cannot touch it.
+2. Restores `DEST.bak` if one exists and nothing occupies `DEST`. A backed-up
+   symlink is renamed back, so it returns as the same link with the same target.
 3. Prunes the now-empty parent directories, stopping at the first directory that
    still holds a file and never removing `$HOME`. A parent that was already
    empty before the install (an empty `~/.local/bin`, say) is removed too: the
@@ -148,9 +270,9 @@ which is what makes the idempotency check in `make smoke` meaningful.
 
 `--purge` additionally removes `$XDG_CACHE_HOME/zsh`, `$XDG_STATE_HOME/zsh` and
 `$XDG_STATE_HOME/dotfiles`. It refuses any path outside `$HOME` and refuses
-`$XDG_CONFIG_HOME/zsh`, which is where your `.local` files live. Running
-uninstall as root over a manifest owned by another user is refused, so a
-user-writable manifest can never drive privileged deletions.
+`$XDG_CONFIG_HOME/zsh`, which is where your `.local` files live. Like every
+subcommand, uninstall refuses to run as root, so a user-writable manifest can
+never drive privileged deletions.
 
 ## The `.local` layer
 

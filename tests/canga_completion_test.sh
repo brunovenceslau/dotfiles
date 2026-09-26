@@ -24,6 +24,13 @@
 # shellcheck disable=SC2016  # $probe is zsh source for the MEASURED shell.
 set -euo pipefail
 
+# A privilege skip: install.sh refuses root for every subcommand, so nothing
+# below can run as root (tests/root_refusal_test.sh covers that refusal).
+if [ "$(/usr/bin/id -u)" -eq 0 ]; then
+  echo "SKIP: canga_completion_test (running as root: install.sh refuses root)"
+  exit 0
+fi
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass=0; ok() { pass=$((pass + 1)); echo "  ok: $1"; }
