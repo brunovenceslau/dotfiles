@@ -30,6 +30,9 @@ warn() { printf '%s\n' "$*" >> "$warnlog"; }
 
 # shellcheck source=/dev/null
 . "$linklib"
+# shellcheck source=tests/lib/bsd_readlink.sh
+. "$repo_root/tests/lib/bsd_readlink.sh"
+bsd_readlink_shim "$work/bsdrl" || fail "the BSD readlink shim does not print a trailing-newline target the BSD way"
 
 src="$work/src"; printf 'payload\n' > "$src"
 
@@ -231,11 +234,17 @@ printf '%s\t%s\n' "$tabdir/dest" "$work/elsewhere" > "$LINK_TARGETS"
 link "$src" "$tabdir/dest" || fail "13: relink over the tab-path link failed"
 [ "$(readlink "$tabdir/dest.bak")" = "$work/elsewhere" ] || fail "13: an unsafe path matched a pair"
 # A live target ending in a newline must not pass for the recorded one without it.
-dest="$work/nl13"; ln -s "$work/elsewhere$(printf '\nx')" "$dest"
-t13="$(readlink "$dest")"; t13="${t13%x}"; rm -f -- "$dest"; ln -s "$t13" "$dest"
-printf '%s\t%s\n' "$dest" "$work/elsewhere" > "$LINK_TARGETS"
-link "$src" "$dest" || fail "13: relink over a newline-target link failed"
-[ -L "$dest.bak" ] || fail "13: a target with a trailing newline matched the pair without it"
+# Every trailing-newline case runs with the host's readlink and with the shim
+# that prints the macOS way (tests/lib/bsd_readlink.sh), so a Linux run catches
+# what only a Mac would otherwise show.
+for rl in native bsd; do
+  dest="$work/nl13-$rl"; ln -s "$work/elsewhere$rl_nl" "$dest"
+  [ "$(rl_with "$rl" _link_readlink "$dest"; printf x)" = "$work/elsewhere${rl_nl}x" ] \
+    || fail "13 ($rl readlink): _link_readlink lost the target's trailing newline"
+  printf '%s\t%s\n' "$dest" "$work/elsewhere" > "$LINK_TARGETS"
+  rl_with "$rl" link "$src" "$dest" || fail "13 ($rl readlink): relink over a newline-target link failed"
+  [ -L "$dest.bak" ] || fail "13 ($rl readlink): a target with a trailing newline matched the pair without it"
+done
 unset LINK_MANIFEST LINK_TARGETS LINK_TARGETS_SCRATCH
 
 # --- 14. _link_git: a ".." target out of the repo is foreign at both sites ------
@@ -411,5 +420,44 @@ _link_targets_discard || fail "20: discard with nothing staged failed"
   if link "$src" "$HOME/.out/x" "$repo" 2>/dev/null; then echo "22: a parent leaving the in-checkout HOME was accepted"; exit 1; fi
   exit 0
 ) || fail "HOME-inside-ROOT carve-out regressed"
+
+# --- 23. Every other link-target read is exact on GNU and BSD readlink ---------
+# A trailing newline is part of a target; $(readlink) drops it, and BSD readlink
+# prints "T<newline>" exactly like "T". Each site runs under both readlinks.
+for rl in native bsd; do
+  d23="$work/home23-$rl"; mkdir -p "$d23"
+  # link()'s "already linked" check: a user link to SRC<newline> is not ours.
+  ln -s "$src$rl_nl" "$d23/already"
+  rl_with "$rl" link "$src" "$d23/already" || fail "23 ($rl readlink): relink over SRC<newline> failed"
+  [ "$(readlink -n "$d23/already.bak"; printf x)" = "$src${rl_nl}x" ] \
+    || fail "23 ($rl readlink): a link to SRC<newline> passed for already linked (no exact .bak)"
+  [ "$(readlink "$d23/already")" = "$src" ] || fail "23 ($rl readlink): the link was not made"
+  # _link_points_into: "<root>/..<newline>" names an entry INSIDE the repo, so the
+  # link is the framework's (replaced, no .bak), not a link to the repo's parent.
+  ln -s "$repo/..$rl_nl" "$d23/inrepo"
+  rl_with "$rl" link "$src" "$d23/inrepo" "$repo" || fail "23 ($rl readlink): relink over an in-repo link failed"
+  { [ ! -e "$d23/inrepo.bak" ] && [ ! -L "$d23/inrepo.bak" ]; } \
+    || fail "23 ($rl readlink): <root>/..<newline> was judged outside the repo"
+  # Prune's foreign-link warning names the exact target.
+  ln -s "$work/away23$rl_nl" "$d23/orphan"
+  printf '%s\n' "$d23/orphan" > "$d23/manifest"
+  LINK_MANIFEST="$d23/scratch"; : > "$LINK_MANIFEST"; : > "$warnlog"
+  rl_with "$rl" link_manifest_finalize "$d23/manifest" "$repo" || fail "23 ($rl readlink): finalize failed"
+  unset LINK_MANIFEST
+  case "$(cat "$warnlog"; printf x)" in
+    *"(-> $work/away23$rl_nl)"*) ;;
+    *) fail "23 ($rl readlink): prune's warning lost the target's trailing newline" ;;
+  esac
+  # _link_git's foreign ~/.config/git log names the exact target.
+  mkdir -p "$d23/.config" "$work/mine23$rl_nl"
+  ln -s "$work/mine23$rl_nl" "$d23/.config/git"
+  log() { printf '%s\n' "$*" >> "$d23/log"; }
+  rl_with "$rl" _link_git "$repo/config/git" "$d23/.config" "$repo" || { log() { :; }; fail "23 ($rl readlink): _link_git failed"; }
+  log() { :; }
+  case "$(cat "$d23/log"; printf x)" in
+    *"($d23/.config/git -> $work/mine23$rl_nl)"*) ;;
+    *) fail "23 ($rl readlink): _link_git's log lost the target's trailing newline" ;;
+  esac
+done
 
 echo "PASS: link_test"

@@ -283,6 +283,36 @@ uninstall_links "$manifest" || fail "symlink-restore uninstall returned nonzero"
 if [ -e "$HOME/.config/tmux.bak" ] || [ -L "$HOME/.config/tmux.bak" ]; then fail "symlink .bak not consumed"; fi
 rm -f -- "$HOME/.config/tmux"
 
+# A trailing newline is part of a link target: every uninstall decision and
+# report must see it, under the host's readlink and under a shim that prints the
+# macOS way (tests/lib/bsd_readlink.sh), where "T<newline>" reads like "T".
+# shellcheck source=tests/lib/bsd_readlink.sh
+. "$repo_root/tests/lib/bsd_readlink.sh"
+bsd_readlink_shim "$work/bsdrl" || fail "the BSD readlink shim does not print a trailing-newline target the BSD way"
+for rl in native bsd; do
+  # A user link to "<recorded target><newline>" is not the recorded pair: left
+  # in place, and the warning names its exact target.
+  nld="$HOME/nl-pair-$rl"; ln -s "$work/outside$rl_nl" "$nld"
+  LINK_TARGETS="$work/targets-$rl"; printf '%s\t%s\n' "$nld" "$work/outside" > "$LINK_TARGETS"
+  # "<repo>/..<newline>" names an entry INSIDE the repo: the framework's, removed.
+  nlr="$HOME/nl-repo-$rl"; ln -s "$DOTFILES/..$rl_nl" "$nlr"
+  printf '%s\n%s\n' "$nld" "$nlr" > "$manifest"
+  : > "$work/warn-$rl"
+  warn() { printf '%s\n' "$*" >> "$work/warn-$rl"; }
+  rc=0; rl_with "$rl" uninstall_links "$manifest" || rc=$?
+  warn() { :; }; unset LINK_TARGETS
+  [ "$rc" -eq 0 ] || fail "trailing-newline uninstall ($rl readlink) returned $rc"
+  [ "$(readlink -n "$nld"; printf x)" = "$work/outside${rl_nl}x" ] \
+    || fail "uninstall ($rl readlink) removed a user link to <recorded target><newline>"
+  case "$(cat "$work/warn-$rl"; printf x)" in
+    *"(-> $work/outside$rl_nl)"*) ;;
+    *) fail "uninstall ($rl readlink): the warning lost the target's trailing newline" ;;
+  esac
+  { [ ! -e "$nlr" ] && [ ! -L "$nlr" ]; } \
+    || fail "uninstall ($rl readlink) judged <repo>/..<newline> outside the repo"
+  rm -f -- "$nld"
+done
+
 # --- exit-code fidelity through install.sh (non-root: perms don't bind root) ---
 if [ "$(id -u)" -ne 0 ]; then
   # A removal that fails (unwritable parent dir) must surface as exit 1 - not 0

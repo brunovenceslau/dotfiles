@@ -55,7 +55,8 @@ uninstall_links() {
       if _link_owned "$dest" "$DOTFILES"; then
         if rm -f -- "$dest"; then log "removed link $dest"; else rc=1; fi
       else
-        target="$(readlink "$dest")"
+        # Exact (lib/link.sh _link_readlink): the report names the real target.
+        target="$(_link_readlink "$dest" && printf x)"; target="${target%x}"
         warn "uninstall: $dest no longer points into the repo (-> $target) - leaving it"
       fi
     elif [ -e "$dest" ]; then

@@ -57,7 +57,7 @@ link() {
     # Already pointing where we want -> nothing to do (idempotent re-run). The
     # link still exists, so it is still ours to record: a re-run
     # must reproduce the full manifest, not an empty one.
-    if [ "$(readlink "$dest")" = "$src" ]; then
+    if _link_target_is "$dest" "$src"; then
       _link_record "$dest" "$src"
       return 0
     fi
@@ -205,7 +205,12 @@ _link_points_into() {
   local dest="$1" root="$2" t proot
   [ -n "$root" ] || return 1
   proot="$(cd -P -- "$root" 2>/dev/null && pwd -P)" || return 1
-  t="$(readlink "$dest")" || return 1
+  # Exact (_link_readlink): "<root>/..<newline>" names an entry INSIDE ROOT,
+  # while the "<root>/.." a stripped read makes of it resolves to ROOT's parent.
+  # _link_physical's own $(...) below may drop that trailing newline again: it
+  # only shortens the last component, never the "$proot/" prefix matched here.
+  t="$(_link_readlink "$dest" && printf x)" || return 1
+  t="${t%x}"
   case "$t" in
     /*) ;;
     *) t="$(dirname "$dest")/$t" ;;
@@ -292,12 +297,23 @@ _link_nl='
 
 # _link_readlink DEST - print the target of DEST exactly. $(readlink) alone would
 # strip trailing newlines and so let a target "T<newline>" pass for "T"; the
-# sentinel keeps them, and only readlink's own final newline is removed.
+# sentinel keeps them. `-n` MUST stay: without it the terminator is not portable
+# - GNU readlink always appends a newline, but macOS/BSD readlink (stat(1)'s
+# addchar) appends one only when the target does not already end in one, so
+# "T<newline>" and "T" print the same bytes there and no stripping can tell them
+# apart. GNU, BSD and busybox readlink all accept -n.
 _link_readlink() {
   local t
-  t="$(readlink "$1" && printf x)" || return 1
-  t="${t%x}"
-  printf '%s' "${t%"$_link_nl"}"
+  t="$(readlink -n "$1" && printf x)" || return 1
+  printf '%s' "${t%x}"
+}
+
+# _link_target_is DEST WANT - succeed when the symlink DEST's target is exactly
+# WANT: $(readlink) = WANT would also accept a target "WANT<newline>".
+_link_target_is() {
+  local t
+  t="$(_link_readlink "$1" && printf x)" || return 1
+  [ "${t%x}" = "$2" ]
 }
 
 # _link_pair_recorded DEST - succeed when $LINK_TARGETS holds exactly the pair
@@ -414,7 +430,8 @@ link_manifest_finalize() {
         continue
       fi
       if ! _link_owned "$d" "$root"; then
-        t="$(readlink "$d")"
+        # Exact (_link_readlink): the warning names the real target.
+        t="$(_link_readlink "$d" && printf x)"; t="${t%x}"
         warn "prune: $d no longer produced but points outside the repo (-> $t) - leaving it"
         printf '%s\n' "$d" >> "$keep"; continue
       fi
@@ -628,7 +645,8 @@ _link_git() {
         warn "git: could not remove the stale ~/.config/git symlink"; return 1
       fi
     else
-      target="$(readlink "$gitdir")"
+      # Exact (_link_readlink): the log names the real target.
+      target="$(_link_readlink "$gitdir" && printf x)"; target="${target%x}"
       log "git: leaving a foreign ~/.config/git symlink intact ($gitdir -> $target)"; return 0
     fi
   fi
