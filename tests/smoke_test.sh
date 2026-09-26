@@ -50,6 +50,59 @@ if command -v zsh >/dev/null 2>&1; then
   # Comparing porcelain status before/after pins "no git-visible change".
   before="$(cd "$repo_root" && git status --porcelain 2>/dev/null || true)"
 
+  # REGRESSION (dotfiles#18): no smoke run may change the REAL tree's submodule
+  # state. The smoke once ran install.sh against the real repo, whose
+  # ensure_submodules then initialized an uninitialized checkout as a side effect
+  # of `make test` - which hid an order-dependent test bug (a fresh worktree failed
+  # its first run and passed every run after). Snapshotted here, before the first
+  # smoke run, and compared after the last one, so every run below is covered.
+  # What it captures:
+  #   - the plugin tree: paths, file bytes, and modes (the install's
+  #     harden_plugin_perms chmods it). Modes come from stat, GNU `-c` or BSD `-f`,
+  #     never `ls -l`, whose ` -> target` on a symlink shifts the fields;
+  #   - the per-worktree modules gitdir: paths, and the bytes of every file but
+  #     each `index`. An index is compared by CONTENT instead (`ls-files --stage`
+  #     below): the `git status` calls in this test may refresh its stat cache,
+  #     which rewrites the bytes without changing the submodule;
+  #   - the common and per-worktree git config (a leaked GIT_DIR once let staging
+  #     re-initialize the real gitdir, writing core.bare=true there), HEAD, and the
+  #     staged content of the superproject and of every populated submodule;
+  #   - `git submodule status`: init state and checked-out commit.
+  # GIT_OPTIONAL_LOCKS=0 keeps the status probe itself from refreshing an index.
+  # The branch line is printed on purpose: a CI log then proves which one ran.
+  if stat -c '%a %n' . >/dev/null 2>&1; then
+    stat_mode=(-c '%a %n'); echo "smoke_test: stat branch GNU (-c '%a %n')"
+  else
+    stat_mode=(-f '%Lp %N'); echo "smoke_test: stat branch BSD (-f '%Lp %N')"
+  fi
+  snap_submodules() {
+    local gm common cw
+    gm="$(git -C "$repo_root" rev-parse --path-format=absolute --git-path modules)" || return 1
+    common="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)" || return 1
+    cw="$(git -C "$repo_root" rev-parse --path-format=absolute --git-path config.worktree)" || return 1
+    ( cd "$repo_root" || exit 1
+      find zsh/plugins | LC_ALL=C sort
+      find zsh/plugins -type f -exec cksum {} + | LC_ALL=C sort
+      find zsh/plugins -exec stat "${stat_mode[@]}" {} + | LC_ALL=C sort
+    ) || return 1
+    if [ -d "$gm" ]; then
+      find "$gm" | LC_ALL=C sort
+      find "$gm" -type f ! -name index -exec cksum {} + | LC_ALL=C sort
+    else
+      echo "no modules gitdir: $gm"
+    fi
+    echo "== common config"; cat "$common/config" || return 1
+    if [ -f "$cw" ]; then echo "== worktree config"; cat "$cw"; fi
+    echo "== HEAD"; git -C "$repo_root" rev-parse HEAD || return 1
+    git -C "$repo_root" symbolic-ref -q HEAD || :
+    echo "== index"; git -C "$repo_root" ls-files --stage || return 1
+    GIT_OPTIONAL_LOCKS=0 git -C "$repo_root" submodule foreach --quiet \
+      'echo "== index $sm_path"; git ls-files --stage' || return 1
+    echo "== submodule status"
+    GIT_OPTIONAL_LOCKS=0 git -C "$repo_root" submodule status
+  }
+  sub_before="$(snap_submodules)" || fail "could not snapshot the real tree's submodule state"
+
   out="$("$smoke" 2>&1)" || fail "smoke end-to-end exited nonzero: $out"
   grep -q 'PASS' <<<"$out" || fail "smoke did not report PASS: $out"
 
@@ -59,6 +112,25 @@ if command -v zsh >/dev/null 2>&1; then
 
   # The scratch tree must be cleaned up, not left behind.
   [ ! -e "$repo_root/.smoke/run" ] || fail ".smoke/run not cleaned up after a run"
+
+  # REGRESSION: a repository-local git environment leaked into the smoke (a
+  # linked-worktree hook or `rebase --exec` exports GIT_DIR and GIT_INDEX_FILE)
+  # overrides `git -C`, so staging would run `git init` and read-tree against the
+  # REAL gitdir and index. bin/smoke scrubs them first; prove it by leaking the
+  # real ones and requiring the run to pass and the real repository to be
+  # unchanged, compared right here so a failure names this case.
+  leak_gitdir="$(git -C "$repo_root" rev-parse --absolute-git-dir)"
+  leak_index="$(git -C "$repo_root" rev-parse --path-format=absolute --git-path index)"
+  # The snapshot is compared BEFORE the exit status: a run that failed midway
+  # may already have written to the real repository, and that is the finding.
+  lrc=0
+  lout="$(GIT_DIR="$leak_gitdir" GIT_INDEX_FILE="$leak_index" "$smoke" 2>&1)" || lrc=$?
+  sub_leak="$(snap_submodules)" || fail "could not snapshot the real tree's submodule state"
+  if [ "$sub_before" != "$sub_leak" ]; then
+    diff <(printf '%s\n' "$sub_before") <(printf '%s\n' "$sub_leak") >&2 || :
+    fail "a smoke run with GIT_DIR/GIT_INDEX_FILE leaked changed the real repository"
+  fi
+  [ "$lrc" -eq 0 ] || fail "smoke with GIT_DIR/GIT_INDEX_FILE leaked exited nonzero: $lout"
 
   # CI parity - a group/world-writable fpath dir (what a shared CI runner checkout,
   # or the runner's own /usr/local completion dir, can look like) must NOT abort the
@@ -77,6 +149,10 @@ if command -v zsh >/dev/null 2>&1; then
       || fail "smoke aborted on a group/world-writable fpath dir (compinit -C stamp pre-seed regressed)"
     chmod "$orig_mode" "$fpdir" 2>/dev/null || true
     trap - EXIT
+  else
+    # Loud, not silent: the smoke no longer initializes the real tree's
+    # submodules, so an uninitialized checkout never grows this dir mid-test.
+    echo "SKIP: smoke_test world-writable fpath case (plugin submodules not initialized)"
   fi
 
   # Fail-closed clean-start gate, against a noisy-zshrc fixture.
@@ -91,6 +167,9 @@ if command -v zsh >/dev/null 2>&1; then
   # (not `ln`) for zsh/zshenv so its :A resolves DOTFILES to the fixture
   # (self-contained); bin/ is linked so the ~/.local/bin/tmux-status assertion passes
   # en route to the check.
+  # Dual purpose: these fixtures are plain directories, not git checkouts, so
+  # besides the failure each one targets they also exercise bin/smoke's
+  # in-place path (a ROOT that is not a checkout's top level is not staged).
   fix="$repo_root/.smoke/fixture-noisy"
   rm -rf "$fix"; mkdir -p "$fix/zsh"
   ln -sf "$repo_root/install.sh" "$fix/install.sh"
@@ -163,6 +242,12 @@ STUB
   "$smoke" --keep >/dev/null 2>&1 || fail "--keep must exit 0"
   [ -e "$repo_root/.smoke/run" ] || fail "--keep must retain the scratch tree"
   rm -rf "$repo_root/.smoke/run"
+
+  sub_after="$(snap_submodules)" || fail "could not snapshot the real tree's submodule state"
+  if [ "$sub_before" != "$sub_after" ]; then
+    diff <(printf '%s\n' "$sub_before") <(printf '%s\n' "$sub_after") >&2 || :
+    fail "a smoke run changed the real tree's submodule state (it must install from a staged copy)"
+  fi
 else
   # exempt: the STRICT escalation for smoke's zsh dependency is the dedicated,
   # self-contained block below (it runs bin/smoke under a no-zsh PATH + STRICT=1

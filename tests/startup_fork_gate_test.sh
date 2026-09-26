@@ -49,7 +49,7 @@ cp -a "$repo_root" "$copy"
 # The gate's plugin guard must see real submodules in the copy, or every case
 # below would measure a degraded shell and this whole test would be vacuous.
 [ -e "$copy/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh" ] \
-  || fail "repo copy lacks plugin submodules - cannot exercise the gate honestly"
+  || fail "repo copy lacks plugin submodules - cannot exercise the gate honestly; run 'git submodule update --init' once in the checkout"
 
 # --- 1. Planted violation turns the gate red, naming the binary ---------------
 # `uname` as the planted binary is LOAD-BEARING, not arbitrary: the zshrc shims

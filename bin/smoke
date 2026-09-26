@@ -23,7 +23,7 @@
 #   enforcement mechanism does NOT cover this file: `make smoke` execs it via its
 #   own shebang (`#!/usr/bin/env bash`) - the first bash on PATH, a Homebrew bash 5
 #   on the macOS runners, not /bin/bash - and the `/bin/bash -n` gate
-#   scopes to install.sh + lib/ only. So staying 3.2-clean here is a discipline,
+#   scopes to install.sh, lib/ and tests/, never bin/. So staying 3.2-clean here is a discipline,
 #   not a CI-caught property. The installer UNDER TEST is separately invoked via an
 #   explicit /bin/bash, which on the macOS legs IS the real 3.2 - so the smoke does
 #   exercise the 3.2 interpreter at install time.
@@ -71,6 +71,188 @@ EOF
 
 fail() { echo "smoke: FAIL - $*" >&2; exit 1; }
 
+# --- Git environment scrub --------------------------------------------------------
+# MUST run before any git command below. An inherited GIT_DIR, GIT_INDEX_FILE,
+# GIT_WORK_TREE and the like (a linked-worktree hook or `rebase --exec` exports
+# them) take precedence over `git -C`: with GIT_DIR leaked, `git init` on the
+# staged copy re-initializes the REAL gitdir (core.bare=true in the shared
+# config) and read-tree overwrites the real index. `--local-env-vars` is git's
+# own list of the repository-local variables, so one git adds later is covered
+# too; it prints the list without needing a repository, and when git is absent
+# there is nothing to scrub. The installer and the probed shells inherit the
+# scrubbed environment, as they would on a fresh machine.
+if command -v git >/dev/null 2>&1; then
+  # shellcheck disable=SC2046  # splitting the list of variable names is the point
+  unset $(git rev-parse --local-env-vars)
+fi
+
+# --- Staging helpers (the installer never runs against the real tree) -----------
+# The installer MUST NOT run against the real repo: its ensure_submodules runs
+# `git submodule update --init` on $DOTFILES, so a smoke of an uninitialized
+# checkout used to initialize the developer's tree as a side effect of `make
+# test` - which hid an order-dependent test bug (dotfiles#18: a fresh worktree
+# failed its first run and passed every run after). So when ROOT is the top level
+# of a git checkout, the installer runs against a disposable copy under $base
+# instead; install.sh derives DOTFILES from its own location, so every link, the
+# zsh :A-resolved DOTFILES and harden_plugin_perms all land in the copy.
+#   - Working tree: copied with tar, NOT git checkout, so uncommitted edits,
+#     untracked and ignored files (a .local layer) and file and directory MODES
+#     are smoked exactly as they sit in the real tree. tar, not cp: cp's
+#     fast-copy path can read zeros from a just-written file on a virtiofs
+#     mount. .git, .smoke and .forkgate stay behind.
+#   - Git metadata: a fresh `git init` whose objects/info/alternates points at the
+#     real object store, with HEAD and the index at the real HEAD. The copy reads
+#     the real objects and writes only its own, so nothing is fetched and nothing
+#     is written to the real .git. It MUST be a repository of its own: without
+#     one, git run inside the copy would discover the enclosing real repo and
+#     ensure_submodules would initialize THAT.
+#   - Submodules: an initialized one is re-created from the real submodule's
+#     objects at the commit it has checked out (its files come from the tar copy,
+#     so a locally bumped pin is smoked as it is). An uninitialized one is filled
+#     at its pinned commit from a local modules gitdir that holds that commit
+#     (this checkout's, the common dir's, or a sibling worktree's). Otherwise it
+#     stays uninitialized and install.sh's own ensure_submodules fetches it, as it
+#     did before, but into the copy.
+#   None of this touches install.sh, the pins or fsck: no objects move between
+#   repositories here, so there is no transfer for fsckObjects to check.
+# Every step that can fail ends in `|| return 1`: stage_tree is called as `stage_tree || fail`,
+# which switches errexit off inside it, and a step that failed silently could
+# leave a later git command resolving to the real repository.
+
+# _git_repo_at DIR OBJECTS COMMIT - a NEW repository at DIR (which may already
+# hold copied files) that borrows the object directory OBJECTS and has HEAD and
+# the index at COMMIT.
+_git_repo_at() {
+  git init -q "$1" || return 1
+  # Written only once `git init` provably made DIR/.git: never into another repo.
+  [ -d "$1/.git/objects/info" ] || return 1
+  printf '%s\n' "$2" > "$1/.git/objects/info/alternates" || return 1
+  git -C "$1" update-ref --no-deref HEAD "$3" || return 1
+  git -C "$1" read-tree "$3"
+}
+
+# _is_checkout_top DIR - DIR is the top level of its own git checkout (not a
+# plain directory inside an enclosing one, which git would happily resolve to).
+_is_checkout_top() {
+  [ "$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" = "$(cd "$1" && pwd -P)" ]
+}
+
+# _submodule_name_for_path SRC PATH - print the NAME .gitmodules gives the
+# submodule at PATH (the modules gitdir is named after it, not the path), or
+# nothing when none does.
+_submodule_name_for_path() {
+  local key val
+  while read -r key val; do
+    [ "$val" = "$2" ] || continue
+    key="${key#submodule.}"
+    printf '%s\n' "${key%.path}"
+    return 0
+  done <<<"$(git config -f "$1/.gitmodules" --get-regexp '^submodule\..*\.path$' 2>/dev/null)"
+}
+
+# _local_modules_gitdir SRC NAME COMMIT - print the first local modules gitdir
+# for NAME that holds COMMIT: SRC's own, the common dir's (the main clone's), or
+# a sibling linked worktree's. Prints nothing when none does.
+_local_modules_gitdir() {
+  local common cand
+  common="$(git -C "$1" rev-parse --path-format=absolute --git-common-dir)" || return 1
+  for cand in "$(git -C "$1" rev-parse --path-format=absolute --git-path "modules/$2")" \
+              "$common/modules/$2" "$common"/worktrees/*/modules/"$2"; do
+    if [ -d "$cand" ] && git --git-dir="$cand" cat-file -e "$3^{commit}" 2>/dev/null; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done
+}
+
+# _tar_copy SRC DST NAME... - copy the named top-level entries of SRC into DST
+# with tar, keeping modes (-p), and fail closed on ANY tar complaint: a nonzero
+# exit on either side (pipefail) OR anything either side wrote to stderr. The
+# stderr rule is load-bearing on macOS: bsdtar reports some problems (an xattr
+# it could not list on an unreadable file, for one) as a warning and exits 0,
+# and a copy tar itself called incomplete must never be smoked. Both sides'
+# stderr is captured beside DST and replayed on failure.
+# Extended attributes, ACLs, file flags and macOS metadata are left out where
+# this tar accepts the flag: they are not what the smoke proves (modes are, and
+# -p keeps those), and reading them is the usual source of those warnings. Each
+# flag is probed once per run (a test tool, so the forks are fine) because GNU
+# tar and bsdtar accept different sets and an unknown flag is an error.
+_tar_copy() {
+  local src="$1" dst="$2" errc="$2.tar-create.err" errx="$2.tar-extract.err" f
+  local -a skip
+  shift 2
+  skip=()
+  # The probe archives an empty directory: a real, portable create that every
+  # tar accepts, so only an unknown flag can fail it.
+  mkdir -p "$dst.tar-probe" || return 1
+  for f in --no-xattrs --no-acls --no-fflags --no-mac-metadata; do
+    tar "$f" -cf /dev/null -C "$dst.tar-probe" . >/dev/null 2>&1 && skip[${#skip[@]}]="$f"
+  done
+  rmdir "$dst.tar-probe" || return 1
+  # ${skip[@]+...}: bash 3.2 under `set -u` treats an empty array as unbound.
+  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - "$@") 2>"$errc" \
+      | (cd "$dst" && tar ${skip[@]+"${skip[@]}"} -xpf -) 2>"$errx" \
+      && [ ! -s "$errc" ] && [ ! -s "$errx" ]; then
+    rm -f "$errc" "$errx"
+    return 0
+  fi
+  echo "smoke: tar did not copy $src cleanly:" >&2
+  cat "$errc" "$errx" >&2 2>/dev/null || :
+  rm -f "$errc" "$errx"
+  return 1
+}
+
+# stage_tree SRC DST - stage the checkout at SRC as a disposable copy at DST.
+stage_tree() {
+  local src="$1" dst="$2" e p mode sha _stage name found objs head links
+  local -a names
+  names=()
+  mkdir -p "$dst" || return 1
+  objs="$(git -C "$src" rev-parse --path-format=absolute --git-path objects)" || return 1
+  head="$(git -C "$src" rev-parse --verify -q HEAD)" || return 1
+  _git_repo_at "$dst" "$objs" "$head" || return 1
+  for e in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+    { [ -e "$e" ] || [ -L "$e" ]; } || continue    # an unmatched glob stays literal
+    e="${e##*/}"
+    case "$e" in .git | .smoke | .forkgate) continue ;; esac
+    names[${#names[@]}]="$e"
+  done
+  _tar_copy "$src" "$dst" "${names[@]}" || return 1
+  # `ls-files -s` lines are "<mode> <sha> <stage>\t<path>"; mode 160000 is a
+  # gitlink. read splits on the tab too (no plugin path holds whitespace).
+  links="$(git -C "$dst" ls-files -s)" || return 1
+  while read -r mode sha _stage p; do
+    [ "$mode" = 160000 ] || continue
+    # The copied gitfile points into the REAL tree's modules gitdir; remove it
+    # before any git command can follow it.
+    rm -rf "${dst:?}/$p/.git" || return 1
+    if [ -e "$src/$p/.git" ] && _is_checkout_top "$src/$p"; then
+      objs="$(git -C "$src/$p" rev-parse --path-format=absolute --git-path objects)" || return 1
+      head="$(git -C "$src/$p" rev-parse --verify -q HEAD)" || return 1
+      _git_repo_at "$dst/$p" "$objs" "$head" || return 1
+    else
+      name="$(_submodule_name_for_path "$src" "$p")"    # always exits 0
+      [ -n "$name" ] || continue
+      found="$(_local_modules_gitdir "$src" "$name" "$sha")" || return 1
+      # No local objects: leave it uninitialized for install.sh to fetch.
+      [ -n "$found" ] || continue
+      _git_repo_at "$dst/$p" "$found/objects" "$sha" || return 1
+      # An uninitialized submodule is an empty dir, so its files come from here.
+      git -C "$dst/$p" reset -q --hard "$sha" || return 1
+    fi
+    # Mark it active in the copy's own config (url from .gitmodules; no fetch),
+    # so `git submodule status` stops reporting it with the '-' that makes
+    # ensure_submodules fetch.
+    git -C "$dst" submodule init -q -- "$p" || return 1
+  done <<<"$links"
+}
+
+# Sourced (tests/smoke_stage_test.sh unit-tests the staging helpers): stop here,
+# with the functions defined and nothing run.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then
+  return 0
+fi
+
 keep=0
 root=""
 while [ $# -gt 0 ]; do
@@ -107,21 +289,6 @@ if ! command -v zsh >/dev/null 2>&1; then
   exit 0
 fi
 
-# The zshrc guards every plugin on existence, so a checkout whose submodules were
-# never `update --init`'d starts cleanly but exercises a DEGRADED no-plugin path.
-# Warn loudly; the CI smoke checks out submodules recursively.
-missing=""
-for p in \
-  zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh \
-  zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh \
-  zsh/plugins/zsh-completions/src; do
-  [ -e "$root/$p" ] || missing="$missing $p"
-done
-if [ -n "$missing" ]; then
-  echo "smoke: WARN plugin submodules not initialized - smoking a DEGRADED" >&2
-  echo "smoke:      no-plugin path (run 'git submodule update --init'). Missing:$missing" >&2
-fi
-
 # --- Scratch HOME under .smoke/ (gitignored, in-repo) -------------------------
 # A real first install derives XDG from $HOME, so we set only HOME and unset any
 # inherited XDG_* - the installer and zshenv then default them under the scratch
@@ -141,6 +308,33 @@ if [ "$keep" -eq 0 ]; then
   trap 'rm -rf "$base"' EXIT
 else
   echo "smoke: --keep set; scratch retained at $base"
+fi
+
+# --- Staged copy of the tree under test (see the staging helpers above) ----------
+if ! command -v git >/dev/null 2>&1; then
+  echo "smoke: git not found - installing $root in place (install.sh then skips its submodule step)"
+elif _is_checkout_top "$root"; then
+  stage_tree "$root" "$base/tree" || fail "could not stage a copy of $root under $base/tree"
+  root="$base/tree"
+else
+  echo "smoke: $root is not the top level of a git checkout - installing it in place"
+fi
+
+# The zshrc guards every plugin on existence, so a copy whose submodules are
+# still empty starts cleanly but exercises a DEGRADED no-plugin path. Checked on
+# the staged copy, because that is what gets installed. Warn loudly; the CI smoke
+# checks out submodules recursively.
+missing=""
+for p in \
+  zsh/plugins/zsh-autosuggestions/zsh-autosuggestions.zsh \
+  zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh \
+  zsh/plugins/zsh-completions/src; do
+  [ -e "$root/$p" ] || missing="$missing $p"
+done
+if [ -n "$missing" ]; then
+  echo "smoke: WARN plugin files missing from the tree under install:$missing" >&2
+  echo "smoke:      install.sh fetches an uninitialized submodule, else this smokes a DEGRADED" >&2
+  echo "smoke:      no-plugin path. Run 'git submodule update --init' once in the checkout." >&2
 fi
 
 export HOME="$scratch"
