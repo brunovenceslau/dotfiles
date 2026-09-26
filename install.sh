@@ -7,8 +7,8 @@
 #
 # install.sh - link the dotfiles into $HOME by convention.
 #
-# Each line below is `install.sh <name>`, then a run of 2+ spaces, then its
-#   description - that gap is load-bearing: tests/subcommand_docs_test.sh
+# Each usage line below is `install.sh <name>`, then a run of 2+ spaces, then
+#   its description - that gap is load-bearing: tests/subcommand_docs_test.sh
 #   parses it to find where each subcommand's name ends.
 #
 #   install.sh [install]             create state/cache dirs, then (re)create every link

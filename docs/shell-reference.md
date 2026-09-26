@@ -273,6 +273,7 @@ Override those from `$ZDOTDIR/.zshrc.local`, which runs later.
 | `STARSHIP_CACHE` | `$XDG_CACHE_HOME/zsh/starship`. starship keeps its session logs here, and `--purge` removes the directory. `install.sh` sets the same value when it runs `starship init`. |
 | `GOPATH` | `$HOME/go` when that directory exists. |
 | `skip_global_compinit` | `1`, to suppress a duplicate global compinit. |
+| `GIT_CEILING_DIRECTORIES` | `$CANGA_HOST_BASE_DIR/github.com/brunovenceslau/docker-sbx/envs` (`CANGA_HOST_BASE_DIR` defaults to `$HOME/src`), prepended to any existing value, only when that directory exists, the resulting path is absolute, and it contains no `:`. It stops git searching above a docker-sbx environment. An entry already in the list is not added again. Apps launched from the Dock or Finder do not get it. |
 
 Set elsewhere:
 
