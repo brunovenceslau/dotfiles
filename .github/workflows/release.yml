@@ -115,4 +115,8 @@ jobs:
           set -euo pipefail
           # --verify-tag: refuse to invent a tag. The release can only ever
           # describe the signed tag that triggered this run.
-          gh release create "$TAG" --verify-tag --notes-file "$RUNNER_TEMP/notes.md"
+          # --title: gh/GitHub's default (the bare tag, e.g. "v0.2.0") reads as
+          # version noise on GitHub's global releases feed; "dotfiles $TAG"
+          # names the project inline so the title alone identifies what
+          # shipped.
+          gh release create "$TAG" --verify-tag --title "dotfiles $TAG" --notes-file "$RUNNER_TEMP/notes.md"
