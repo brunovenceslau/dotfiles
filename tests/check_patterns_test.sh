@@ -313,6 +313,20 @@ r="$work/brew-gpg"; seed "$r"; mkdir -p "$r/config/gnupg"
 printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/gnupg/gpg-agent.conf"
 [ "$(run "$r")" = "0" ] && ok || fail "gpg-agent.conf's absolute pinentry path must pass (allowlisted)"
 
+# --- REGRESSION: the gpg-agent.conf exemption is ANCHORED to the EXACT scanned
+# path, never a bare suffix ---------------------------------------------------
+# An earlier version (`^([^:]*/)?config/gnupg/gpg-agent\.conf:`) exempted ANY
+# path ending in those segments, so a DECOY file at a different real path that
+# happens to end the same way (e.g. config/vendor/config/gnupg/gpg-agent.conf,
+# still inside the scanned config/ tree) was wrongly exempted too - fail-OPEN
+# (reproduced against the pre-fix pattern: exit 0, expected non-zero). The real
+# config/gnupg/gpg-agent.conf above must still pass; this fixture proves a
+# LOOK-ALIKE path elsewhere does not ride along on that exemption.
+r="$work/brew-gpg-decoy"; seed "$r"; mkdir -p "$r/config/vendor/config/gnupg" "$r/config/gnupg"
+printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/vendor/config/gnupg/gpg-agent.conf"
+printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/gnupg/gpg-agent.conf"
+[ "$(run "$r")" != "0" ] && ok || fail "a decoy config/vendor/config/gnupg/gpg-agent.conf (not the real allowlisted path) must still fail"
+
 # ASYMMETRIC by design: /usr/local alone is a generic FHS path with non-Homebrew uses
 # (zsh/zshenv's /usr/local/go/bin), so it is never flagged on its own.
 r="$work/usrlocal-alone"; seed "$r"; mkdir -p "$r/zsh"
@@ -692,5 +706,169 @@ printf '%s\n' \
   "chmod -R go-w \\" \
   "  $D \"\$d\"" > "$r/tests/x_test.sh"
 [ "$(run "$r")" = "0" ] && ok || fail "a documented gap of the -- arm (\$CMD, sudo options, find -exec, a \\ continuation) is now caught - update the arm's NOT-covered list"
+
+# === the em-dash arm =============================================================
+# House style (CONTRIBUTING.md's community standards and .claude/rules/docs.md's
+# documentation standard) is a plain hyphen; the arm forbids the Unicode em dash
+# (U+2014) anywhere in the repo's own prose, comments included - unlike arms
+# (5)-(10) it does NOT strip comments first (the same reasoning arms (1)-(2) use
+# for curl|sh and uname -m: a forbidden shape in a comment is still the shape).
+# The byte sequence is built at RUNTIME from its UTF-8 bytes ($'\xe2\x80\x94'),
+# never pasted as a literal character into this test file - a literal here
+# would trip check-patterns's own em-dash arm on its own test suite.
+em_dash_msg="check-patterns: an em dash"
+em_dash=$'\xe2\x80\x94'
+en_dash=$'\xe2\x80\x93'
+
+# a shell comment carrying an em dash is caught - comments are prose too.
+r="$work/emdash-comment"; seed "$r"
+printf '# a note %s a trailing clause\n' "$em_dash" > "$r/lib/note.sh"
+fails_with "$r" "$em_dash_msg" "an em dash in a shell comment"
+
+# a Markdown file carrying an em dash is caught.
+r="$work/emdash-md"; seed "$r"; mkdir -p "$r/docs"
+printf 'A sentence %s a trailing clause.\n' "$em_dash" > "$r/docs/note.md"
+fails_with "$r" "$em_dash_msg" "an em dash in a Markdown file"
+
+# a zsh file carrying an em dash is caught.
+r="$work/emdash-zsh"; seed "$r"; mkdir -p "$r/zsh"
+printf '# prompt segment %s status\n' "$em_dash" > "$r/zsh/prompt.zsh"
+fails_with "$r" "$em_dash_msg" "an em dash in a zsh file"
+
+# the allowlisted lazy.nvim lockfile is exempt even though it sits inside the
+# otherwise-scanned config/ tree - lazy.nvim rewrites it wholesale on every sync.
+r="$work/emdash-allowlisted"; seed "$r"; mkdir -p "$r/config/nvim"
+printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/config/nvim/lazy-lock.json"
+[ "$(run "$r")" = "0" ] && ok || fail "config/nvim/lazy-lock.json must be exempt from the em-dash arm"
+
+# a plain hyphen and an en dash both pass - the arm targets exactly U+2014.
+r="$work/emdash-clean"; seed "$r"; mkdir -p "$r/docs"
+printf 'a sentence - with a plain hyphen, and a range 3%s5 too\n' "$en_dash" > "$r/docs/note.md"
+[ "$(run "$r")" = "0" ] && ok || fail "a plain hyphen and an en dash must both pass the em-dash arm"
+
+# --- the lazy-lock exemption is ANCHORED to the PATH:NN: field, never a
+# substring match anywhere on the hit line -----------------------------------
+# REGRESSION: an earlier version (`(^|/)config/nvim/lazy-lock\.json:`) exempted
+# any hit line where that text was preceded by line-start OR a bare `/` -
+# ANYWHERE on the PATH:NN:CONTENT line, not just in the PATH field. A docs
+# sentence that names the exempted path with a leading slash (as in a full
+# path shown to a reader, "/repo/config/nvim/lazy-lock.json:") reproduces the
+# bypass: the CONTENT half alone satisfies `(^|/)`, so the whole hit line was
+# wrongly exempted even though the VIOLATION is in docs/, not the lockfile.
+# (A mention with no leading slash, e.g. a bare "config/nvim/lazy-lock.json:",
+# does NOT reproduce it - `(^|/)` still requires line-start or a slash right
+# before "config", so this fixture must use the slash-prefixed form to
+# actually exercise the bug; verified by running it against the pre-fix
+# pattern before writing this comment.)
+r="$work/emdash-anchor-bypass"; seed "$r"; mkdir -p "$r/docs"
+printf 'See /repo/config/nvim/lazy-lock.json: it drifts %s investigate.\n' "$em_dash" > "$r/docs/other.md"
+fails_with "$r" "$em_dash_msg" "a file that only MENTIONS a slash-prefixed config/nvim/lazy-lock.json: text (not the file itself) must still fail"
+
+# --- REGRESSION: the CURRENT (start-of-PATH-field) anchor still accepted ANY
+# leading directory segment before "config/nvim/lazy-lock.json:", so a DECOY
+# file at a different real path ending in those same segments (still inside
+# the scanned config/ tree) was wrongly exempted too - fail-OPEN (reproduced
+# against the pre-fix pattern: exit 0, expected non-zero). The real
+# config/nvim/lazy-lock.json above must still be exempt; this fixture proves a
+# LOOK-ALIKE path elsewhere does not ride along on that exemption.
+r="$work/emdash-lazylock-decoy-file"; seed "$r"; mkdir -p "$r/tests/config/nvim" "$r/config/nvim"
+printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/tests/config/nvim/lazy-lock.json"
+printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/config/nvim/lazy-lock.json"
+fails_with "$r" "$em_dash_msg" "a decoy tests/config/nvim/lazy-lock.json (not the real allowlisted path) must still fail"
+
+# --- REGRESSION-LOCK: `-I` (binary skip) is not pinned to a specific grep -----
+# version or flavor, so this locks in the CURRENT, relied-upon behavior: a file
+# that carries a NUL byte is treated as binary and skipped by `-I`, even when
+# it also carries the exact forbidden em-dash bytes right next to the NUL. If a
+# future edit drops `-I`, this fixture starts failing (the file would then be
+# scanned as text and caught), which is the signal that the binary-skip
+# contract broke.
+r="$work/emdash-nul-binary-skip"; seed "$r"; mkdir -p "$r/docs"
+printf 'a note\000%s trailing\n' "$em_dash" > "$r/docs/note.md"
+[ "$(run "$r")" = "0" ] && ok || fail "a file with a NUL byte plus an em dash must be skipped as binary (-I), not scanned"
+
+# --- FAIL CLOSED, arm 11's own two rc>=2 branches, each its own call site ----
+# Same `chmod 000` reason as the general fail-closed case above (root bypasses
+# it via DAC_OVERRIDE, so these SKIP under root) - see that comment for what
+# was tried instead. Each fixture targets ONE of arm 11's two grep calls, so a
+# hit in the OTHER call's fail-closed handling cannot make this one pass by
+# accident: the recursive PROSE scan (over ${prose[@]}, which includes docs/,
+# unlike the shared ${scan[@]}) and the NARROW self-scan of bin/check-patterns
+# alone. Mutating either `rc -ge 2` to `rc -ge 99` passes every OTHER fixture
+# in this file but fails these two (measured).
+em_dash_prose_err_msg="check-patterns: em-dash scan errored"
+em_dash_self_err_msg="check-patterns: check-patterns self-scan errored"
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/emdash-prose-failclosed"; seed "$r"; mkdir -p "$r/docs/locked"
+  chmod 000 "$r/docs/locked"
+  fails_with "$r" "$em_dash_prose_err_msg" "arm 11's recursive prose scan must fail closed on an unreadable dir"
+  chmod u+rwx "$r/docs/locked"
+else
+  echo "  SKIP: running as root - cannot exercise arm 11's prose-scan fail-closed case"
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/emdash-self-failclosed"; seed "$r"; mkdir -p "$r/bin"
+  printf '#!/usr/bin/env bash\n# a plain note\n' > "$r/bin/check-patterns"
+  chmod 000 "$r/bin/check-patterns"
+  fails_with "$r" "$em_dash_self_err_msg" "arm 11's narrow self-scan of bin/check-patterns must fail closed on an unreadable file"
+  chmod u+rwx "$r/bin/check-patterns"
+else
+  echo "  SKIP: running as root - cannot exercise arm 11's self-scan fail-closed case"
+fi
+
+# --- a check-patterns-named file ELSEWHERE (not bin/check-patterns) stays
+# excluded from the RECURSIVE scan, same as every other arm ------------------
+# Arm 11 keeps `--exclude=check-patterns` on its recursive scan for UNIFORMITY
+# with the other arms and with tests/plugins_test.sh's own invariant (every
+# recursive grep line in this script self-excludes, no per-arm exceptions).
+# That exclusion is a basename match, so it also exempts a same-named file
+# OUTSIDE bin/ - lib/ here, deliberately not bin/check-patterns, which is the
+# ONE path the narrow self-scan below now covers on its own (see the next
+# fixture). This one is a self-exclude proof, not a violation case.
+r="$work/emdash-elsewhere"; seed "$r"; mkdir -p "$r/lib"
+printf '# a note %s trailing\n' "$em_dash" > "$r/lib/check-patterns"
+[ "$(run "$r")" = "0" ] && ok || fail "a file named check-patterns OUTSIDE bin/ must stay excluded from the em-dash arm's recursive scan"
+
+# --- an em dash literally in bin/check-patterns itself IS caught ------------
+# REGRESSION: the recursive scan's `--exclude=check-patterns` above means it
+# never sees this exact path, and nothing else in the repo checked it either -
+# measured before this fixture existed: appending an em dash to a scratch copy
+# of bin/check-patterns and running the real gate against it exited 0. The
+# narrow, non-recursive self-scan closes that gap.
+r="$work/emdash-self"; seed "$r"; mkdir -p "$r/bin"
+printf '#!/usr/bin/env bash\n# a note %s trailing\n' "$em_dash" > "$r/bin/check-patterns"
+fails_with "$r" "$em_dash_msg" "an em dash literally in bin/check-patterns must be caught by the narrow self-scan"
+
+# --- an em dash inside a pinned zsh plugin is exempt (third-party code) -----
+r="$work/emdash-plugins-exempt"; seed "$r"; mkdir -p "$r/zsh/plugins/some-plugin"
+printf '# note %s trailing\n' "$em_dash" > "$r/zsh/plugins/some-plugin/some-plugin.plugin.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "an em dash inside zsh/plugins/ must be exempt (third-party code)"
+
+# --- every non-${scan[@]} prose-surface member is covered - a silent rename --
+# must fail loudly. HARDCODED, deliberately independent of bin/check-patterns's
+# own `for p in ...` list (the same reasoning as the -- arm's dd fixtures
+# above): if a future edit renames or drops one of these 15 members from the
+# real `prose` array, this loop keeps asserting against the OLD list and the
+# corresponding case starts failing, rather than silently testing nothing.
+# Directory members get a nested probe file; file members get an em dash
+# written directly into them (safe: these are scratch fixture trees, never
+# the real repo).
+i=0
+for member in docs tests .github .claude Makefile REUSE.toml cliff.toml \
+    .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
+    SECURITY.md THIRD-PARTY-NOTICES.md README.md; do
+  i=$((i + 1)); r="$work/emdash-surface-$i"; seed "$r"
+  case "$member" in
+    docs | tests | .github | .claude)
+      mkdir -p "$r/$member"
+      printf 'a note %s trailing\n' "$em_dash" > "$r/$member/probe.txt"
+      ;;
+    *)
+      printf 'a note %s trailing\n' "$em_dash" > "$r/$member"
+      ;;
+  esac
+  fails_with "$r" "$em_dash_msg" "prose-surface member $i/15 ('$member') must be scanned for an em dash"
+done
 
 echo "PASS: check_patterns_test ($pass assertions)"
