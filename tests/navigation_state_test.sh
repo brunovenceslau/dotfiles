@@ -52,6 +52,13 @@ if [ -r "$fsyh" ]; then have_fsyh=1; else have_fsyh=0; fi
 # `[[ -o opt ]]` (a builtin test) rather than $options, and `zstyle -a` rather
 # than a grep - an `-e` style is EVALUATED on lookup, so a resolved-to-empty
 # list-colors reads as 0 here and a static grep would have missed it.
+# The f-sy-h lookups MUST be gated: with f-sy-h not loaded FAST_HIGHLIGHT_STYLES
+# is undeclared, so `[path]` is a NUMERIC subscript, zsh evaluates `path` as math
+# against $path (a scratch-HOME path) and the probe dies on "bad math
+# expression". zshrc guards the same constraint with `(( $+... ))`; this check
+# is deliberately STRICTER (the parameter must be an association), so a stray
+# scalar or array of that name reads as unloaded instead of misparsing - do not
+# weaken it to match zshrc.
 probe='
 o() { [[ -o $1 ]] && print -n "$1=on " || print -n "$1=off " }
 o autopushd; o pushdignoredups; o pushdsilent; o cdablevars
@@ -62,8 +69,12 @@ zstyle -a ":completion:*" completer _comp
 zstyle -a ":completion:*" matcher-list _ml
 print -n "listcolors=$#_lc approximate=${${_comp[(r)_approximate]}:+yes} matchers=$#_ml "
 print -n "lscolors=${#LS_COLORS} "
-print -n "pathstyle=${FAST_HIGHLIGHT_STYLES[path]:-none} "
-print -n "pathdirstyle=${FAST_HIGHLIGHT_STYLES[path-to-dir]:-none} "
+if [[ ${(t)FAST_HIGHLIGHT_STYLES} == association* ]]; then
+  print -n "pathstyle=${FAST_HIGHLIGHT_STYLES[path]:-none} "
+  print -n "pathdirstyle=${FAST_HIGHLIGHT_STYLES[path-to-dir]:-none} "
+else
+  print -n "pathstyle=unloaded pathdirstyle=unloaded "
+fi
 print -n "aliasd=$+aliases[d] alias1=$+aliases[1] aliaslt=$+aliases[lt] aliaslx=$+aliases[lx] "
 print "zoxide=$+functions[__navtest_zoxide_loaded]"
 '
@@ -85,6 +96,13 @@ run_probe() {
     XDG_CACHE_HOME="$scratch/cache" XDG_STATE_HOME="$scratch/state" \
     XDG_DATA_HOME="$scratch/data" ZDOTDIR="$scratch/config/zsh" TERM=dumb \
     zsh -i -c "$probe" 2>"$scratch/stderr"
+}
+
+# copy_root DEST - a full-repo copy for a mutated run. The .git is dropped: a
+# cp -a of .git is dead weight and can carry hooks.
+copy_root() {
+  cp -a "$repo_root" "$1"
+  rm -rf "$1/.git"
 }
 
 want() {  # want DESC LINE NEEDLE
@@ -133,15 +151,30 @@ if [ "$have_fsyh" = 1 ]; then
   want "f-sy-h path-to-dir style is underline as well" "$line" "pathdirstyle=underline"
 else
   echo "  SKIP: fast-syntax-highlighting submodule is uninitialized - path styles unmeasured"
+  want "the probe reports f-sy-h unloaded in this tree" "$line" "pathstyle=unloaded"
   [ -z "${STRICT:-}" ] || fail "f-sy-h submodule missing and STRICT set (path styles unmeasured)"
 fi
+
+# --- regression: the probe survives an f-sy-h that never loaded ---------------
+# The live probe reaches the unloaded path only when THIS tree's submodule is
+# uninitialized, so it MUST be staged here on every run: the plugin is emptied
+# in a copy, exactly what an uninitialized submodule looks like.
+nofsyh="$work/nofsyh-root"
+copy_root "$nofsyh"
+rm -rf "$nofsyh/zsh/plugins/fast-syntax-highlighting"
+mkdir "$nofsyh/zsh/plugins/fast-syntax-highlighting"
+nline="$(run_probe nofsyh "$nofsyh")" \
+  || fail "probe shell failed with f-sy-h unloaded: $(cat "$work/nofsyh/stderr")"
+[ -s "$work/nofsyh/cache/zsh/zcompdump" ] \
+  || fail "no-f-sy-h copy: its zshrc never ran (no compdump) - the probe measured a default shell"
+[ -s "$work/nofsyh/stderr" ] && fail "startup without f-sy-h wrote to stderr: $(cat "$work/nofsyh/stderr")"
+want "the probe reports f-sy-h unloaded instead of dying on it" "$nline" "pathstyle=unloaded"
 
 # --- can-fail proof: drop the zoxide source block, the probe MUST notice -------
 # Without this the suite could pass against a zshrc that never sources the cache,
 # which is precisely how the original defect shipped green.
 copy="$work/mutant-root"
-cp -a "$repo_root" "$copy"
-rm -rf "$copy/.git"      # a cp -a of .git is dead weight and can carry hooks
+copy_root "$copy"
 python3 - "$copy/zsh/zshrc" <<'PY'
 import io, sys
 p = sys.argv[1]
