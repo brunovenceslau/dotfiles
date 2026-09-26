@@ -313,6 +313,20 @@ r="$work/brew-gpg"; seed "$r"; mkdir -p "$r/config/gnupg"
 printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/gnupg/gpg-agent.conf"
 [ "$(run "$r")" = "0" ] && ok || fail "gpg-agent.conf's absolute pinentry path must pass (allowlisted)"
 
+# --- REGRESSION: the gpg-agent.conf exemption is ANCHORED to the EXACT scanned
+# path, never a bare suffix ---------------------------------------------------
+# An earlier version (`^([^:]*/)?config/gnupg/gpg-agent\.conf:`) exempted ANY
+# path ending in those segments, so a DECOY file at a different real path that
+# happens to end the same way (e.g. config/vendor/config/gnupg/gpg-agent.conf,
+# still inside the scanned config/ tree) was wrongly exempted too - fail-OPEN
+# (reproduced against the pre-fix pattern: exit 0, expected non-zero). The real
+# config/gnupg/gpg-agent.conf above must still pass; this fixture proves a
+# LOOK-ALIKE path elsewhere does not ride along on that exemption.
+r="$work/brew-gpg-decoy"; seed "$r"; mkdir -p "$r/config/vendor/config/gnupg" "$r/config/gnupg"
+printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/vendor/config/gnupg/gpg-agent.conf"
+printf 'pinentry-program /opt/homebrew/bin/pinentry-mac\n' > "$r/config/gnupg/gpg-agent.conf"
+[ "$(run "$r")" != "0" ] && ok || fail "a decoy config/vendor/config/gnupg/gpg-agent.conf (not the real allowlisted path) must still fail"
+
 # ASYMMETRIC by design: /usr/local alone is a generic FHS path with non-Homebrew uses
 # (zsh/zshenv's /usr/local/go/bin), so it is never flagged on its own.
 r="$work/usrlocal-alone"; seed "$r"; mkdir -p "$r/zsh"

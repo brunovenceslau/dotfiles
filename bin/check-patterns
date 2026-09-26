@@ -312,12 +312,16 @@ _re_escape() {
 # ALLOWLIST: config/gnupg/gpg-agent.conf, matched on the PATH field alone. gpg-agent.conf
 # has no include directive and no variable expansion, so its pinentry path MUST be
 # absolute and cannot be prefix-detected; that file's own header records how the Intel
-# mac overrides it.
+# mac overrides it. Anchored to the EXACT path this scan reads it at (`$root/config/
+# gnupg/gpg-agent.conf`, `_re_escape`d), never a substring or a bare suffix: either
+# would exempt a decoy file elsewhere ending in the same segments (e.g.
+# tests/config/gnupg/gpg-agent.conf) too - fail OPEN.
+_gpg_agent_path=$(_re_escape "$root/config/gnupg/gpg-agent.conf")
 if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns \
     -F '/opt/homebrew' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)' \
-    | grep -vE '^([^:]*/)?config/gnupg/gpg-agent\.conf:' || true)
+    | grep -vE "^${_gpg_agent_path}:[0-9]+:" || true)
   if [ -n "$viol" ]; then
     printf '%s\n' "$viol" >&2
     echo "check-patterns: hardcoded Homebrew prefix - '/opt/homebrew' with no '/usr/local' as the ADJACENT word; resolve the prefix by directory existence, and keep the arm64/Intel pair on one line" >&2
