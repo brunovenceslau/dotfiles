@@ -34,10 +34,10 @@ adapt it. It is a starting point you own, not a product you configure.
   programs you use or how they are configured.
 - **You are not on macOS.** `install.sh` and `lib/` target bash 3.2, the version
   macOS ships, and macOS is the only supported platform. No link rule or
-  install step branches on the OS, so run on Linux, the installer still
-  creates the links, but the package manifest, the Homebrew prefix detection
-  and the terminal configuration do not apply, and the CI matrix never
-  exercises it (`.github/workflows/ci.yml` covers only macOS runners).
+  install step branches on the OS. On Linux, the installer still creates the
+  links. The package manifest, the Homebrew prefix detection and the terminal
+  configuration do not apply there. CI covers only macOS runners
+  (`.github/workflows/ci.yml`).
 - **You want a stable configuration surface.** The public interface is not
   frozen. Subcommand names are kept for compatibility, but paths, variables and
   defaults can change between releases.
