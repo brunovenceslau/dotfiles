@@ -8,9 +8,11 @@
 # Unit tests for bin/check-patterns (static-pattern gate). Proves the
 # gate CATCHES a real curl|sh / wget|bash fetch, an ad-hoc `uname -m` outside
 # lib/os.sh, a hardcoded Homebrew prefix, a `brew shellenv` fork, bash 4 syntax
-# in the bash-3.2 surface and a `--` after a tool's first operand; PASSES a clean
-# tree, the sanctioned `uname -m` in lib/os.sh, and each of those literals where
-# it is legitimate;
+# in the bash-3.2 surface, a `--` after a tool's first operand, a symlink
+# where a recursive scan reads (on disk, always; tracked or an unpinned
+# submodule, repo-wide, in a real checkout), and its own fixtures'
+# git calls surviving a leaked GIT_DIR; PASSES a clean tree, the sanctioned
+# `uname -m` in lib/os.sh, and each of those literals where it is legitimate;
 # SKIPS an absent optional dir (the fail-open regression that made the old inline
 # recipe silently pass), FAILS CLOSED on a scan error, and refuses a no-op scan.
 # Fixture trees only; never the real repo. Not on the shellcheck surface.
@@ -24,9 +26,28 @@ pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { pass=$((pass + 1)); }
 
+# The leaked-GIT_DIR regression (arm 12 below) re-runs this file ONCE, at depth
+# 1. A broken guard there must abort here at depth 2, a red test, never an
+# unbounded chain of forks.
+_CPT_DEPTH="${_CPT_DEPTH:-0}"
+[ "$_CPT_DEPTH" -le 1 ] \
+  || fail "nested at depth $_CPT_DEPTH: the leaked-GIT_DIR regression's recursion guard is broken"
+
 work="$(mktemp -d "${TMPDIR:-/tmp}/check_patterns_test.XXXXXX")"
 # chmod back before rm: one case revokes read on a dir to force a scan error.
 trap 'chmod -R u+rwx "$work" 2>/dev/null || true; rm -rf "$work"' EXIT INT TERM
+
+# A leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would make every `git` call
+# below (this file's own fixtures, and check-patterns' git calls when it runs
+# against them) operate on THAT repository instead of the scratch tree it was
+# given. Strip git's own local env vars before anything else runs.
+if command -v git >/dev/null 2>&1; then
+  # shellcheck disable=SC2046  # word-splitting is the point: one name per word
+  unset $(git rev-parse --local-env-vars 2>/dev/null) 2>/dev/null || true
+fi
+# A ceiling so a fixture with no .git of its own is never mistaken for being
+# inside one - relevant only if $TMPDIR itself sits inside a git checkout.
+export GIT_CEILING_DIRECTORIES="$work"
 
 # run ROOT -> echo check-patterns' exit code (never aborts under set -e). Clears an
 # ambient STRICT so a "no STRICT" case is set by the CASE, not the environment: CI runs
@@ -870,5 +891,395 @@ for member in docs tests .github .claude Makefile REUSE.toml cliff.toml \
   esac
   fails_with "$r" "$em_dash_msg" "prose-surface member $i/15 ('$member') must be scanned for an em dash"
 done
+
+# === arm (12): a symlink where a recursive scan reads =========================
+# A symlink there hides its target from every recursive arm above (see
+# bin/check-patterns). ALWAYS: every symlink on disk over `prose`, the arm
+# (11) surface. ADDITIONALLY, when $root has a .git of its own: the whole
+# repository, tracked only, for a symlink outside `prose` and a gitlink that is
+# not a pinned plugin.
+sym_msg="check-patterns: a symlink where a recursive scan reads"
+sym_git_msg="check-patterns: a tracked symlink, or a gitlink that is not a pinned plugin"
+sym_git_err_msg="check-patterns: symlink scan (git ls-files, repo-wide) errored"
+sym_git_stderr_msg="check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr"
+sym_git_record_msg="check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record"
+sym_nogit_msg="check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH"
+sym_probe_msg="check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel"
+sym_top_msg="check-patterns: symlink scan (git, repo-wide) resolved a different toplevel"
+sym_find_err_msg="check-patterns: symlink scan (find) errored"
+
+# fails_only_with ROOT MESSAGE LABEL - fails_with, plus every `check-patterns:`
+# line but an informational SKIP must be MESSAGE: the non-zero exit cannot come
+# from another arm.
+fails_only_with() {
+  local rc=0 out line
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" != "0" ] || fail "$3: the gate passed"
+  case "$out" in
+    *"$2"*) ;;
+    *) fail "$3: expected the message '$2', got: $out" ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      "$2"* | "check-patterns: SKIP "*) ;;
+      check-patterns:*) fail "$3: another message fired too: $line" ;;
+    esac
+  done <<<"$out"
+  pass=$((pass + 1))
+}
+
+# _git_repo DIR - a minimal scratch git repo, gpgsign off, author fixed so the
+# fixture never depends on this machine's git config existing.
+_git_repo() {
+  mkdir -p "$1"
+  git init -q "$1"
+  git -C "$1" config user.email a@x
+  git -C "$1" config user.name a
+  git -C "$1" config commit.gpgsign false
+}
+
+# --- REGRESSION: a leaked GIT_DIR must not redirect this file's OWN
+# _git_repo/sym-git fixtures into whatever repository it points at. Re-runs
+# this whole file as a subprocess with GIT_DIR/GIT_WORK_TREE aimed at a
+# scratch sentinel repo under /tmp (never a real checkout) and asserts the
+# sentinel is unchanged afterward: HEAD, and the config and index a stray
+# `git config` or `git add` would write without committing. The copy runs at
+# _CPT_DEPTH=1, which skips this block and runs every other assertion.
+if [ "$_CPT_DEPTH" -eq 0 ]; then
+  sentinel="$work/leak-sentinel"; _git_repo "$sentinel"
+  printf 'baseline\n' > "$sentinel/f"; git -C "$sentinel" add -A
+  git -C "$sentinel" commit -qm baseline
+  head_before="$(git -C "$sentinel" rev-parse HEAD)"
+  config_before="$(cksum < "$sentinel/.git/config")"
+  index_before="$(cksum < "$sentinel/.git/index")"
+  leak_rc=0; leak_log="$work/leak-child.log"
+  _CPT_DEPTH=$((_CPT_DEPTH + 1)) GIT_DIR="$sentinel/.git" GIT_WORK_TREE="$sentinel" \
+    bash "$repo_root/tests/check_patterns_test.sh" > "$leak_log" 2>&1 || leak_rc=$?
+  if [ "$leak_rc" -ne 0 ]; then
+    cat "$leak_log" >&2
+    fail "this suite must still pass under a leaked GIT_DIR (rc $leak_rc, output above)"
+  fi
+  ok
+  [ "$head_before" = "$(git -C "$sentinel" rev-parse HEAD)" ] \
+    && ok || fail "a leaked GIT_DIR must not let a fixture commit into the sentinel repo"
+  [ "$config_before" = "$(cksum < "$sentinel/.git/config")" ] \
+    && ok || fail "a leaked GIT_DIR must not let a fixture write the sentinel repo's config"
+  [ "$index_before" = "$(cksum < "$sentinel/.git/index")" ] \
+    && ok || fail "a leaked GIT_DIR must not let a fixture write the sentinel repo's index"
+else
+  echo "  SKIP: nested run (_CPT_DEPTH=$_CPT_DEPTH) - the leaked-GIT_DIR regression runs at depth 0 only"
+fi
+
+# --- per-member parity: every prose member, planted with a symlink, is
+# caught by the always-on find pass. Same shape as the em dash loop above,
+# HARDCODED independent of check-patterns' own arrays - a silent rename or
+# drop must fail loudly here too. Non-git fixtures, so this exercises find
+# alone, never the repo-wide git pass.
+i=0
+for member in install.sh lib bin zsh config packages security home \
+    docs tests .github .claude Makefile REUSE.toml cliff.toml \
+    .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
+    SECURITY.md THIRD-PARTY-NOTICES.md README.md; do
+  i=$((i + 1)); r="$work/sym-surface-$i"; seed "$r"
+  case "$member" in
+    lib | bin | zsh | config | packages | security | home | docs | tests | .github | .claude)
+      mkdir -p "$r/$member"
+      ln -s ./nonexistent-target "$r/$member/evil-link"
+      ;;
+    *)
+      ln -s ./nonexistent-target "$r/$member"
+      ;;
+  esac
+  fails_with "$r" "$sym_msg" "surface member $i/23 ('$member') must be scanned for a symlink"
+done
+
+# --- an UNTRACKED symlink at a git toplevel is still caught (find is
+# always-on, regardless of git) ----------------------------------------------
+r="$work/sym-untracked-toplevel"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+ln -s ./nonexistent-target "$r/lib/evil-link"
+fails_with "$r" "$sym_msg" "an untracked symlink at a git toplevel must still fail the gate"
+
+# --- a TRACKED symlink OUTSIDE prose is caught by the repo-wide git pass,
+# which find alone (surface-scoped) cannot see -------------------------------
+r="$work/sym-git-outside"; _git_repo "$r"; seed "$r"; mkdir -p "$r/outside"
+git -C "$r" add -A && git -C "$r" commit -qm init
+ln -s ../target "$r/outside/evil-link"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm "add symlink outside prose"
+fails_with "$r" "$sym_git_msg" "a tracked symlink OUTSIDE prose must fail via the repo-wide git pass"
+
+# --- case-sensitivity: pathspec matching plays no part any more (the git
+# pass takes none), so a tracked symlink under a differently-cased path is
+# still caught -----------------------------------------------------------
+r="$work/sym-case"; _git_repo "$r"; seed "$r"; mkdir -p "$r/Config"
+git -C "$r" add -A && git -C "$r" commit -qm init
+ln -s ../target "$r/Config/p.sh"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm "add case-mismatched symlink"
+fails_with "$r" "$sym_git_msg" "a tracked symlink under a differently-cased path must still fail"
+
+# --- an UNPINNED submodule (mode 160000, not in .gitmodules) is caught ------
+r="$work/sym-rogue-submodule"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,lib/rogue-submodule
+git -C "$r" commit -qm "add unpinned submodule"
+fails_with "$r" "$sym_git_msg" "a submodule gitlink not pinned in .gitmodules must fail the gate"
+
+# --- a PINNED submodule (mode 160000, matching .gitmodules) is NOT flagged --
+r="$work/sym-pinned-submodule"; _git_repo "$r"; seed "$r"
+cat > "$r/.gitmodules" <<'EOF'
+[submodule "zsh/plugins/fake-plugin"]
+	path = zsh/plugins/fake-plugin
+	url = https://example.invalid/fake-plugin.git
+EOF
+mkdir -p "$r/zsh/plugins"
+git -C "$r" add -A && git -C "$r" commit -qm init
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,zsh/plugins/fake-plugin
+git -C "$r" commit -qm "add pinned submodule"
+[ "$(run "$r")" = "0" ] && ok || fail "a submodule gitlink matching .gitmodules must not be flagged"
+
+# --- an UNTRACKED symlink under the excluded zsh/plugins/ path is not
+# flagged by either pass: find prunes the exact path, and it is not tracked -
+r="$work/sym-plugins-exempt"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins"
+git -C "$r" add -A && git -C "$r" commit -qm init
+ln -s ./nonexistent-target "$r/zsh/plugins/evil-link"
+[ "$(run "$r")" = "0" ] && ok || fail "an untracked symlink under zsh/plugins/ must not be flagged"
+
+# --- REGRESSION: $root a subdirectory of a LARGER repo must not make the
+# git pass scan the PARENT's whole tree - a tracked symlink outside $root
+# (but inside the parent) must not surface, while one INSIDE $root (find's
+# job, unconditional) still must ---------------------------------------------
+parent="$work/sym-parent"; _git_repo "$parent"
+mkdir -p "$parent/subproj/lib"; printf 'noop() { : ; }\n' > "$parent/subproj/lib/os.sh"
+printf 'x\n' > "$parent/subproj/install.sh"
+mkdir -p "$parent/elsewhere"
+ln -s ../outside-target "$parent/elsewhere/evil-link"
+printf 'x\n' > "$parent/outside-target"
+git -C "$parent" add -A && git -C "$parent" commit -qm init
+[ "$(run "$parent/subproj")" = "0" ] \
+  && ok || fail "root as a subdir of a larger repo must not scan the parent's whole tree"
+ln -s ./nonexistent-target "$parent/subproj/lib/evil-link"
+fails_with "$parent/subproj" "$sym_msg" "a symlink INSIDE a subdir root must still be caught by find"
+
+# --- STEERING: a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE at
+# check-patterns' OWN invocation must not redirect its scan away from $root -
+# sentinel is scratch, under /tmp, never a real checkout ---------------------
+steer_sentinel="$work/steer-sentinel"; _git_repo "$steer_sentinel"
+printf 'x\n' > "$steer_sentinel/f"; git -C "$steer_sentinel" add -A
+git -C "$steer_sentinel" commit -qm sentinel
+r="$work/sym-steer-target"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+ln -s ./nonexistent-target "$r/lib/evil-link"
+steer_rc=0
+GIT_DIR="$steer_sentinel/.git" GIT_WORK_TREE="$steer_sentinel" \
+  GIT_INDEX_FILE="/nonexistent/index" \
+  STRICT= "$cp" "$r" >/dev/null 2>&1 || steer_rc=$?
+[ "$steer_rc" != "0" ] \
+  && ok || fail "a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE must not steer check-patterns away from a real violation in \$root"
+
+# --- FAIL CLOSED: an unreadable dir in the surface fails the find pass.
+# `chmod 000` is bypassed by root (DAC_OVERRIDE) - see the general fail-closed
+# case above for what was tried instead. The dir sits under lib/plugins/,
+# which every grep arm skips (--exclude-dir=plugins) but find does not, so
+# arm 12 is the ONLY arm that errors: fails_only_with then proves the non-zero
+# exit is arm 12's own bad=1, not another arm's. ------------------------------
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/sym-find-failclosed"; seed "$r"; mkdir -p "$r/lib/plugins/locked"
+  chmod 000 "$r/lib/plugins/locked"
+  fails_only_with "$r" "$sym_find_err_msg" "an unreadable dir in the surface must fail closed the symlink scan too"
+  chmod u+rwx "$r/lib/plugins/locked"
+else
+  echo "  SKIP: running as root - cannot exercise arm 12's find-branch fail-closed case"
+fi
+
+# --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
+# silent pass ("no symlinks") -------------------------------------------------
+r="$work/sym-git-failclosed"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+printf 'garbage, not a git index\n' > "$r/.git/index"
+fails_with "$r" "$sym_git_err_msg" "a corrupted git index must fail closed, not silently pass"
+
+# --- a malformed .git at $root fails CLOSED, never a silent skip of the git
+# pass: a corrupt HEAD makes the toplevel probe error, and a tracked symlink
+# outside `prose` (find cannot see it) must not ride through -----------------
+r="$work/sym-probe-corrupt-head"; _git_repo "$r"; seed "$r"
+ln -s ./target "$r/outside-link"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm init
+printf 'garbage, not a ref\n' > "$r/.git/HEAD"
+fails_with "$r" "$sym_probe_msg" "a .git whose toplevel probe errors must fail closed, not skip the git pass"
+
+# --- a .git at $root whose core.worktree points elsewhere resolves a
+# different toplevel: fail closed, never scan the other tree -----------------
+r="$work/sym-probe-worktree"; _git_repo "$r"; seed "$r"
+ln -s ./target "$r/outside-link"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm init
+mkdir -p "$work/sym-probe-worktree-elsewhere"
+git -C "$r" config core.worktree "$work/sym-probe-worktree-elsewhere"
+fails_only_with "$r" "$sym_top_msg" "a .git whose core.worktree points away from \$root must fail closed"
+
+# --- a .git at $root with git absent from PATH fails CLOSED -----------------
+# PATH is an explicit allowlist: every external tool bin/check-patterns runs
+# (bash for its shebang via env), resolved from the real PATH, and never git.
+# A new tool there makes it print "command not found", failed below.
+nogit_bin="$work/nogit-bin"; mkdir -p "$nogit_bin"
+for t in bash env grep sed find mktemp cat sort rm; do
+  # type -P: a PATH file only, never a builtin, function or alias of that name.
+  t_path="$(type -P "$t" || true)"
+  [ -n "$t_path" ] || fail "the git-less PATH fixture needs '$t', which is not on PATH"
+  ln -s "$t_path" "$nogit_bin/$t"
+done
+# A FRESH shell: in-process, `PATH=x command -v git` can be answered from
+# this shell's hash of the git it already ran (seen on macOS's bash 3.2).
+if nogit_git="$(PATH="$nogit_bin" "$nogit_bin/bash" -c 'command -v git')"; then
+  {
+    echo "  git-less PATH: $nogit_bin -> git resolves as '$nogit_git'"
+    PATH="$nogit_bin" "$nogit_bin/bash" -c 'type -a git' 2>&1
+    ls -la "$nogit_bin"
+  } >&2
+  fail "the git-less PATH fixture still resolves git"
+fi
+r="$work/sym-nogit"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+nogit_rc=0
+nogit_out="$(PATH="$nogit_bin" STRICT= "$cp" "$r" 2>&1)" || nogit_rc=$?
+[ "$nogit_rc" != "0" ] || fail "a .git at root with git absent from PATH must fail closed (rc 0)"
+case "$nogit_out" in
+  *"command not found"*) fail "the git-less PATH fixture lacks a tool bin/check-patterns runs: $nogit_out" ;;
+esac
+case "$nogit_out" in
+  *"$sym_nogit_msg"*) ok ;;
+  *) fail "a .git at root with git absent from PATH: expected '$sym_nogit_msg', got: $nogit_out" ;;
+esac
+
+# --- GIT_TRACE / GIT_TRACE2 on stderr (not local env vars, so not stripped)
+# must not corrupt the first NUL record: a first-sorting tracked symlink
+# outside `prose` ('!a-link' sorts before every letter and '.') -------------
+r="$work/sym-git-trace"; _git_repo "$r"; seed "$r"
+ln -s ./target "$r/!a-link"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm init
+for tv in GIT_TRACE GIT_TRACE2; do
+  trace_rc=0
+  trace_out="$(env "$tv=1" STRICT= "$cp" "$r" 2>&1)" || trace_rc=$?
+  [ "$trace_rc" != "0" ] || fail "$tv=1 must not hide a first-sorting tracked symlink (rc 0)"
+  case "$trace_out" in
+    *"$sym_git_stderr_msg"*) ok ;;
+    *) fail "$tv=1: expected '$sym_git_stderr_msg', got: $trace_out" ;;
+  esac
+done
+# the same trace aimed at stdout lands in the probe's and the listing's
+# output: whichever branch sees it first must fail closed
+for tv in GIT_TRACE GIT_TRACE2; do
+  trace_rc=0
+  trace_out="$(env "$tv=/dev/stdout" STRICT= "$cp" "$r" 2>&1)" || trace_rc=$?
+  [ "$trace_rc" != "0" ] || fail "$tv=/dev/stdout must not hide a first-sorting tracked symlink (rc 0)"
+  case "$trace_out" in
+    *"- failing closed"*) ok ;;
+    *) fail "$tv=/dev/stdout: expected a fail-closed message, got: $trace_out" ;;
+  esac
+done
+# a listing record that is not '<mode> <oid> <stage><TAB><path>' fails closed
+# rather than being skipped: a git wrapper on PATH corrupts ONLY the ls-files
+# output (the probe stays clean), prepended to the first record or appended
+# as an unterminated last one
+real_git="$(command -v git)"
+for how in prepend append; do
+  shim="$work/git-shim-$how"; mkdir -p "$shim"
+  {
+    printf '#!/bin/sh\n'
+    printf 'case " $* " in *" ls-files "*) ;; *) exec "%s" "$@" ;; esac\n' "$real_git"
+    [ "$how" = prepend ] && printf "printf 'noise'\n"
+    printf '"%s" "$@" || exit $?\n' "$real_git"
+    [ "$how" = append ] && printf "printf 'noise'\n"
+    printf 'exit 0\n'
+  } > "$shim/git"
+  chmod u+x "$shim/git"
+  rec_rc=0
+  rec_out="$(PATH="$shim:$PATH" STRICT= "$cp" "$r" 2>&1)" || rec_rc=$?
+  [ "$rec_rc" != "0" ] || fail "a malformed ($how) listing record must fail closed (rc 0)"
+  case "$rec_out" in
+    *"$sym_git_record_msg"*) ok ;;
+    *) fail "a malformed ($how) listing record: expected '$sym_git_record_msg', got: $rec_out" ;;
+  esac
+done
+
+# --- the git pass ALONE, under a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE:
+# the tracked symlink is gone from disk (find is clean), so only the git pass
+# can see it, and only if it scans $root rather than the sentinel ------------
+r="$work/sym-git-only-steer"; _git_repo "$r"; seed "$r"
+ln -s ./target "$r/lib/evil-link"; printf 'x\n' > "$r/target"
+git -C "$r" add -A && git -C "$r" commit -qm init
+rm "$r/lib/evil-link"
+GIT_DIR="$steer_sentinel/.git" GIT_WORK_TREE="$steer_sentinel" \
+  GIT_INDEX_FILE="$steer_sentinel/.git/index" \
+  fails_only_with "$r" "$sym_git_msg" "a tracked symlink absent from disk must fail via the git pass under a leaked GIT_DIR"
+
+# --- an existing, non-empty .gitmodules does not pin EVERY gitlink ----------
+r="$work/sym-rogue-beside-pinned"; _git_repo "$r"; seed "$r"
+cat > "$r/.gitmodules" <<'GM'
+[submodule "zsh/plugins/fake-plugin"]
+	path = zsh/plugins/fake-plugin
+	url = https://example.invalid/fake-plugin.git
+GM
+git -C "$r" add -A && git -C "$r" commit -qm init
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,zsh/plugins/fake-plugin
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,lib/rogue
+git -C "$r" commit -qm "pinned plus rogue"
+fails_only_with "$r" "$sym_git_msg" "a rogue gitlink beside a pinned one must fail"
+
+# --- only submodule.<name>.path pins, and only a direct child of zsh/plugins/
+i=0
+for gm in 'evil|lib/evil|[evil]' \
+    'evil|zsh/plugins/evil|[evil]' \
+    'submodule|zsh/plugins/bare|[submodule]' \
+    'submodule "lib/x"|lib/x|[submodule "lib/x"]' \
+    'submodule "zsh/plugins/a/b"|zsh/plugins/a/b|[submodule "zsh/plugins/a/b"]' \
+    'submodule "zsh/plugins"|zsh/plugins|[submodule "zsh/plugins"]'; do
+  i=$((i + 1))
+  gm_rest="${gm#*|}"; gm_path="${gm_rest%%|*}"; gm_head="${gm_rest#*|}"
+  r="$work/sym-gitmodules-$i"; _git_repo "$r"; seed "$r"
+  printf '%s\n\tpath = %s\n\turl = https://example.invalid/x.git\n' \
+    "$gm_head" "$gm_path" > "$r/.gitmodules"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  git -C "$r" update-index --add --cacheinfo \
+    "160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,$gm_path"
+  git -C "$r" commit -qm "gitlink $gm_path"
+  fails_only_with "$r" "$sym_git_msg" "gitlink '$gm_path' declared as '$gm_head' must not count as a pinned plugin"
+done
+
+# --- zsh/plugins ITSELF a symlink is reported, not pruned (no .git: find) --
+r="$work/sym-plugins-is-link"; seed "$r"; mkdir -p "$r/zsh" "$r/elsewhere"
+ln -s ../elsewhere "$r/zsh/plugins"
+fails_only_with "$r" "$sym_msg" "zsh/plugins itself a symlink must be reported, not pruned"
+
+# --- the prune is the ONE exact zsh/plugins path: a `plugins` dir anywhere
+# else is still walked (no .git: find alone) ---------------------------------
+for pdir in lib/plugins docs/plugins zsh/sub/plugins; do
+  r="$work/sym-other-plugins-$(printf '%s' "$pdir" | tr '/' '-')"; seed "$r"
+  mkdir -p "$r/$pdir"; ln -s ./nonexistent-target "$r/$pdir/evil-link"
+  fails_only_with "$r" "$sym_msg" "a symlink under $pdir (not the pinned zsh/plugins) must be caught"
+done
+
+# --- a glob character in $root must not break the literal zsh/plugins prune
+# (find -path takes a pattern; `*` and `?` still match themselves, a bracket
+# expression does not) ------------------------------------------------------
+r="$work/glob[x]"; seed "$r"; mkdir -p "$r/zsh/plugins"
+ln -s ./nonexistent-target "$r/zsh/plugins/evil-link"
+[ "$(run "$r")" = "0" ] && ok \
+  || fail "a root named 'glob[x]': the pinned zsh/plugins path must still be pruned"
+
+# --- the git pass's report carries no blank line -----------------------------
+r="$work/sym-git-outside"
+blank_out="$(STRICT= "$cp" "$r" 2>&1)" || true
+case "$blank_out" in
+  *"$sym_git_msg"*) ;;
+  *) fail "the git-pass report fixture no longer fires: $blank_out" ;;
+esac
+case "$blank_out" in
+  *$'\n\n'*) fail "the git pass's report must carry no blank line: $blank_out" ;;
+  *) ok ;;
+esac
 
 echo "PASS: check_patterns_test ($pass assertions)"
