@@ -462,7 +462,8 @@ workflow, which checks out the full history, installs a version-pinned and
 sha256-verified `git-cliff`, renders the notes for the commits since the
 previous tag (the whole history for the first tag) through
 [`cliff.toml`](../cliff.toml), and publishes the release with
-`gh release create --verify-tag`. Nothing on the success path is manual.
+`gh release create --verify-tag`, titled `dotfiles vX.Y.Z`. Nothing on the
+success path is manual.
 
 Check the merge commit before you push. A tag that is already published is not
 something to take back quietly.
