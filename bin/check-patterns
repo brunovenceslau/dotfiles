@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Eleven checks across our OWN runtime surface
+#   `make lint` includes. Twelve checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
 #   we police our code, not upstream's):
 #     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
@@ -60,6 +60,11 @@
 #         is prose too, the same reasoning arms 1-2 use for curl|sh and
 #         uname -m. Vendored legal text and one auto-generated lockfile are
 #         allowlisted; see the arm itself.
+#    (12) a symlink anywhere the arms above read, plus (when ROOT has its
+#         own .git) any tracked symlink, or gitlink that is not a pinned
+#         plugin, anywhere in the repo - a recursive scan never follows a symlink it meets while walking a
+#         directory, so one there hides its target from every arm that walks
+#         past it. See the arm itself for the two passes and why both run.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -89,7 +94,10 @@ root="${1:-.}"
 want=(install.sh lib bin zsh config packages security home)
 scan=()
 for p in "${want[@]}"; do
-  [ -e "$root/$p" ] && scan+=("$root/$p")
+  # -e alone misses a DANGLING symlink (it stats the target, not the link
+  # itself), silently dropping the whole entry from every arm below,
+  # arm (12) included; -L catches it too.
+  { [ -e "$root/$p" ] || [ -L "$root/$p" ]; } && scan+=("$root/$p")
 done
 if [ "${#scan[@]}" -eq 0 ]; then
   echo "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan" >&2
@@ -725,7 +733,7 @@ prose=("${scan[@]}")
 for p in docs tests .github .claude Makefile REUSE.toml cliff.toml \
     .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
     SECURITY.md THIRD-PARTY-NOTICES.md README.md; do
-  [ -e "$root/$p" ] && prose+=("$root/$p")
+  { [ -e "$root/$p" ] || [ -L "$root/$p" ]; } && prose+=("$root/$p")
 done
 _lazy_lock_path=$(_re_escape "$root/config/nvim/lazy-lock.json")
 if out=$(LC_ALL=C grep -rHIn --exclude-dir=plugins --exclude=check-patterns \
@@ -768,6 +776,181 @@ if [ -f "$self_cp" ]; then
       echo "check-patterns: check-patterns self-scan errored (exit $rc) - failing closed" >&2
       bad=1
     fi
+  fi
+fi
+
+# (12) forbid a symlink where a recursive scan reads, plus (when `$root` has a
+# .git of its own) a tracked symlink or a non-plugin gitlink anywhere in the
+# repo. A recursive scan never follows a symlink it meets while walking a
+# directory, so one there hides its target from every arm that walks past it.
+#
+# SURFACE: `prose`, arm (11)'s own surface (the widest above) - a single
+# source, not a fourth hand-kept list. `zsh/plugins` excluded by its one
+# real path, not by name at any depth: those pinned submodules are
+# third-party, and widening the exclusion for every arm is a separate change.
+#
+# ALWAYS: `find -type l` over that surface - what a recursive scan actually
+# reads, tracked or not.
+#
+# ADDITIONALLY, when `$root/.git` exists: the WHOLE repository, tracked only,
+# for what `find` cannot see - a tracked symlink outside `prose`, or a gitlink
+# (mode 160000) that is not a pinned plugin. See `_git_symlink_pass`.
+#
+# FAILS CLOSED on any error from either pass, and when `$root/.git` exists but
+# the git pass cannot run or resolve `$root` as its toplevel.
+
+# find -path takes a pattern (fnmatch, backslash escapes on, on GNU and BSD
+# find alike): escape $root's glob characters so the prune matches the one
+# literal path.
+_glob_escape() {
+  printf '%s' "$1" | sed -e 's/[][*?\]/\\&/g'
+}
+plugins_glob=$(_glob_escape "$root/zsh/plugins")
+# `! -type l`: zsh/plugins ITSELF a symlink is reported below, never pruned.
+if out=$(find "${prose[@]}" \( -path "$plugins_glob" ! -type l \) -prune -o -type l -print 2>&1); then
+  viol="$out"
+else
+  rc=$?
+  printf '%s\n' "$out" >&2
+  echo "check-patterns: symlink scan (find) errored (exit $rc) - failing closed" >&2
+  bad=1
+  viol=""
+fi
+if [ -n "$viol" ]; then
+  printf '%s\n' "$viol" >&2
+  echo "check-patterns: a symlink where a recursive scan reads - its target is never scanned; remove it or replace it with the real file" >&2
+  bad=1
+fi
+
+# _git_symlink_pass - the repo-wide git pass; non-zero on a violation or any
+# error. A subshell, so its EXIT trap removes the scratch dir on every path.
+# Every status is checked by hand: the caller's `!` suspends `set -e` here.
+#
+# Every git call goes through `_git_clean`, which strips git's own local env
+# vars first, so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE cannot steer the
+# probe or the listing at a different repository. Other ambient git env (the
+# GIT_TRACE family) cannot be enumerated, so stderr is kept apart from the
+# NUL-delimited listing and any stderr output fails closed.
+_git_symlink_pass() (
+  git_unset=()
+  while IFS= read -r v; do
+    [ -n "$v" ] && git_unset+=("$v")
+  done <<<"$(git rev-parse --local-env-vars 2>/dev/null)"
+  _git_clean() {
+    local -a e=()
+    local v
+    if [ "${#git_unset[@]}" -gt 0 ]; then
+      for v in "${git_unset[@]}"; do
+        e+=(-u "$v")
+      done
+    fi
+    env ${e[@]+"${e[@]}"} git "$@"
+  }
+
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns-sym.XXXXXX" 2>/dev/null) || {
+    echo "check-patterns: could not create a scratch dir for the repo-wide symlink scan - failing closed" >&2
+    exit 1
+  }
+  trap 'rm -rf "$tmpd"' EXIT
+
+  if ! top=$(_git_clean -C "$root" rev-parse --show-toplevel 2>"$tmpd/probe.err"); then
+    cat "$tmpd/probe.err" >&2
+    echo "check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel of '$root' - failing closed" >&2
+    exit 1
+  fi
+  # -ef compares device and inode, so a case-variant or symlinked spelling of
+  # $root (macOS) still matches. A core.worktree or gitfile can point the work
+  # tree away from $root even when $root/.git exists.
+  if ! [ "$top" -ef "$root" ]; then
+    echo "check-patterns: symlink scan (git, repo-wide) resolved a different toplevel ('$top') for '$root' - failing closed" >&2
+    exit 1
+  fi
+
+  # A pinned plugin is a `submodule.<name>.path` in .gitmodules AND a direct
+  # child of zsh/plugins/ - read from .gitmodules, not a hand-kept list. Any
+  # other `*.path` key, or a gitlink elsewhere, is not a pin.
+  pinned=()
+  if [ -f "$root/.gitmodules" ]; then
+    gm_rc=0
+    _git_clean config -f "$root/.gitmodules" --get-regexp '^submodule\..*\.path$' \
+      >"$tmpd/gm" 2>"$tmpd/gm.err" || gm_rc=$?
+    # exit 1 = no such key, an empty pin set; anything higher is an error.
+    if [ "$gm_rc" -gt 1 ]; then
+      cat "$tmpd/gm.err" >&2
+      echo "check-patterns: symlink scan (git, repo-wide) could not read .gitmodules (exit $gm_rc) - failing closed" >&2
+      exit 1
+    fi
+    while read -r _gm_key gm_path; do
+      case "$gm_path" in
+        zsh/plugins/*/*) ;;
+        zsh/plugins/?*) pinned+=("$gm_path") ;;
+      esac
+    done <"$tmpd/gm"
+  fi
+
+  ls_rc=0
+  _git_clean -C "$root" ls-files -s -z >"$tmpd/list" 2>"$tmpd/ls.err" || ls_rc=$?
+  if [ "$ls_rc" -ne 0 ]; then
+    cat "$tmpd/ls.err" >&2
+    echo "check-patterns: symlink scan (git ls-files, repo-wide) errored (exit $ls_rc) - failing closed" >&2
+    exit 1
+  fi
+  # ls-files' own stderr file: a traced probe above writes to stderr too.
+  if [ -s "$tmpd/ls.err" ]; then
+    cat "$tmpd/ls.err" >&2
+    echo "check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr (a GIT_TRACE* variable?) - failing closed" >&2
+    exit 1
+  fi
+
+  # `<mode> <oid> <stage><TAB><path>`, sha1 or sha256 oid. Anything else (a
+  # trace aimed at stdout, say) fails closed rather than being skipped.
+  rec_re=$'^[0-7]{6} [0-9a-f]{40,64} [0-3]\t.'
+  git_viol=""
+  entry=""
+  while IFS= read -r -d '' entry; do
+    if ! [[ $entry =~ $rec_re ]]; then
+      echo "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed" >&2
+      exit 1
+    fi
+    mode="${entry%% *}"
+    gpath="${entry#*$'\t'}"
+    case "$mode" in
+      120000)
+        git_viol="$git_viol$root/$gpath"$'\n'
+        ;;
+      160000)
+        allowed=0
+        if [ "${#pinned[@]}" -gt 0 ]; then
+          for a in "${pinned[@]}"; do
+            [ "$gpath" = "$a" ] && { allowed=1; break; }
+          done
+        fi
+        [ "$allowed" -eq 1 ] \
+          || git_viol="$git_viol$root/$gpath (gitlink, not a pinned plugin)"$'\n'
+        ;;
+    esac
+    entry=""
+  done <"$tmpd/list"
+  # read returns non-zero on a trailing record with no NUL terminator.
+  if [ -n "$entry" ]; then
+    echo "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed" >&2
+    exit 1
+  fi
+
+  if [ -n "$git_viol" ]; then
+    printf '%s' "$git_viol" >&2
+    echo "check-patterns: a tracked symlink, or a gitlink that is not a pinned plugin - remove it; a plugin is pinned as submodule.<name>.path = zsh/plugins/<name> in .gitmodules" >&2
+    exit 1
+  fi
+  exit 0
+)
+
+if [ -e "$root/.git" ] || [ -L "$root/.git" ]; then
+  if ! command -v git >/dev/null 2>&1; then
+    echo "check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH, yet '$root/.git' exists - failing closed" >&2
+    bad=1
+  elif ! _git_symlink_pass; then
+    bad=1
   fi
 fi
 

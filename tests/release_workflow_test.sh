@@ -299,10 +299,23 @@ self="$repo_root/tests/release_workflow_test.sh"
 # PROSE mention of the same string (e.g. this very fail() message below).
 grep -Eq "^if command -v python3.*python3 -I -c 'import yaml'" "$self" \
   || fail "wiring: the PyYAML availability probe must run python3 with -I when importing yaml"
-isolated_calls=$(grep -cE 'python3 -I "\$check_py"|python3 -I "\$shadow_dir/release_workflow_check\.py"' "$self")
+# Comment lines are stripped FIRST, as the NEGATIVE check below already
+# does: a comment quoting an isolated call site would otherwise count toward
+# the 9 and mask a reverted real site. A whole-line comment only - a
+# tripwire against the shape below, not an adversarial-comment parser.
+match='python3 -I "\$check_py"|python3 -I "\$shadow_dir/release_workflow_check\.py"'
+isolated_calls_raw=$(grep -cE "$match" "$self")
+isolated_calls=$(grep -vE '^[[:space:]]*#' "$self" \
+  | { grep -cE "$match" || true; })
 [ "$isolated_calls" -eq 9 ] \
   || fail "wiring: expected exactly 9 isolated (-I) invocations of release_workflow_check.py, found $isolated_calls"
 ok "the PyYAML probe and every real release_workflow_check.py invocation pass -I"
+[ "$((isolated_calls_raw - isolated_calls))" -ge 1 ] \
+  || fail "wiring: the sentinel comment below must inflate the unfiltered count by at least 1, or this fixture proves nothing"
+ok "the sentinel comment measurably inflates the unfiltered count"
+
+# This comment deliberately quotes python3 -I "$check_py"; without the
+# pre-filter above the count reads 10 and the assertion above fails.
 
 # --- NEGATIVE: no CODE line may call release_workflow_check.py via $check_py
 # without -I. Comment lines are stripped FIRST (`grep -v '^[[:space:]]*#'`) and
