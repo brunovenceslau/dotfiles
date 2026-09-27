@@ -104,16 +104,21 @@ neutralize_ln="$(line_of 'export FAST_WORK_DIR')"
 
 # --- Gate scoping: pinned plugins excluded from the static-pattern checks ------
 # The check-patterns logic lives in bin/check-patterns (a thin make target invokes
-# it). EVERY recursive scan there MUST exclude the zsh plugin submodules (we police
-# our own code, not upstream's) AND self-exclude the checker, which necessarily
-# spells out the forbidden literals in its own patterns/docs.
+# it). EVERY recursive scan there MUST self-exclude the checker, which necessarily
+# spells out the forbidden literals in its own patterns/docs, and NONE may carry
+# `--exclude-dir`: GNU and BSD grep match it against a base name at any depth,
+# so `--exclude-dir=plugins` hid first-party trees such as
+# config/nvim/lua/plugins/ along with the pinned zsh/plugins. The pinned plugins
+# leave the scan by their exact path instead, in check-patterns' _scan_roots;
+# tests/check_patterns_test.sh proves that per arm, both ways (the pinned path
+# exempt, every other `plugins` directory scanned).
 #
 # Tied to the NUMBER of recursive scans, never to a fixed count: a hardcoded 2 fails
 # the moment a correctly-scoped arm is added, which teaches the next author to bump
-# the number instead of reading the invariant. What must hold is one exclusion pair
-# PER recursive scan. Both flags sit on the recursive grep's own line, so counting
-# lines is the same test. The floor keeps this from passing vacuously if the
-# recursive scans ever disappear.
+# the number instead of reading the invariant. What must hold is one self-exclude
+# PER recursive scan, and it sits on the recursive grep's own line (or the array
+# that line expands), so counting lines is the same test. The floor keeps this
+# from passing vacuously if the recursive scans ever disappear.
 #
 # The scan is matched by SHAPE, not by one literal spelling: `-rn`, `-nr`, `-Irn`,
 # `-RIn` and `--recursive` all count. Keying on `grep -rI` alone would let an unscoped
@@ -126,11 +131,18 @@ code="$(sed -E 's/(^|[[:space:];&|()])#.*$/\1/' "$cp")"
 n_rec="$(printf '%s\n' "$code" | grep -cE 'grep[[:space:]]+-([A-Za-z]*[rR]|-recursive)' || true)"
 [ "$n_rec" -ge 2 ] \
   || fail "bin/check-patterns must keep at least its two original recursive scans (found $n_rec)"
-n_ex="$(printf '%s\n' "$code" | grep -c -- '--exclude-dir=plugins' || true)"
-[ "$n_ex" -eq "$n_rec" ] \
-  || fail "bin/check-patterns must carry --exclude-dir=plugins on every recursive grep line ($n_rec scans, $n_ex exclusions)"
+n_exdir="$(printf '%s\n' "$code" | grep -c -- '--exclude-dir' || true)"
+[ "$n_exdir" -eq 0 ] \
+  || fail "bin/check-patterns must not use --exclude-dir (a base-name exclusion hides first-party dirs; found $n_exdir)"
 n_self="$(printf '%s\n' "$code" | grep -c -- '--exclude=check-patterns' || true)"
 [ "$n_self" -eq "$n_rec" ] \
   || fail "bin/check-patterns must self-exclude via --exclude=check-patterns on every recursive grep line ($n_rec scans, $n_self self-excludes)"
+# The one exact-path exclusion must still exist: each recursive arm's surface
+# comes from _scan_roots, so losing this line would put the pinned plugins
+# back in scope. A textual check; the behaviour is check_patterns_test's.
+# It pins the exact spelling of that line: a refactor of _scan_roots that
+# rewrites it MUST update this pattern in the same commit.
+grep -qF '[ "$e" = "$root/zsh/plugins" ]' <<<"$code" \
+  || fail "bin/check-patterns: _scan_roots no longer leaves out the exact \$root/zsh/plugins path"
 
 echo "PASS: plugins_test"

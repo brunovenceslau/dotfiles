@@ -34,6 +34,7 @@ this page no longer exists in the code.
 | `packages: Homebrew is not installed` | [Packages will not install](#packages-will-not-install) |
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
+| `make lint` fails with `check-patterns: an entry under zsh/plugins/ that is not a pinned plugin` | [check-patterns rejects a file under zsh/plugins](#check-patterns-rejects-a-file-under-zshplugins) |
 
 ## Degraded shell
 
@@ -555,3 +556,24 @@ Ghostty's `ssh-terminfo` feature does this automatically. The zshrc arms it by
 appending `ssh-env,ssh-terminfo` to `$GHOSTTY_SHELL_FEATURES`, which is necessary
 because the tracked Ghostty config sets `shell-integration = none` and Ghostty
 then ignores its own `shell-integration-features` line.
+
+## check-patterns rejects a file under zsh/plugins
+
+```
+<path>/zsh/plugins/.DS_Store
+check-patterns: an entry under zsh/plugins/ that is not a pinned plugin - no arm scans zsh/plugins/; move it out, or pin it as submodule.<name>.path = zsh/plugins/<name> in .gitmodules
+```
+
+`bin/check-patterns` exits 1 with this message, so `make lint` or `make check-patterns` fails (make reports `Error 1`).
+
+**Cause.** No check reads `zsh/plugins/`, because the pinned plugins there are
+third-party code. So anything in it other than a pinned plugin fails the gate,
+tracked or not. On a Mac, the usual case is a `.DS_Store` that Finder created
+when the folder was opened. This is intended: the gate fails closed rather
+than let a file hide where nothing scans it.
+
+**Fix.** Delete the file. Do not allowlist it.
+
+```sh
+rm <checkout>/zsh/plugins/.DS_Store
+```
