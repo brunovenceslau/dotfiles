@@ -25,6 +25,14 @@ cp="$repo_root/bin/check-patterns"
 pass=0
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { pass=$((pass + 1)); }
+# An unguarded command that fails kills the suite under `set -e` with no
+# FAIL line: on macOS CI that read as "rc 1, output above" with nothing above.
+# Name the line instead. errtrace (-E) carries the trap into functions; the
+# BASH_SUBSHELL test keeps it out of $( ) and ( ) subshells, where bash 3.2
+# fires ERR even when the caller checks the status (`x="$(cmd)" || rc=$?`).
+# An unchecked subshell failure still surfaces at its caller's line.
+set -E
+trap '_err_rc=$?; [ "${BASH_SUBSHELL:-0}" -ne 0 ] || echo "ERR: unexpected failure at line $LINENO (rc $_err_rc): $BASH_COMMAND" >&2' ERR
 
 # The leaked-GIT_DIR regression (arm 12 below) re-runs this file ONCE, at depth
 # 1. A broken guard there must abort here at depth 2, a red test, never an
@@ -1463,20 +1471,32 @@ dup_out="$(STRICT= "$cp" "$r" 2>&1)" || true
 dup_n="$(printf '%s\n' "$dup_out" | grep -c "/zsh/plugins/p/evil.sh (tracked" || true)"
 [ "$dup_n" = "1" ] && ok || fail "a tracked zsh/plugins/p/evil.sh must be reported once, not $dup_n times: $dup_out"
 # ...and in another case: on a case-insensitive filesystem (macOS's default)
-# ZSH/plugins/x lands in the skipped zsh/plugins/. Benign content, so on a
-# case-sensitive one no grep arm fires either and the git pass alone reports
-for tracked in ZSH/plugins/x.zsh zsh/Plugins/x.zsh; do
-  r="$work/plug-case-$(printf '%s' "$tracked" | tr '/.' '--')"; _git_repo "$r"; seed "$r"
+# ZSH/plugins/d/x lands in the skipped zsh/plugins/d/. Nested one level, so
+# the direct-child find sees only the directory d and stays silent on macOS
+# too; benign content, so no grep arm fires where the path IS scanned
+# (zsh/Plugins/ on a case-sensitive filesystem). On every filesystem the git
+# pass's bracket-class match is then the only report, checked by its wording.
+# The fixture dirs are numbered, never named after $tracked: on a
+# case-insensitive filesystem plug-case-ZSH-plugins and plug-case-zsh-Plugins
+# are ONE directory, and the second `git commit` found nothing to commit.
+i=0
+for tracked in ZSH/plugins/d/x.zsh zsh/Plugins/d/x.zsh; do
+  i=$((i + 1)); r="$work/plug-case-$i"; _git_repo "$r"; seed "$r"
   mkdir -p "$r/$(dirname "$tracked")"
   printf 'noop() { : ; }\n' > "$r/$tracked"
   git -C "$r" add -A && git -C "$r" commit -qm init
   fails_only_with "$r" "$plugins_msg" "a tracked $tracked (zsh/plugins in another case) must fail the git pass"
+  case_out="$(STRICT= "$cp" "$r" 2>&1)" || true
+  case "$case_out" in
+    *"$tracked (tracked; the path case-folds to zsh/plugins"*) ok ;;
+    *) fail "a tracked $tracked must be reported by the git pass's case-fold match: $case_out" ;;
+  esac
 done
 # ...and any other spelling of the first two segments the FILESYSTEM resolves
-# to zsh/plugins (APFS folds non-ASCII too: zU+017Fh). Asked with -ef, so a symlink on disk
-# stands in for the folding here, under names no bracket class matches:
-# the index tracks zsh2/... and zsh/plugins2/... as plain files, while on
-# disk zsh2 -> zsh and zsh/plugins2 -> plugins.
+# to zsh/plugins (APFS folds non-ASCII too: zU+017Fh). Asked with -ef, so a
+# symlink on disk stands in for the folding here, under names no bracket class
+# matches: the index tracks zsh2/... and zsh/plugins2/... as plain files, while
+# on disk zsh2 -> zsh and zsh/plugins2 -> plugins.
 r="$work/plug-ef-dir"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh2/plugins/evil"
 printf 'noop() { : ; }\n' > "$r/zsh2/plugins/evil/e.zsh"
 git -C "$r" add -A && git -C "$r" commit -qm init
@@ -1589,5 +1609,14 @@ r="$work/dubious"; _git_repo "$r"; seed "$r"
 git -C "$r" add -A && git -C "$r" commit -qm init
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
   fails_only_with "$r" "$sym_probe_msg" "a repo git refuses as dubiously owned must fail closed"
+
+# --- no two paths anywhere under $work may differ only in case: macOS's
+# default filesystem folds case, so they would be ONE path there and the
+# second fixture (or file) would land on the first one's. Checked here, so a
+# case-sensitive Linux run catches it too. Line-oriented: no fixture creates
+# a name holding a newline, which would split into two lines here -----------
+case_dups="$(cd "$work" && find . | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | uniq -d)"
+[ -z "$case_dups" ] && ok \
+  || fail "paths under \$work that differ only in case (one path on macOS): $case_dups"
 
 echo "PASS: check_patterns_test ($pass assertions)"
