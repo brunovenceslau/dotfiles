@@ -66,7 +66,10 @@
 #         symlink it meets while walking a directory, so one there hides its
 #         target from every arm that walks past it. It also refuses anything
 #         under zsh/plugins/ that is not a pinned plugin, since no arm reads
-#         there. See the arm itself for the passes and why each runs.
+#         there. See the arm itself for the passes and why each runs. The
+#         same passes FAIL CLOSED (exit 2) on a file name the arms cannot
+#         read (a `:`, LF or CR in it) or skip (`check-patterns` anywhere but
+#         bin/).
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -84,8 +87,8 @@
 #   ROOT MUST be a checkout you trust: arm (12) runs git inside it, and
 #   although the one config key known to run a program on a read-only call
 #   (core.fsmonitor) is forced off there, the repo's own .git/config is read.
-#   Exit: 0 clean; 1 a forbidden pattern was found; 2 nothing to scan or a scan
-#         error (fail closed).
+#   Exit: 0 clean; 1 a forbidden pattern was found; 2 nothing to scan, a scan
+#         error, or a file name arm (12) refuses (fail closed).
 
 set -euo pipefail
 # An inherited BASHOPTS (bash 4.1+ imports it) can switch these on: failglob
@@ -97,6 +100,15 @@ set -euo pipefail
 shopt -u failglob dotglob nocaseglob nullglob nocasematch
 
 root="${1:-.}"
+# A `:`, LF or CR in the ROOT's path breaks the PATH:NN: split every arm
+# reads, the same way arm 12's file-name rule describes: measured, a real
+# `chmod -R go-w --` under '/tmp/r:1: #' passed. No arm result stands, so this
+# fails closed before any runs. Bash 3.2 reads `$'...'` in a case pattern.
+case "$root" in
+  *:* | *$'\n'* | *$'\r'*)
+    printf 'check-patterns: the scan root %q holds a ":", a newline or a CR - every arm reads a hit as PATH:NN:, so such a path can hide a violation; scan it through a path without one\n' "$root" >&2
+    exit 2 ;;
+esac
 
 # _scan_roots P... -> the global `roots`: "$root/P" for each P that exists,
 # except that a real, listable directory "$root/zsh" is replaced by its own
@@ -176,7 +188,8 @@ bad=0
 # `; & | ( )` - so `x=1;# note` is a comment too, and an earlier version that only
 # knew about whitespace both missed a dodge and flagged a legitimate comment.
 # `[^:]*` never crosses a colon, so the prefix strip lands on PATH:NN: exactly.
-# PREMISES: no `:` in the scan root's path; and a `#` INSIDE a quoted string
+# PATH holds no `:`: a root holding one fails closed at the top, and a file
+# NAME holding one fails closed in arm 12. PREMISE: a `#` INSIDE a quoted string
 # truncates the line early, which can cut a real violation (false negative) or cut
 # the `/usr/local` half of arm 5's exempting pair (false positive). Both need a `#`
 # inside a string on a line that also carries one of these patterns.
@@ -576,8 +589,10 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
     # LC_ALL=C sort (byte order, not a locale collation - identical on BSD and
     # GNU sort) by PATH then LINE NUMBER, the two fields grep -Hn always
     # produces first: a hit's printed position stays independent of both
-    # which pass produced it and filesystem readdir order. check-patterns is
-    # a lint tool, not a startup-path script, so this fork is fine.
+    # which pass produced it and filesystem readdir order. `-t:` keys on PATH
+    # exactly because PATH holds no `:`: the gate fails closed on a root or a
+    # file name holding one (see _code_of). check-patterns
+    # is a lint tool, not a startup-path script, so this fork is fine.
     gnu_viol="$(printf '%s\n' "$gnu_viol" | LC_ALL=C sort -t: -k1,1 -k2,2n)"
     printf '%s\n' "$gnu_viol" >&2
     printf '%s\n' "$gnu_msg" >&2
@@ -717,67 +732,39 @@ if [ "${#dd[@]}" -gt 0 ]; then
 fi
 
 # (11) forbid the Unicode em dash (U+2014, UTF-8 bytes E2 80 94) in the repo's
-# own prose. House style (CONTRIBUTING.md's community standards and
-# .claude/rules/docs.md's documentation standard) is a plain hyphen; this arm
-# looks for exactly that one character, nothing broader. The pattern is built
-# at RUNTIME from its UTF-8 bytes via bash's ANSI-C quoting ($'\xe2\x80\x94'),
-# never pasted as a literal em dash into this script. `LC_ALL=C` keeps the
-# match byte-oriented on both grep flavors, independent of the runner's
-# locale (a locale-aware BSD grep can otherwise mishandle a line that also
-# holds unrelated malformed UTF-8, which would silently skip the match).
-# SELF-EXCLUDE: this arm keeps `--exclude=check-patterns` on its RECURSIVE
-# scan below like every other recursive arm, but for a DIFFERENT reason than
-# arms (1)/(2)/(5)/(6)/(8)/(9)/(10) - their patterns spell the forbidden
-# literal directly in this file's own comments and code, so their
-# self-exclude prevents the arm from matching its own documentation. Arm 11's
-# pattern is raw bytes assembled at RUNTIME ($'\xe2\x80\x94'), so nothing in
-# THIS file's CURRENT source can match it either way. The flag is kept anyway
-# for UNIFORMITY: tests/plugins_test.sh asserts, by shape and by count (not a
-# fixed literal), that EVERY recursive grep line in this script carries
-# `--exclude=check-patterns` and that none carries `--exclude-dir` - a
-# project-wide invariant that lets a future arm's author copy the pattern
-# without having to re-derive, case by case, whether their new arm happens to
-# need it.
-# On its own, that self-exclude would leave a gap for THIS arm: the recursive
-# scan never reads this file, so a literal em dash pasted into a future edit
-# of it would pass. Measured before the narrow scan below existed: appending
-# an em dash to a scratch copy of this file and running the gate exited 0.
-# So arm 11 adds a second, NARROW, NON-recursive scan of exactly
-# "$root/bin/check-patterns" below - no `-r`/`-R` in its flags, so it neither
-# adds to tests/plugins_test.sh's recursive-scan count nor needs its own
-# self-exclude (there is nothing else at that exact path to exclude it from).
-# UNLIKE arms (5)-(10), this one does NOT strip comments through
-# _code_of/_code_hits: an em dash inside a COMMENT is exactly the shape this
-# rule forbids - a shell or Markdown comment is still repo prose - the same
-# reasoning arms (1)-(2) use for curl|sh and uname -m.
-# SURFACE: the shared ${scan[@]} (install.sh, lib/, bin/, zsh/, config/,
-# packages/, security/, home/) plus the rest of the repo's own prose that
-# `want` does not cover - docs/, tests/, .github/, .claude/, Makefile, the
-# top-level docs and metadata files, and the repo's own dotfiles
-# (.gitignore, .gitmodules, REUSE.toml, cliff.toml, .gitleaks.toml). No
-# `${#prose[@]}` emptiness guard here, unlike arms (7)-(10): `prose` starts as
-# a copy of `${scan[@]}`, and the check at the top of this script already
-# exits 2 before this point if `scan` is empty, so `prose` can never be empty
-# either - a guard here would be dead code, not defensive.
-# ALLOWLIST, both content-independent path exclusions, never a language or
-# comment exemption:
-#   - LICENSES/*.txt, COPYING and CODE_OF_CONDUCT.md are left OUT of the
-#     surface entirely, rather than scanned-then-exempted: verbatim upstream
-#     legal text this repo reproduces exactly and never edits for house style
-#     (the GPL text in COPYING; the Apache-2.0/MIT/FSFAP/CC-BY-SA-4.0 texts in
-#     LICENSES/; and CODE_OF_CONDUCT.md's Contributor Covenant, itself
-#     CC-BY-SA-4.0 - see docs/development.md's REUSE section). There is no
-#     first-party content in any of them to lose by the omission.
-#   - config/nvim/lazy-lock.json sits INSIDE the otherwise-scanned config/, so
-#     it is exempted the same way arm (5) exempts config/gnupg/gpg-agent.conf:
-#     a grep -v on the hit list, not a directory omission. REUSE.toml already
-#     records why: lazy.nvim rewrites the file wholesale on every plugin
-#     update, so a fix landed here would not survive the next sync. The
-#     exemption is ANCHORED to the EXACT path this scan reads it at
-#     (`$root/config/nvim/lazy-lock.json`, `_re_escape`d - see arm (5) above),
-#     never a substring or a bare suffix match: either would exempt a decoy
-#     file elsewhere ending in the same segments (e.g.
-#     tests/config/nvim/lazy-lock.json) too - fail OPEN.
+# own prose. House style (CONTRIBUTING.md, .claude/rules/docs.md) is a plain
+# hyphen; this arm matches exactly that one character.
+# The pattern is built at RUNTIME from its bytes ($'\xe2\x80\x94'), never
+# pasted as a literal, so this file stays clean under its own self-scan below.
+# `LC_ALL=C` keeps the match byte-oriented on both grep flavors: a
+# locale-aware BSD grep can mishandle a line that also holds malformed UTF-8
+# and silently skip the match.
+# `-H`: grep drops the PATH prefix when it gets ONE operand (a tree whose
+# only prose root is a single file), and both the report and the lazy-lock
+# anchor below read that PATH.
+# `--exclude=check-patterns` is not needed to keep this arm off its own
+# pattern (nothing in the source spells it), but stays for uniformity:
+# tests/plugins_test.sh asserts that EVERY recursive grep line here carries
+# it and none carries `--exclude-dir`. It hides this file from the recursive
+# scan, so a literal em dash pasted into it would pass (measured: exit 0);
+# the narrow self-scan below closes that gap.
+# Comments are NOT stripped (no _code_of/_code_hits, unlike arms 5-10): a
+# comment is prose, the reasoning arms 1-2 use too.
+# SURFACE: `${scan[@]}` plus the prose roots it lacks (docs/, tests/,
+# .github/, .claude/, Makefile, the top-level docs and metadata files, and
+# the repo's own dotfiles). No emptiness guard: `prose` contains `scan`, and
+# an empty `scan` already exited 2 at the top.
+# ALLOWLIST, content-independent path exclusions only:
+#   - LICENSES/, COPYING and CODE_OF_CONDUCT.md are left OUT of the surface:
+#     verbatim upstream legal text (GPL, the LICENSES/ texts, the Contributor
+#     Covenant) never edited for house style, with no first-party content to
+#     lose (see docs/development.md's REUSE section).
+#   - config/nvim/lazy-lock.json, inside the scanned config/, is dropped from
+#     the hit list: lazy.nvim rewrites it wholesale on every plugin update
+#     (REUSE.toml), so a fix would not survive the next sync. The grep -v is
+#     anchored to the EXACT path this scan reads it at, `_re_escape`d (see
+#     arm 5): a substring or suffix match would also exempt a decoy such as
+#     tests/config/nvim/lazy-lock.json - fail OPEN.
 em_dash=$'\xe2\x80\x94'
 _scan_roots docs tests .github .claude Makefile REUSE.toml cliff.toml \
   .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
@@ -802,15 +789,10 @@ else
   fi
 fi
 
-# NARROW SELF-SCAN, non-recursive, no self-exclude: the recursive scan above
-# never sees this exact path (`--exclude=check-patterns` skips it), so a
-# literal em dash pasted into a future edit of check-patterns itself would
-# otherwise never be caught. `-F`, no `-r`/`-R` - a single, explicit file, not
-# a directory walk - so this line is invisible to
-# tests/plugins_test.sh's recursive-grep invariant (confirmed: that test still
-# passes with this scan in place). Absent (a fixture
-# tree with no bin/check-patterns of its own) is a silent skip, the same as
-# every other optional path in this script.
+# NARROW SELF-SCAN of exactly this file, which the recursive scan above
+# excludes by name. No `-r`/`-R`, so tests/plugins_test.sh's recursive-grep
+# invariant does not count it and it needs no self-exclude. Absent (a fixture
+# tree without bin/check-patterns) is a silent skip, like every optional path.
 self_cp="$root/bin/check-patterns"
 if [ -f "$self_cp" ]; then
   if out=$(LC_ALL=C grep -Fn -- "$em_dash" "$self_cp" 2>&1); then
@@ -878,6 +860,62 @@ if [ -n "$viol" ]; then
   bad=1
 fi
 
+# FILE NAMES the arms cannot read or skip, over the same surface as the find
+# above, and (tracked) repo-wide in the git pass below. Each FAILS CLOSED with
+# exit 2, since no arm result stands for such a tree:
+#   - a `:`, LF or CR in a name. Every arm reports a hit as PATH:NN:CONTENT,
+#     _code_of strips that prefix with `[^:]*:[0-9]+:`, and arm 8 sorts with
+#     `-t:`; a line tool also splits on LF and CR. Measured: in `bin/q:1: #`
+#     the strip leaves ` #...`, which empties every hit of arms 5-10.
+#   - a file named `check-patterns` other than exactly $root/bin/check-patterns:
+#     every recursive arm passes `--exclude=check-patterns`, a BASE-NAME match
+#     at any depth, so nothing in it is ever scanned (measured: a curl|sh in
+#     lib/sub/check-patterns passed). A directory of that name is still walked.
+# zsh/plugins stays out for the reason every arm leaves it out: its contents
+# are upstream's and no arm reads them. Names print `%q`-quoted, so a LF or
+# CR in one shows as `$'...'`, not as a broken line.
+fatal=0
+nl=$'\n'
+cr=$'\r'
+names_msg="check-patterns: a file name holding ':', a newline or a CR - every arm reads a hit as PATH:NN:, so such a name can hide a violation; rename it"
+stray_msg="check-patterns: a file named check-patterns outside bin/ - every recursive arm excludes that base name, so nothing in it is scanned; rename or remove it"
+# _quote_nul EXCEPT - NUL-separated paths on stdin -> each one but EXCEPT,
+# `%q`-quoted, one per line.
+_quote_nul() {
+  local p
+  while IFS= read -r -d '' p; do
+    [ "$p" = "$1" ] && continue
+    printf '%q\n' "$p"
+  done
+}
+# _name_pass MSG EXCEPT PREDICATE... - find over the surface; any match but
+# EXCEPT prints with MSG and sets fatal=1, and the quoted list is left in
+# `name_out` so the git pass below skips what it already printed. find's
+# stderr is not captured (a NUL stream cannot share it), and a find error
+# fails closed. `name_out` holds ONLY what was printed: on a find error the
+# partial list is dropped, or the git pass would skip a tracked name nobody
+# reported and the fail-closed exit 2 would degrade to 1.
+_name_pass() {
+  local msg="$1" except="$2" names="" rc=0
+  shift 2
+  name_out=""
+  names=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} \( "$@" \) -print0 \
+    | _quote_nul "$except") || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "check-patterns: file-name scan (find) errored (exit $rc) - failing closed" >&2
+    bad=1
+  elif [ -n "$names" ]; then
+    printf '%s\n' "$names" >&2
+    echo "$msg" >&2
+    fatal=1
+    name_out="$names"
+  fi
+}
+_name_pass "$names_msg" "" -name '*:*' -o -name "*$nl*" -o -name "*$cr*"
+names_found="$name_out"
+_name_pass "$stray_msg" "$root/bin/check-patterns" -name check-patterns ! -type d
+stray_found="$name_out"
+
 if [ -d "$root/zsh/plugins" ] && [ ! -L "$root/zsh/plugins" ]; then
   # -mindepth/-maxdepth: both GNU and BSD find. `! -type d` without -L
   # counts a symlink to a directory too.
@@ -897,7 +935,7 @@ fi
 
 # _git_symlink_pass - the repo-wide git pass; non-zero on a violation or any
 # error. A subshell, so its EXIT trap removes the scratch dir on every path.
-# Every status is checked by hand: the caller's `!` suspends `set -e` here.
+# Every status is checked by hand: the caller's `||` suspends `set -e` here.
 #
 # Every git call goes through `_git_clean`, which strips git's own local env
 # vars first, so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE cannot steer the
@@ -1002,6 +1040,8 @@ _git_symlink_pass() (
   rec_re=$'^[0-7]{6} [0-9a-f]{40,64} [0-3]\t.'
   git_viol=""
   plugins_viol=""
+  names_viol=""
+  stray_viol=""
   entry=""
   while IFS= read -r -d '' entry; do
     if ! [[ $entry =~ $rec_re ]]; then
@@ -1010,6 +1050,29 @@ _git_symlink_pass() (
     fi
     mode="${entry%% *}"
     gpath="${entry#*$'\t'}"
+    # The file-name rules above, for every tracked path: outside the surface
+    # too, which keeps this pass free of a copy of it. Not the exact
+    # zsh/plugins/ spelling, left out as the find leaves it out.
+    case "$gpath" in
+      zsh/plugins/*) ;;
+      *)
+        case "$gpath" in
+          *:* | *"$nl"* | *"$cr"*)
+            printf -v q '%q' "$root/$gpath"
+            case "$nl$names_found$nl" in
+              *"$nl$q$nl"*) ;;  # the find above already printed it
+              *) names_viol="$names_viol$q"$'\n' ;;
+            esac ;;
+        esac
+        if [ "$mode" != 160000 ] && [ "${gpath##*/}" = check-patterns ] \
+            && [ "$gpath" != bin/check-patterns ]; then
+          printf -v q '%q' "$root/$gpath"
+          case "$nl$stray_found$nl" in
+            *"$nl$q$nl"*) ;;
+            *) stray_viol="$stray_viol$q"$'\n' ;;
+          esac
+        fi ;;
+    esac
     case "$mode" in
       120000)
         git_viol="$git_viol$root/$gpath"$'\n'
@@ -1079,6 +1142,17 @@ _git_symlink_pass() (
     echo "$plugins_msg" >&2
     rc=1
   fi
+  # 2, not 1: the caller turns it into the fail-closed exit.
+  if [ -n "$names_viol" ]; then
+    printf '%s' "$names_viol" >&2
+    echo "$names_msg" >&2
+    rc=2
+  fi
+  if [ -n "$stray_viol" ]; then
+    printf '%s' "$stray_viol" >&2
+    echo "$stray_msg" >&2
+    rc=2
+  fi
   exit "$rc"
 )
 
@@ -1086,9 +1160,13 @@ if [ "$has_git" -eq 1 ]; then
   if ! command -v git >/dev/null 2>&1; then
     echo "check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH, yet '$root/.git' exists - failing closed" >&2
     bad=1
-  elif ! _git_symlink_pass; then
-    bad=1
+  else
+    git_rc=0
+    _git_symlink_pass || git_rc=$?
+    [ "$git_rc" -eq 0 ] || bad=1
+    [ "$git_rc" -ne 2 ] || fatal=1
   fi
 fi
 
+[ "$fatal" -eq 0 ] || exit 2
 [ "$bad" -eq 0 ]

