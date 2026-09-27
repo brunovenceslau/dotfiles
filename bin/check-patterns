@@ -9,8 +9,8 @@
 #
 # The static-pattern component that `make check-patterns` runs and
 #   `make lint` includes. Twelve checks across our OWN runtime surface
-#   (the SHA-pinned zsh plugin submodules are third-party and excluded per grep -
-#   we police our code, not upstream's):
+#   (the SHA-pinned zsh plugin submodules are third-party and excluded by their
+#   one exact path, zsh/plugins - we police our code, not upstream's):
 #     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
 #         no-runtime-download rule (the startup-path half is the
 #         fast-syntax-highlighting neutralization in zsh/zshrc).
@@ -62,9 +62,11 @@
 #         allowlisted; see the arm itself.
 #    (12) a symlink anywhere the arms above read, plus (when ROOT has its
 #         own .git) any tracked symlink, or gitlink that is not a pinned
-#         plugin, anywhere in the repo - a recursive scan never follows a symlink it meets while walking a
-#         directory, so one there hides its target from every arm that walks
-#         past it. See the arm itself for the two passes and why both run.
+#         plugin, anywhere in the repo - a recursive scan never follows a
+#         symlink it meets while walking a directory, so one there hides its
+#         target from every arm that walks past it. It also refuses anything
+#         under zsh/plugins/ that is not a pinned plugin, since no arm reads
+#         there. See the arm itself for the passes and why each runs.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -79,26 +81,79 @@
 #   mapfile) so the macOS CI legs behave identically.
 #
 # Usage: check-patterns [ROOT]   (ROOT default: current directory)
+#   ROOT MUST be a checkout you trust: arm (12) runs git inside it, and
+#   although the one config key known to run a program on a read-only call
+#   (core.fsmonitor) is forced off there, the repo's own .git/config is read.
 #   Exit: 0 clean; 1 a forbidden pattern was found; 2 nothing to scan or a scan
 #         error (fail closed).
 
 set -euo pipefail
+# An inherited BASHOPTS (bash 4.1+ imports it) can switch these on: failglob
+# aborts on the first unmatched glob below with rc 1, which reads as "a
+# violation"; dotglob makes `*` repeat the dot entries _scan_roots globs on
+# its own, reporting each hit twice; nullglob and nocaseglob change what a
+# glob returns; nocasematch makes every `case` below match any case. All five
+# exist in bash 3.2 (failglob and nocasematch since 3.0 and 3.1).
+shopt -u failglob dotglob nocaseglob nullglob nocasematch
 
 root="${1:-.}"
+
+# _scan_roots P... -> the global `roots`: "$root/P" for each P that exists,
+# except that a real, listable directory "$root/zsh" is replaced by its own
+# entries minus the pinned "$root/zsh/plugins". EVERY recursive arm takes its
+# roots from here, and this is the ONE place the pinned plugins leave their
+# scan. It cannot be a grep flag: GNU and BSD grep both match --exclude-dir
+# against a BASE NAME at any depth, never a path, so `--exclude-dir=plugins`
+# also hid first-party trees such as config/nvim/lua/plugins/ and
+# lib/plugins/ (a curl|sh there passed).
+#   - A symlinked (or non-directory) zsh stays a root as is: expanding
+#     through a symlinked zsh would hand arm (12)'s find paths below the
+#     link without the link itself.
+#   - A zsh that is not both readable and searchable stays a root as is too:
+#     its glob would come back empty and the scan would pass, where grep and
+#     find on the directory itself error and fail closed.
+#   - A SYMLINK entry of zsh (zsh/plugins included) goes to the global
+#     `zsh_links`, never to `roots`: as a grep OPERAND, GNU grep -r follows
+#     it (into the pinned plugins, or out of the surface) and a dangling one
+#     errors, while BSD grep does not. Arm (12)'s find reads `zsh_links` and
+#     reports each one, as it does any symlink met while walking.
+#   - A zsh/plugins that is not a directory (a plain file) is scanned.
+# -e alone misses a DANGLING symlink (it stats the target, not the link
+# itself), silently dropping the entry from every arm below; -L catches it.
+# `$root` is quoted in the globs, so its own glob characters stay literal.
+_scan_roots() {
+  roots=()
+  zsh_links=()
+  local p e
+  for p in "$@"; do
+    if [ "$p" = zsh ] && [ -d "$root/zsh" ] && [ ! -L "$root/zsh" ] \
+        && [ -r "$root/zsh" ] && [ -x "$root/zsh" ]; then
+      # `.[!.]*` and `..?*` add the dot entries `*` skips, never `.` or `..`.
+      for e in "$root"/zsh/* "$root"/zsh/.[!.]* "$root"/zsh/..?*; do
+        if [ -L "$e" ]; then
+          zsh_links+=("$e")
+          continue
+        fi
+        [ -e "$e" ] || continue  # an unmatched glob stays literal
+        [ "$e" = "$root/zsh/plugins" ] && [ -d "$e" ] && continue
+        roots+=("$e")
+      done
+    elif [ -e "$root/$p" ] || [ -L "$root/$p" ]; then
+      roots+=("$root/$p")
+    fi
+  done
+}
 
 # Our own implementing surface. NEVER the Makefile itself (its recipes contain
 # the very patterns they forbid), and the self-exclude on each grep below
 # likewise skips THIS script, which necessarily spells out the forbidden literals
 # in its grep patterns and docs. `home/` is optional - absent = skipped, not an
-# error (that omission is the whole bug this tool fixes).
-want=(install.sh lib bin zsh config packages security home)
-scan=()
-for p in "${want[@]}"; do
-  # -e alone misses a DANGLING symlink (it stats the target, not the link
-  # itself), silently dropping the whole entry from every arm below,
-  # arm (12) included; -L catches it too.
-  { [ -e "$root/$p" ] || [ -L "$root/$p" ]; } && scan+=("$root/$p")
-done
+# error (that omission is the whole bug this tool fixes). A tree whose only
+# content is the pinned zsh/plugins, or symlinks under zsh/, is a no-op scan
+# too - and a recursive grep given NO operand would read the cwd or stdin.
+_scan_roots install.sh lib bin zsh config packages security home
+scan=(${roots[@]+"${roots[@]}"})
+scan_links=(${zsh_links[@]+"${zsh_links[@]}"})
 if [ "${#scan[@]}" -eq 0 ]; then
   echo "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan" >&2
   exit 2
@@ -192,9 +247,9 @@ _code_hits() {
 # matching `shasum`.
 # rc 0 = match (violation); rc 1 = clean; rc >= 2 = scan error (fail closed).
 # `-r`, NOT `-R`: -R follows symlinks, and a first-party link pointing into a
-# third-party tree would drag the scan straight back into the plugins directory the
-# exclusion below just skipped. Excluding by the precise directory NAME (not a path)
-# keeps a future FIRST-PARTY tree in scope.
+# third-party tree would drag the scan straight back into the pinned zsh/plugins
+# that _scan_roots left out of `scan`. No `--exclude-dir`: it matches a base name
+# at any depth, which would hide a FIRST-PARTY `plugins` directory as well.
 sudo_='sudo([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*'
 fetcher="((command|env|$sudo_)[[:space:]]+|\\\\)?([^[:space:]\"'\`()\$]*/)?(curl|wget)"
 runner="(($sudo_|env|command|exec)[[:space:]]+)*[\"']?([^[:space:]|;&\"']*/)?(sh|bash|zsh|ksh|dash)[\"']?"
@@ -202,7 +257,7 @@ opt='[[:space:]]+-[^[:space:]"'"'"'`$]*'
 fetch_pipe="(curl|wget)[^|]*\\|&?[[:space:]]*$runner([^[:alnum:]_.-]|\$)"
 fetch_subst="(^|[^[:alnum:]_.-])(eval([[:space:]]+--)?|$runner($opt)*[[:space:]]+-[[:alnum:]]*c[[:alnum:]]*($opt)*)[[:space:]]+[\"']?[[:space:]]*(\\\$\\(|\`)[[:space:]]*$fetcher"
 fetch_procsub="(^|[^[:alnum:]_.-])(source|\\.|$runner)[[:space:]]+(<[[:space:]]*)?<\\([[:space:]]*$fetcher"
-if out=$(grep -rInE --exclude-dir=plugins --exclude=check-patterns \
+if out=$(grep -rInE --exclude=check-patterns \
     -e "$fetch_pipe" -e "$fetch_subst" -e "$fetch_procsub" "${scan[@]}" 2>&1); then
   printf '%s\n' "$out"
   echo "check-patterns: forbidden curl|sh runtime fetch" >&2
@@ -218,7 +273,7 @@ fi
 
 # (2) forbid ad-hoc `uname -m` outside lib/os.sh (its sanctioned home). The grep
 # prints paths as "<root>/lib/os.sh:...", so anchor the allow-line on the tail.
-if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns 'uname -m' "${scan[@]}" 2>&1); then
+if out=$(grep -rIn --exclude=check-patterns 'uname -m' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" | grep -vE '(^|/)lib/os\.sh:' || true)
   if [ -n "$viol" ]; then
     printf '%s\n' "$viol" >&2
@@ -325,7 +380,7 @@ _re_escape() {
 # would exempt a decoy file elsewhere ending in the same segments (e.g.
 # tests/config/gnupg/gpg-agent.conf) too - fail OPEN.
 _gpg_agent_path=$(_re_escape "$root/config/gnupg/gpg-agent.conf")
-if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns \
+if out=$(grep -rIn --exclude=check-patterns \
     -F '/opt/homebrew' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)' \
@@ -352,7 +407,7 @@ fi
 # openssl@3` asks where a FORMULA lives, which is a different question this rule has
 # no answer for, and flagging it would offer a remedy that does not apply. Every other
 # brew call is untouched - lib/packages.sh's `brew bundle` is how packages install.
-if out=$(grep -rIn --exclude-dir=plugins --exclude=check-patterns \
+if out=$(grep -rIn --exclude=check-patterns \
     -E 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" | _code_hits 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))')
   if [ -n "$viol" ]; then
@@ -417,10 +472,10 @@ fi
 # SURFACE: every file whose commands run on a mac - install.sh, lib/, bin/, zsh/,
 # tests/, the Makefile and the workflows (the macOS runner executes their `run:`
 # steps). config/ is NOT scanned: it holds editor configs whose own regex dialects
-# (vim's `\s`) are legitimate. Pinned plugins are upstream's code, excluded by
-# name, and this script excludes itself by name too - NEITHER is a language
-# exemption, both are content-independent path exclusions of THIRD-PARTY or
-# SELF-REFERENTIAL text.
+# (vim's `\s`) are legitimate. Pinned plugins are upstream's code, left out by
+# their exact path (_scan_roots), and this script excludes itself by name -
+# NEITHER is a language exemption, both are content-independent path
+# exclusions of THIRD-PARTY or SELF-REFERENTIAL text.
 # `*.py` FILES UNDER tests/ ONLY ARE EXEMPT BY EXTENSION - the only
 # content-independent LANGUAGE exemption this arm has, and a fixed suffix,
 # never a marker comment or a parse of what is inside the file: Python's `re`
@@ -443,12 +498,10 @@ fi
 #     carry no -E/-r/-P. Under -E, `\|` is an ESCAPED literal bar and is portable.
 # PREMISE: a flag group before the pattern is short options only (`-qi`, `-e`); a
 # long option (`--posix`) in front of a BRE pattern hides it from the second shape.
-gnu_rest=()
-for p in install.sh lib bin zsh Makefile .github/workflows; do
-  [ -e "$root/$p" ] && gnu_rest+=("$root/$p")
-done
-gnu_tests=()
-[ -e "$root/tests" ] && gnu_tests+=("$root/tests")
+_scan_roots install.sh lib bin zsh Makefile .github/workflows
+gnu_rest=(${roots[@]+"${roots[@]}"})
+_scan_roots tests
+gnu_tests=(${roots[@]+"${roots[@]}"})
 if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
   gnu_esc='(^|[^\\])\\[sSwWbB<>]'
   # The argument body excludes only its OWN closing quote: a `"` inside a
@@ -474,7 +527,7 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
   _gnu_scan() {
     local py="$1"; shift
     [ "$#" -gt 0 ] || return 1
-    local -a exc=(--exclude-dir=plugins --exclude=check-patterns)
+    local -a exc=(--exclude=check-patterns)
     [ -n "$py" ] && exc+=(--exclude="$py")
     local out rc
     if out=$(grep -rHnIE "${exc[@]}" -- "$gnu_re" "$@" 2>&1); then
@@ -557,14 +610,12 @@ fi
 # inside a quoted string (`echo "a | grep -q b"`), and a flag-looking pattern
 # argument read as a flag (`cmd | grep -e -l y`). Rephrase the line; neither
 # shape exists in the tree.
-eex=()
-for p in install.sh lib bin tests .github/workflows; do
-  [ -e "$root/$p" ] && eex+=("$root/$p")
-done
+_scan_roots install.sh lib bin tests .github/workflows
+eex=(${roots[@]+"${roots[@]}"})
 if [ "${#eex[@]}" -gt 0 ]; then
   eex_re='(^|[^|])\|&?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
   eex_re="$eex_re"'([ef]?grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[A-Za-z]*[qmlL][A-Za-z0-9]*|--(quiet|silent|max-count[=[:alnum:]]*|files-with(out)?-match(es)?))([^[:alnum:]_-]|$)|head([^[:alnum:]_-]|$))'
-  if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
+  if out=$(grep -rHnIE --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$eex_re")
     if [ -n "$viol" ]; then
       printf '%s\n' "$viol" >&2
@@ -616,10 +667,8 @@ fi
 # prose or an unquoted `$(...)` argument holding a separator or keyword before a
 # tool name and a later ` -- ` (`warn "x; rm it by hand -- see docs"`) reads as
 # a call - rephrase it. None of these exists in the tree.
-dd=()
-for p in install.sh lib bin zsh tests Makefile .github/workflows; do
-  [ -e "$root/$p" ] && dd+=("$root/$p")
-done
+_scan_roots install.sh lib bin zsh tests Makefile .github/workflows
+dd=(${roots[@]+"${roots[@]}"})
 if [ "${#dd[@]}" -gt 0 ]; then
   dd_pos='((^|[;&|(){!`])[[:space:]]*'                   # after a separator; `)` ends a case pattern
   dd_pos="$dd_pos"'|(^|[^[:alnum:]_-])(run:|then|do|else|elif|if|while|until|time|sudo|command|exec|env|nohup)[[:space:]]+)'
@@ -650,7 +699,7 @@ if [ "${#dd[@]}" -gt 0 ]; then
   dd_re="$dd_re|$(_dd_family 'touch' 'Adrt')"
   dd_re="$dd_re|$(_dd_family '[ef]?grep' 'ABCDdefm')"
   dd_re="$dd_re|$(_dd_family 'sed' 'efi')"
-  if out=$(grep -rHnIE --exclude-dir=plugins --exclude=check-patterns -- "$dd_re" "${dd[@]}" 2>&1); then
+  if out=$(grep -rHnIE --exclude=check-patterns -- "$dd_re" "${dd[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$dd_re")
     if [ -n "$viol" ]; then
       printf '%s\n' "$viol" >&2
@@ -684,10 +733,11 @@ fi
 # pattern is raw bytes assembled at RUNTIME ($'\xe2\x80\x94'), so nothing in
 # THIS file's CURRENT source can match it either way. The flag is kept anyway
 # for UNIFORMITY: tests/plugins_test.sh asserts, by shape and by count (not a
-# fixed literal), that EVERY recursive grep line in this script carries both
-# `--exclude-dir=plugins` and `--exclude=check-patterns` - a project-wide
-# invariant that lets a future arm's author copy the pattern without having to
-# re-derive, case by case, whether their new arm happens to need it.
+# fixed literal), that EVERY recursive grep line in this script carries
+# `--exclude=check-patterns` and that none carries `--exclude-dir` - a
+# project-wide invariant that lets a future arm's author copy the pattern
+# without having to re-derive, case by case, whether their new arm happens to
+# need it.
 # On its own, that self-exclude would leave a gap for THIS arm: the recursive
 # scan never reads this file, so a literal em dash pasted into a future edit
 # of it would pass. Measured before the narrow scan below existed: appending
@@ -729,14 +779,12 @@ fi
 #     file elsewhere ending in the same segments (e.g.
 #     tests/config/nvim/lazy-lock.json) too - fail OPEN.
 em_dash=$'\xe2\x80\x94'
-prose=("${scan[@]}")
-for p in docs tests .github .claude Makefile REUSE.toml cliff.toml \
-    .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
-    SECURITY.md THIRD-PARTY-NOTICES.md README.md; do
-  { [ -e "$root/$p" ] || [ -L "$root/$p" ]; } && prose+=("$root/$p")
-done
+_scan_roots docs tests .github .claude Makefile REUSE.toml cliff.toml \
+  .gitleaks.toml .gitignore .gitmodules CLAUDE.md CONTRIBUTING.md \
+  SECURITY.md THIRD-PARTY-NOTICES.md README.md
+prose=("${scan[@]}" ${roots[@]+"${roots[@]}"})
 _lazy_lock_path=$(_re_escape "$root/config/nvim/lazy-lock.json")
-if out=$(LC_ALL=C grep -rHIn --exclude-dir=plugins --exclude=check-patterns \
+if out=$(LC_ALL=C grep -rHIn --exclude=check-patterns \
     -F "$em_dash" "${prose[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | grep -vE "^${_lazy_lock_path}:[0-9]+:" || true)
@@ -785,29 +833,37 @@ fi
 # directory, so one there hides its target from every arm that walks past it.
 #
 # SURFACE: `prose`, arm (11)'s own surface (the widest above) - a single
-# source, not a fourth hand-kept list. `zsh/plugins` excluded by its one
-# real path, not by name at any depth: those pinned submodules are
-# third-party, and widening the exclusion for every arm is a separate change.
+# source, not a fourth hand-kept list - plus `scan_links`, the symlink
+# entries of zsh/ that _scan_roots kept away from the grep arms. It holds no
+# pinned zsh/plugins directory (_scan_roots left it out), so find never walks
+# it either; a symlinked zsh/plugins is one of `scan_links` and is reported.
 #
 # ALWAYS: `find -type l` over that surface - what a recursive scan actually
 # reads, tracked or not.
+#
+# ADDITIONALLY, since NO arm reads zsh/plugins/, anything there that is not a
+# pinned plugin would hide from all of them:
+#   - always: every direct child of a real zsh/plugins directory that is not
+#     a directory (`find`), tracked or not. A plain directory there cannot be
+#     told apart from an unpopulated submodule without git, so only the git
+#     pass sees a file nested inside one;
+#   - when `$root/.git` exists: every tracked entry under zsh/plugins/ whose
+#     mode is not 160000 (a gitlink), and every other tracked non-gitlink
+#     path that lands in zsh/plugins/ on disk anyway - its first two
+#     segments spell zsh/plugins in another ASCII case, or the filesystem
+#     resolves them to zsh/plugins (a case-insensitive filesystem, macOS's
+#     default, folds more than ASCII) - in the repo-wide git pass below.
 #
 # ADDITIONALLY, when `$root/.git` exists: the WHOLE repository, tracked only,
 # for what `find` cannot see - a tracked symlink outside `prose`, or a gitlink
 # (mode 160000) that is not a pinned plugin. See `_git_symlink_pass`.
 #
-# FAILS CLOSED on any error from either pass, and when `$root/.git` exists but
+# FAILS CLOSED on any error from any pass, and when `$root/.git` exists but
 # the git pass cannot run or resolve `$root` as its toplevel.
-
-# find -path takes a pattern (fnmatch, backslash escapes on, on GNU and BSD
-# find alike): escape $root's glob characters so the prune matches the one
-# literal path.
-_glob_escape() {
-  printf '%s' "$1" | sed -e 's/[][*?\]/\\&/g'
-}
-plugins_glob=$(_glob_escape "$root/zsh/plugins")
-# `! -type l`: zsh/plugins ITSELF a symlink is reported below, never pruned.
-if out=$(find "${prose[@]}" \( -path "$plugins_glob" ! -type l \) -prune -o -type l -print 2>&1); then
+plugins_msg="check-patterns: an entry under zsh/plugins/ that is not a pinned plugin - no arm scans zsh/plugins/; move it out, or pin it as submodule.<name>.path = zsh/plugins/<name> in .gitmodules"
+has_git=0
+{ [ -e "$root/.git" ] || [ -L "$root/.git" ]; } && has_git=1
+if out=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} -type l -print 2>&1); then
   viol="$out"
 else
   rc=$?
@@ -822,20 +878,63 @@ if [ -n "$viol" ]; then
   bad=1
 fi
 
+if [ -d "$root/zsh/plugins" ] && [ ! -L "$root/zsh/plugins" ]; then
+  # -mindepth/-maxdepth: both GNU and BSD find. `! -type d` without -L
+  # counts a symlink to a directory too.
+  if out=$(find "$root/zsh/plugins" -mindepth 1 -maxdepth 1 ! -type d -print 2>&1); then
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out" >&2
+      echo "$plugins_msg" >&2
+      bad=1
+    fi
+  else
+    rc=$?
+    printf '%s\n' "$out" >&2
+    echo "check-patterns: zsh/plugins scan (find) errored (exit $rc) - failing closed" >&2
+    bad=1
+  fi
+fi
+
 # _git_symlink_pass - the repo-wide git pass; non-zero on a violation or any
 # error. A subshell, so its EXIT trap removes the scratch dir on every path.
 # Every status is checked by hand: the caller's `!` suspends `set -e` here.
 #
 # Every git call goes through `_git_clean`, which strips git's own local env
 # vars first, so a leaked GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE cannot steer the
-# probe or the listing at a different repository. Other ambient git env (the
-# GIT_TRACE family) cannot be enumerated, so stderr is kept apart from the
-# NUL-delimited listing and any stderr output fails closed.
+# probe or the listing at a different repository. That list comes from git
+# itself, so an empty or failed answer, or one without GIT_DIR and
+# GIT_INDEX_FILE, would strip nothing: it fails closed instead. Other ambient
+# git tracing (the GIT_TRACE family, a trace2.* config key) cannot be
+# enumerated, so stderr is kept apart from the NUL-delimited listing and ANY
+# stderr from the listing fails closed; the probe's stderr is shown only when
+# the probe itself fails.
+#
+# `-c core.fsmonitor=false` on every call that runs INSIDE `$root`: that key
+# names a program, and git runs it even for a read-only ls-files.
 _git_symlink_pass() (
+  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns-sym.XXXXXX" 2>/dev/null) || {
+    echo "check-patterns: could not create a scratch dir for the repo-wide symlink scan - failing closed" >&2
+    exit 1
+  }
+  trap 'rm -rf "$tmpd"' EXIT
+
   git_unset=()
+  lev_rc=0
+  git rev-parse --local-env-vars >"$tmpd/lev" 2>"$tmpd/lev.err" || lev_rc=$?
+  has_dir=0
+  has_index=0
   while IFS= read -r v; do
+    case "$v" in
+      GIT_DIR) has_dir=1 ;;
+      GIT_INDEX_FILE) has_index=1 ;;
+    esac
     [ -n "$v" ] && git_unset+=("$v")
-  done <<<"$(git rev-parse --local-env-vars 2>/dev/null)"
+  done <"$tmpd/lev"
+  if [ "$lev_rc" -ne 0 ] || [ "$has_dir" -ne 1 ] || [ "$has_index" -ne 1 ]; then
+    cat "$tmpd/lev.err" >&2
+    echo "check-patterns: symlink scan (git, repo-wide) could not list git's local env vars (git rev-parse --local-env-vars: exit $lev_rc, GIT_DIR listed: $has_dir, GIT_INDEX_FILE listed: $has_index) - failing closed" >&2
+    exit 1
+  fi
   _git_clean() {
     local -a e=()
     local v
@@ -847,13 +946,9 @@ _git_symlink_pass() (
     env ${e[@]+"${e[@]}"} git "$@"
   }
 
-  tmpd=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns-sym.XXXXXX" 2>/dev/null) || {
-    echo "check-patterns: could not create a scratch dir for the repo-wide symlink scan - failing closed" >&2
-    exit 1
-  }
-  trap 'rm -rf "$tmpd"' EXIT
-
-  if ! top=$(_git_clean -C "$root" rev-parse --show-toplevel 2>"$tmpd/probe.err"); then
+  # Defensive: --show-toplevel runs no fsmonitor today (an equivalent
+  # mutant), kept so every git call inside `$root` carries the flag.
+  if ! top=$(_git_clean -C "$root" -c core.fsmonitor=false rev-parse --show-toplevel 2>"$tmpd/probe.err"); then
     cat "$tmpd/probe.err" >&2
     echo "check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel of '$root' - failing closed" >&2
     exit 1
@@ -889,7 +984,7 @@ _git_symlink_pass() (
   fi
 
   ls_rc=0
-  _git_clean -C "$root" ls-files -s -z >"$tmpd/list" 2>"$tmpd/ls.err" || ls_rc=$?
+  _git_clean -C "$root" -c core.fsmonitor=false ls-files -s -z >"$tmpd/list" 2>"$tmpd/ls.err" || ls_rc=$?
   if [ "$ls_rc" -ne 0 ]; then
     cat "$tmpd/ls.err" >&2
     echo "check-patterns: symlink scan (git ls-files, repo-wide) errored (exit $ls_rc) - failing closed" >&2
@@ -898,7 +993,7 @@ _git_symlink_pass() (
   # ls-files' own stderr file: a traced probe above writes to stderr too.
   if [ -s "$tmpd/ls.err" ]; then
     cat "$tmpd/ls.err" >&2
-    echo "check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr (a GIT_TRACE* variable?) - failing closed" >&2
+    echo "check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr (a GIT_TRACE* variable, or a trace2.* config key?) - failing closed" >&2
     exit 1
   fi
 
@@ -906,6 +1001,7 @@ _git_symlink_pass() (
   # trace aimed at stdout, say) fails closed rather than being skipped.
   rec_re=$'^[0-7]{6} [0-9a-f]{40,64} [0-3]\t.'
   git_viol=""
+  plugins_viol=""
   entry=""
   while IFS= read -r -d '' entry; do
     if ! [[ $entry =~ $rec_re ]]; then
@@ -928,6 +1024,41 @@ _git_symlink_pass() (
         [ "$allowed" -eq 1 ] \
           || git_viol="$git_viol$root/$gpath (gitlink, not a pinned plugin)"$'\n'
         ;;
+      *)
+        # Bracket classes, not `tr` (a fork per entry) or nocasematch (a
+        # shell-wide switch): the exact spelling is matched first, so the
+        # second pattern only ever sees another case of it. They cover ASCII
+        # case only, the same on every filesystem.
+        listed=0
+        case "$gpath" in
+          zsh/plugins/*)
+            plugins_viol="$plugins_viol$root/$gpath (tracked, mode $mode)"$'\n'
+            listed=1 ;;
+          [zZ][sS][hH]/[pP][lL][uU][gG][iI][nN][sS]/* | [zZ][sS][hH]/[pP][lL][uU][gG][iI][nN][sS])
+            if [ "$gpath" != zsh/plugins ]; then
+              plugins_viol="$plugins_viol$root/$gpath (tracked; the path case-folds to zsh/plugins, which a case-insensitive filesystem puts under zsh/plugins/)"$'\n'
+              listed=1
+            fi ;;
+        esac
+        # Any other spelling of the first two segments that the FILESYSTEM
+        # resolves to zsh/plugins (APFS also folds non-ASCII, e.g. U+017F to
+        # `s`): asked with -ef (device and inode), since no name match can know
+        # its folding rules. Only zsh/plugins: a path that lands elsewhere in
+        # zsh/ is scanned by every grep arm there. The exact zsh/plugins/
+        # spelling never reaches here: it is `listed` above. Parameter
+        # expansion only, no fork per entry.
+        if [ "$listed" -eq 0 ]; then
+          case "$gpath" in
+            */*/*)
+              gdir="${gpath%%/*}"
+              grest="${gpath#*/}"
+              gsub="${grest%%/*}"
+              if [ "$root/$gdir/$gsub" -ef "$root/zsh/plugins" ]; then
+                plugins_viol="$plugins_viol$root/$gpath (tracked; on disk, '$gdir/$gsub' is the same directory as zsh/plugins)"$'\n'
+              fi ;;
+          esac
+        fi
+        ;;
     esac
     entry=""
   done <"$tmpd/list"
@@ -937,15 +1068,21 @@ _git_symlink_pass() (
     exit 1
   fi
 
+  rc=0
   if [ -n "$git_viol" ]; then
     printf '%s' "$git_viol" >&2
     echo "check-patterns: a tracked symlink, or a gitlink that is not a pinned plugin - remove it; a plugin is pinned as submodule.<name>.path = zsh/plugins/<name> in .gitmodules" >&2
-    exit 1
+    rc=1
   fi
-  exit 0
+  if [ -n "$plugins_viol" ]; then
+    printf '%s' "$plugins_viol" >&2
+    echo "$plugins_msg" >&2
+    rc=1
+  fi
+  exit "$rc"
 )
 
-if [ -e "$root/.git" ] || [ -L "$root/.git" ]; then
+if [ "$has_git" -eq 1 ]; then
   if ! command -v git >/dev/null 2>&1; then
     echo "check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH, yet '$root/.git' exists - failing closed" >&2
     bad=1
