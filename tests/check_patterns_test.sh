@@ -1213,31 +1213,52 @@ esac
 [ "$n_nul_err" -eq 1 ] && ok \
   || fail "a find that exits non-zero must fail closed the NUL-byte pass (got $n_nul_err): $out"
 # ... and EACH find pass alone: a shim that fails only the call holding one
-# argument pair, so no other pass's exit 2 can stand in for this one's.
+# argument pair, so no other pass's exit 2 can stand in for this one's. Its
+# error names a path with OSC 52 in it, and that name must print ESCAPED on
+# the line right before the failing pass's own message: find's stderr of
+# that one call, through the sanitizer. An unreadable directory cannot prove
+# it, since the grep arms report the same directory through their own `2>&1`
+# (a mutant sending the stderr of both scratch-file find calls, the NUL pass
+# and _name_pass, to /dev/null survived every case that asserted the name
+# anywhere in the run's stderr).
 find_one="$work/find-one-shim"; mkdir -p "$find_one"
 {
-  printf '#!/bin/sh\n'
-  printf 'prev=""\n'
-  printf 'for a in "$@"; do\n'
-  printf '  if [ "$prev $a" = "$FIND_FAIL_ON" ]; then echo "find: simulated read error" >&2; exit 1; fi\n'
-  printf '  prev="$a"\n'
-  printf 'done\n'
+  cat <<'SHIM'
+#!/bin/sh
+prev=""
+for a in "$@"; do
+  if [ "$prev $a" = "$FIND_FAIL_ON" ]; then
+    printf 'find: fo\033]52;c;aGk=\007: simulated read error\n' >&2
+    exit 1
+  fi
+  prev="$a"
+done
+SHIM
   printf 'exec "%s" "$@"\n' "$(command -v find)"
 } > "$find_one/find"
 chmod u+x "$find_one/find"
-r="$work/find-one"; seed "$r"
+find_one_x='find: fo\x1b]52;c;aGk=\x07: simulated read error'
+# zsh/plugins, empty: the no-.git zsh/plugins pass runs its own find too
+r="$work/find-one"; seed "$r"; mkdir -p "$r/zsh/plugins"
+fo_n=0
 for fo in '-type l|check-patterns: symlink scan (find) errored' \
     '-type f|check-patterns: NUL-byte scan (find) errored' \
     '-name *:*|check-patterns: file-name scan (find) errored' \
-    '-name check-patterns|check-patterns: file-name scan (find) errored'; do
+    '-name check-patterns|check-patterns: file-name scan (find) errored' \
+    '-maxdepth 1|check-patterns: zsh/plugins scan (find) errored'; do
+  fo_n=$((fo_n + 1))
   fo_rc=0
   out="$(PATH="$find_one:$PATH" FIND_FAIL_ON="${fo%%|*}" STRICT= "$cp" "$r" 2>&1)" || fo_rc=$?
   [ "$fo_rc" = "2" ] && ok || fail "a failing find ('${fo%%|*}' pass alone) must exit 2, got $fo_rc: $out"
   case "$out" in
-    *"${fo#*|}"*) ok ;;
-    *) fail "a failing find ('${fo%%|*}' pass alone): expected '${fo#*|}', got: $out" ;;
+    *$'\033'* | *$'\007'*) fail "a failing find ('${fo%%|*}' pass alone): a raw control byte reached the output: $out" ;;
+  esac
+  case "$out" in
+    *"$find_one_x"$'\n'"${fo#*|}"*) ok ;;
+    *) fail "a failing find ('${fo%%|*}' pass alone): expected its escaped error line right before '${fo#*|}', got: $out" ;;
   esac
 done
+[ "$fo_n" -eq 5 ] || fail "the per-find cases: expected 5 passes, ran $fo_n"
 
 # --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
 # silent pass ("no symlinks") -------------------------------------------------
@@ -2065,6 +2086,165 @@ done <<<"$cp_code"
 [ "$cp_tool_n" -ge 20 ] && [ "$cp_stdin_n" -ge 5 ] && [ -z "$cp_tool_bad" ] && ok \
   || fail "bin/check-patterns: every find/grep/sed/sort/git must redirect its stderr unless it reads stdin ($cp_tool_n redirected, $cp_stdin_n stdin readers), unredirected: $cp_tool_bad"
 
+# Every RECURSIVE grep reads a binary file as text (`-a`), and no grep in the
+# gate skips one (`-I`, a `--binary-files` value other than `text`): with
+# `-I` a file holding one NUL byte was skipped whole, hiding every violation
+# in it, and without `-a` GNU grep in a UTF-8 locale called a file with an
+# invalid byte binary and printed "Binary file ... matches" instead of the
+# hit. Regression protection, not a parser: per LOGICAL line (continuation
+# lines joined), quoted strings folded to one word, every grep, egrep or
+# fgrep word (behind `\` or a path too, after `-exec` or `xargs` too) up to
+# the end of its command. GNU permutes argv, so an option after an operand
+# counts, up to a `--`. An option taking an argument takes it the way getopt
+# does (`-C0`, `-d recurse`, `--binary-files without-match`). An array in
+# the argv counts by the option words of its own assignments in TEXT.
+# _rgrep_words TEXT -> the global rg_w: TEXT's words, each "${NAME[@]}" as
+# `@ARR:NAME`, each quoted string as `Q`, and `| || && ; ( )` split off.
+_rgrep_words() {
+  local t
+  t="$(printf '%s\n' "$1" | sed -E \
+    -e 's/"?\$\{([A-Za-z_][A-Za-z0-9_]*)\[@\]\}"?/ @ARR:\1 /g' \
+    -e "s/'[^']*'/Q/g" -e 's/"[^"]*"/Q/g' \
+    -e 's/(\|\||&&|[|;()])/ \1 /g')"
+  rg_w=()
+  read -r -a rg_w <<<"$t" || true
+}
+# _rgrep_opt WORD -> updates rg_rec, rg_txt, rg_skip, rg_pend for one option
+# word (rg_pend: the kind of argument the NEXT word is: d, bf, arg or "").
+_rgrep_opt() {
+  local w="$1" i c rest
+  case "$w" in
+    --recursive | --dereference-recursive | --directories=recurse) rg_rec=1 ;;
+    --text | --binary-files=text) rg_txt=1 ;;
+    --binary-files=*) rg_skip=1 ;;
+    --binary-files) rg_pend=bf ;;
+    --directories) rg_pend=d ;;
+    --regexp | --file | --exclude | --include | --exclude-dir | --max-count | \
+      --context | --after-context | --before-context | --label) rg_pend=arg ;;
+    --*) ;;
+    -?*)
+      i=1
+      while [ "$i" -lt "${#w}" ]; do
+        c="${w:$i:1}"
+        case "$c" in
+          r | R) rg_rec=1 ;;
+          a) rg_txt=1 ;;
+          I) rg_skip=1 ;;
+          e | f | d | A | B | C | m)
+            rest="${w:$((i + 1))}"
+            if [ -z "$rest" ]; then
+              if [ "$c" = d ]; then rg_pend=d; else rg_pend=arg; fi
+            elif [ "$c" = d ] && [ "$rest" = recurse ]; then
+              rg_rec=1
+            fi
+            break ;;
+        esac
+        i=$((i + 1))
+      done ;;
+  esac
+}
+# _rgrep_done TEXT LOGICAL - close one grep command: fold in its arrays'
+# assignments, then count it and record a violation.
+_rgrep_done() {
+  local name aline aw
+  for name in ${rg_arrs[@]+"${rg_arrs[@]}"}; do
+    while IFS= read -r aline; do
+      _rgrep_words "$aline"
+      for aw in ${rg_w[@]+"${rg_w[@]}"}; do
+        case "$aw" in -?*) rg_pend=""; _rgrep_opt "$aw" ;; esac
+      done
+    done <<<"$(printf '%s\n' "$1" | grep -E -e "(^|[^A-Za-z0-9_])$name\+?=\(" || true)"
+  done
+  if [ "$rg_rec" -eq 1 ]; then
+    rg_n=$((rg_n + 1))
+    [ "$rg_txt" -eq 1 ] || rg_bad="$rg_bad(no -a) $2"$'\n'
+  fi
+  [ "$rg_skip" -eq 0 ] || rg_bad="$rg_bad(-I) $2"$'\n'
+}
+# _rgrep_scan TEXT -> the globals rg_n (recursive grep commands) and rg_bad.
+_rgrep_scan() {
+  local line logical="" w in_grep
+  rg_n=0; rg_bad=""
+  while IFS= read -r line; do
+    case "$line" in
+      *\\) logical="$logical${line%\\} "; continue ;;
+    esac
+    logical="$logical$line"
+    _rgrep_words "$logical"
+    in_grep=0
+    for w in ${rg_w[@]+"${rg_w[@]}"} ';'; do
+      if [ "$in_grep" -eq 1 ]; then
+        case "$w" in
+          '|' | '||' | '&&' | ';' | '(' | ')')
+            _rgrep_done "$1" "$logical"; in_grep=0 ;;
+          *)
+            if [ -n "$rg_pend" ]; then
+              case "$rg_pend:$w" in
+                d:recurse) rg_rec=1 ;;
+                bf:text) rg_txt=1 ;;
+                bf:*) rg_skip=1 ;;
+              esac
+              rg_pend=""
+            elif [ "$rg_dd" -eq 0 ]; then
+              case "$w" in
+                --) rg_dd=1 ;;
+                @ARR:*) rg_arrs+=("${w#@ARR:}") ;;
+                -?*) _rgrep_opt "$w" ;;
+              esac
+            fi
+            continue ;;
+        esac
+      fi
+      w="${w#\\}"
+      case "${w##*/}" in
+        grep | egrep | fgrep)
+          in_grep=1; rg_rec=0; rg_txt=0; rg_skip=0; rg_pend=""; rg_dd=0; rg_arrs=() ;;
+      esac
+    done
+    logical=""
+  done <<<"$1"
+}
+# The scanner itself: each bypass shape must be flagged, and the shapes the
+# gate uses must not be.
+while IFS= read -r rg_case; do
+  _rgrep_scan "$(printf '%b' "$rg_case")"
+  [ -n "$rg_bad" ] && ok || fail "the recursive-grep self-scan missed: $rg_case"
+done <<'RGBAD'
+\\grep -rI x d
+/usr/bin/grep -r x d
+egrep -r x d
+x=$(grep x d -r 2>&1)
+grep -d recurse x d
+grep --directories=recurse x d
+grep -C0 -raI x d
+grep -C0 -rI x d
+grep -ra --binary-files without-match x d
+grep -ra --binary-files=binary x d
+opts=(-r -I)\ngrep -a "${opts[@]}" x d
+find d -exec grep -rI x {} +
+grep -rn --exclude=check-patterns \\\n  -e 'p' d
+RGBAD
+_rgrep_scan "$(printf '%s\n' \
+  'if out=$(LC_ALL=C grep -rHna --exclude=check-patterns \' \
+  '    -F "$em_dash" "${prose[@]}" 2>&1); then' \
+  'local -a exc=(--exclude=check-patterns)' \
+  'out=$(grep -rHnaE "${exc[@]}" '"$D"' "$gnu_re" "$@" 2>&1)' \
+  'grep -C 3 -e x -ra d' \
+  'n=$(printf x | grep -cE -- "$1") || rc=$?')"
+[ "$rg_n" -eq 3 ] && [ -z "$rg_bad" ] && ok \
+  || fail "the recursive-grep self-scan: the gate's own shapes must count 3 recursive greps and flag none, got $rg_n: $rg_bad"
+_rgrep_scan "$cp_code"
+[ "$rg_n" -ge 8 ] && [ -z "$rg_bad" ] && ok \
+  || fail "bin/check-patterns: every recursive grep must pass -a and no grep may pass -I ($rg_n recursive greps found, need >= 8): $rg_bad"
+# No here-string or here-doc in the gate's code: bash 3.2 backs both with a
+# temp file, and one that cannot be created fails the command with status 1,
+# which the gate would read as grep's "no match" (see _code_hits). Static
+# only: bash falls back from an unusable TMPDIR to /tmp, so no fixture here
+# can make that temp file fail.
+cp_heredoc="$(grep -nE -e "<<-?<?[[:space:]]*[\"'\$A-Za-z_]" <<<"$cp_code" || true)"
+[ -z "$cp_heredoc" ] && ok \
+  || fail "bin/check-patterns: a here-string or here-doc in the gate's code: $cp_heredoc"
+
 esc=$'\033'; bel=$'\007'; del=$'\177'
 c1=$'\xc2\x9b'; lone=$'\x9b'; rsq=$'\xe2\x80\x99'
 osc52="${esc}]52;c;aGk=${bel}"; csi="${esc}[2J"
@@ -2166,6 +2346,11 @@ if [ "$(id -u)" -ne 0 ]; then
   # grep and find escape a control byte in a name themselves (\033 ... \a,
   # measured on both macOS CI legs), so it reaches the sanitizer already
   # safe. _tty_clean above is the security half; this is the "named" half.
+  # So this case proves the sanitizer on GNU tools only. On macOS the
+  # sanitizer's coverage of a raw hostile NAME stands on the tty-symlink and
+  # tty-git fixtures, whose names reach it through DATA output (find -print,
+  # git ls-files), which BSD tools leave raw; the per-find shim cases above
+  # prove each find pass's stderr reaches it, on both.
   LC_ALL=C grep -qF -e "lib/d${osc52_x}" -e 'lib/d\033]52;c;aGk=\a' "$tty_err" && ok \
     || fail "tty unreadable dir: expected the name escaped in tty-stderr, got: $(cat "$tty_err")"
 else
@@ -2415,8 +2600,12 @@ case "$gate_out" in
   *) fail "an exemption re-test error must report itself: $gate_out" ;;
 esac
 # the fatal mark itself cannot be written while the sanitizer fails inside
-# arm 5's `$(... || true)` (the first-call sed shim above): nothing but the
-# signal to the main shell is left to carry the error, and the exit is 2.
+# a `$(...)` (the first-call sed shim above). In arm 8, _gnu_scan returns 0
+# after its _code_hits pipeline, so nothing but the signal to the main shell
+# is left to carry the error, and the exit is 2 (measured: with the `kill`
+# dropped, arm 8 exits 0, its hit lost with the pipeline; that mutant
+# survives arm 5 alone, whose failed `viol=$(...)` the ERR trap also turns
+# into 2). Both arms run.
 # A mktemp shim plants `fatal` in the gate's scratch dir as a DANGLING
 # symlink: the write fails (its target's dir does not exist, root included),
 # and `-e` reads it as absent, so it cannot stand in for the mark (a
@@ -2429,19 +2618,31 @@ mark_shim="$work/mktemp-mark-shim"; mkdir -p "$mark_shim"
   printf 'exec "%s" "$@"\n' "$(command -v mktemp)"
 } > "$mark_shim/mktemp"
 chmod u+x "$mark_shim/mktemp"
-r="$work/mark-unwritable"; seed "$r"; mkdir -p "$r/zsh/plugins/fast-syntax-highlighting"
-printf '%s\n' '$(uname -a)' > "$r/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
-printf 'P=/opt/homebrew\n' > "$r/lib/p.sh"
-_gate_rc "$badre_match" "$r"
-[ "$gate_rc" = "2" ] || fail "the mark fixture's premise: the broken-match copy must exit 2 alone, got $gate_rc: $gate_out"
-rm -f "$tty_sed_state"
-_gate_rc "$badre_match" "$r" PATH="$tty_sed_shim:$mark_shim:$PATH" TTY_SED_STATE="$tty_sed_state"
-[ "$gate_rc" = "2" ] && ok \
-  || fail "a failed sanitizer AND an unwritable fatal mark inside a \$(...) must still exit 2, got $gate_rc: $gate_out"
-case "$gate_out" in
-  *"check-patterns: could not write the fail-closed mark - failing closed"*) ok ;;
-  *) fail "an unwritable fatal mark must say so: $gate_out" ;;
-esac
+badre_gnu="$work/badre-gnu-gate"
+sed 's|\(printf .%s.n. "$out" [|] _code_hits "$gnu_re\)"$|\1("|' "$cp" > "$badre_gnu"
+chmod u+x "$badre_gnu"
+[ "$(grep -c -F -e '_code_hits "$gnu_re("' "$badre_gnu")" = 1 ] \
+  || fail "the broken arm 8 gate copy: the sed edit did not land exactly once"
+for mk in "5|$badre_match|P=/opt/homebrew" "8|$badre_gnu|sed -e 's/\\s//' f"; do
+  mk_arm="${mk%%|*}"; mk_rest="${mk#*|}"; mk_gate="${mk_rest%%|*}"
+  r="$work/mark-unwritable-$mk_arm"; seed "$r"; mkdir -p "$r/zsh/plugins/fast-syntax-highlighting"
+  printf '%s\n' '$(uname -a)' > "$r/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
+  printf '%s\n' "${mk_rest#*|}" > "$r/lib/p.sh"
+  _gate_rc "$mk_gate" "$r"
+  [ "$gate_rc" = "2" ] || fail "the arm $mk_arm mark fixture's premise: the broken-match copy must exit 2 alone, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"check-patterns: code re-test errored"*) ;;
+    *) fail "the arm $mk_arm mark fixture's premise: the broken-match copy must report the re-test error: $gate_out" ;;
+  esac
+  rm -f "$tty_sed_state"
+  _gate_rc "$mk_gate" "$r" PATH="$tty_sed_shim:$mark_shim:$PATH" TTY_SED_STATE="$tty_sed_state"
+  [ "$gate_rc" = "2" ] && ok \
+    || fail "arm $mk_arm: a failed sanitizer AND an unwritable fatal mark inside a \$(...) must still exit 2, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"check-patterns: could not write the fail-closed mark - failing closed"*) ok ;;
+    *) fail "arm $mk_arm: an unwritable fatal mark must say so: $gate_out" ;;
+  esac
+done
 # the repo-wide git pass: each of its exit-2 sites not already pinned to 2
 # above (lev, probe, toplevel, ls-files error, stderr, malformed record)
 if command -v git >/dev/null 2>&1; then
@@ -2503,6 +2704,211 @@ if [ "$(id -u)" -ne 0 ]; then
 else
   echo "  SKIP: running as root - cannot exercise the NUL pass's unreadable-file case"
 fi
+
+# === a tool failing where the gate reads its answer fails closed ============
+# _argfail_shim DIR TOOL - a TOOL on PATH that fails (stderr, exit
+# $ARG_FAIL_RC, default 2) on the one call holding an argument exactly equal
+# to $ARG_FAIL_ON, and runs the real TOOL for every other call, so the
+# failure lands on one site of the gate and nowhere else. $ARG_FAIL_TAIL
+# (printf %b escapes) ends its error line, to plant control bytes there.
+_argfail_shim() {
+  mkdir -p "$1"
+  {
+    printf '#!/bin/sh\n'
+    printf 'for a in "$@"; do\n'
+    printf '  if [ "$a" = "$ARG_FAIL_ON" ]; then printf "%%s: simulated failure%%b\\n" "%s" "${ARG_FAIL_TAIL:-}" >&2; exit "${ARG_FAIL_RC:-2}"; fi\n' "$2"
+    printf 'done\n'
+    printf 'exec "%s" "$@"\n' "$(command -v "$2")"
+  } > "$1/$2"
+  chmod u+x "$1/$2"
+  [ "$(PATH="$1:$PATH" bash -c "command -v $2")" = "$1/$2" ] \
+    || fail "the $2 shim is not the $2 a fresh process resolves"
+}
+sed_fail="$work/argfail-sed"; _argfail_shim "$sed_fail" sed
+grep_fail="$work/argfail-grep"; _argfail_shim "$grep_fail" grep
+sort_fail="$work/argfail-sort"; _argfail_shim "$sort_fail" sort
+# _code_of's sed failing, once per arm that re-tests CODE (5-10). Its empty
+# answer used to read as "a comment only line", so each planted violation
+# passed with exit 0 and no output (measured on arm 5 before the fix). Each
+# fixture first exits 1 with its arm's message under the real sed, so the
+# shimmed run proves the split, not a clean tree.
+# The shapes go through $P, $D and a doubled backslash (see _plug_case), so
+# this file carries none of what arms 8-10 read in tests/.
+split_err_msg="check-patterns: the code/comment split (sed) errored"
+split_arm=0
+while IFS='|' read -r split_file split_msg split_line; do
+  split_arm=$((split_arm + 1))
+  r="$work/split-fail-$split_arm"; seed "$r"
+  printf '%s\n' "$split_line" > "$r/lib/$split_file"
+  _gate_rc "$cp" "$r"
+  [ "$gate_rc" = "1" ] || fail "split fixture $split_file: the real gate must exit 1, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"$split_msg"*) ;;
+    *) fail "split fixture $split_file: expected '$split_msg' from the real gate, got: $gate_out" ;;
+  esac
+  _gate_rc "$cp" "$r" PATH="$sed_fail:$PATH" ARG_FAIL_ON='s/^[^:]*:[0-9]+://' ARG_FAIL_RC=1
+  [ "$gate_rc" = "2" ] && ok \
+    || fail "a failing code/comment split on $split_file must exit 2, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"$split_err_msg"*"$r/lib/$split_file:1:"* | *"$r/lib/$split_file:1:"*"$split_err_msg"*) ok ;;
+    *) fail "a failing code/comment split on $split_file must report itself AND the hit: $gate_out" ;;
+  esac
+done <<SPLIT
+p.sh|check-patterns: hardcoded Homebrew prefix|P=/opt/homebrew
+b.sh|check-patterns: a 'brew shellenv' / 'brew --prefix' fork|eval "\$(brew shellenv)"
+m.sh|check-patterns: bash 4 syntax in the bash-3.2 surface|declare -A m
+g.sh|check-patterns: a GNU-only regex escape|sed -e 's/\\s//' f
+e.sh|check-patterns: an early-exit reader|x $P grep -q y
+d.sh|check-patterns: a '--' after the first operand|chmod -R go-w $D "\$d"
+SPLIT
+[ "$split_arm" -eq 6 ] || fail "the code/comment split cases: expected 6 arms, ran $split_arm"
+# _retest trusts a re-test only as a count grep printed that agrees with its
+# status. A grep shim answers every `-cE` call (the match and the exemption
+# re-tests) with a status and a count that do not fit: each is an error,
+# exit 2, never "no match" (the hit dropped) or a match that then exempts it.
+cnt_shim="$work/grep-count-shim"; mkdir -p "$cnt_shim"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do if [ "$a" = -cE ]; then printf "%%s" "$CNT_OUT"; exit "$CNT_RC"; fi; done\n'
+  printf 'exec "%s" "$@"\n' "$(command -v grep)"
+} > "$cnt_shim/grep"
+chmod u+x "$cnt_shim/grep"
+for cnt in '0|' '0|0' '1|1' '0|1x' '1|0x'; do
+  _gate_rc "$cp" "$work/split-fail-1" PATH="$cnt_shim:$PATH" CNT_RC="${cnt%%|*}" CNT_OUT="${cnt#*|}"
+  [ "$gate_rc" = "2" ] && ok \
+    || fail "a re-test grep exiting ${cnt%%|*} with count '${cnt#*|}' must exit 2, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"check-patterns: code re-test errored"*) ok ;;
+    *) fail "a re-test grep exiting ${cnt%%|*} with count '${cnt#*|}' must report the re-test error: $gate_out" ;;
+  esac
+done
+# the path filters of arms 2, 5 and 11 (grep -v) erroring: `|| true` used to
+# read that as "every hit exempted", exit 0. A filter that cannot run
+# exempts nothing: the hit prints, and the exit is 2. Two ways to fail: grep
+# itself (its error line, carrying OSC 52, must print escaped right above
+# the filter's message: its stderr, through the sanitizer), and grep never
+# running because its stderr file cannot be opened (a mktemp shim makes
+# drop.err a directory): bash then returns 1, grep's own "every line
+# dropped", which passed all three violations with exit 0.
+filter_err_msg="exemption filter (grep -v) errored"
+filter_x='grep: simulated failure\x1b]52;c;aGk=\x07'
+drop_shim="$work/mktemp-drop-shim"; mkdir -p "$drop_shim"
+{
+  printf '#!/bin/sh\n'
+  printf 'case "$*" in *check-patterns.XXXXXX*) d="$("%s" "$@")" || exit $?; mkdir "$d/drop.err" || exit 1; printf "%%s\\n" "$d"; exit 0 ;; esac\n' "$(command -v mktemp)"
+  printf 'exec "%s" "$@"\n' "$(command -v mktemp)"
+} > "$drop_shim/mktemp"
+chmod u+x "$drop_shim/mktemp"
+filter_n=0
+while IFS='|' read -r filter_file filter_label filter_msg filter_line; do
+  filter_n=$((filter_n + 1))
+  r="$work/filter-fail-$filter_n"; seed "$r"; mkdir -p "$r/$(dirname "$filter_file")"
+  printf '%s\n' "$filter_line" > "$r/$filter_file"
+  _gate_rc "$cp" "$r"
+  [ "$gate_rc" = "1" ] || fail "filter fixture $filter_file: the real gate must exit 1, got $gate_rc: $gate_out"
+  for filter_how in grep drop.err; do
+    if [ "$filter_how" = grep ]; then
+      _gate_rc "$cp" "$r" PATH="$grep_fail:$PATH" ARG_FAIL_ON=-vE ARG_FAIL_TAIL='\033]52;c;aGk=\007'
+    else
+      _gate_rc "$cp" "$r" PATH="$drop_shim:$PATH"
+    fi
+    [ "$gate_rc" = "2" ] && ok \
+      || fail "a failing exemption filter ($filter_how) on $filter_file must exit 2, got $gate_rc: $gate_out"
+    case "$gate_out" in
+      *"check-patterns: the $filter_label $filter_err_msg"*) ok ;;
+      *) fail "a failing exemption filter ($filter_how) on $filter_file must report itself: $gate_out" ;;
+    esac
+    case "$gate_out" in
+      *"$r/$filter_file:1:"*"$filter_msg"*) ok ;;
+      *) fail "a failing exemption filter ($filter_how) on $filter_file must still report the hit and '$filter_msg': $gate_out" ;;
+    esac
+  done
+  case "$gate_out" in
+    *$'\033'*) fail "a failing exemption filter on $filter_file: a raw ESC reached the output: $gate_out" ;;
+  esac
+  _gate_rc "$cp" "$r" PATH="$grep_fail:$PATH" ARG_FAIL_ON=-vE ARG_FAIL_TAIL='\033]52;c;aGk=\007'
+  case "$gate_out" in
+    *$'\033'*) fail "a failing exemption filter (grep) on $filter_file: a raw ESC reached the output: $gate_out" ;;
+    *"$filter_x"$'\n'"check-patterns: the $filter_label $filter_err_msg"*) ok ;;
+    *) fail "a failing exemption filter (grep) on $filter_file: expected its escaped error line right above its message, got: $gate_out" ;;
+  esac
+done <<FILTER
+lib/u.sh|lib/os.sh|check-patterns: ad-hoc 'uname -m'|x=\$(uname -m)
+lib/p.sh|gpg-agent.conf|check-patterns: hardcoded Homebrew prefix|P=/opt/homebrew
+docs/x.md|lazy-lock.json|check-patterns: an em dash (U+2014) in repo prose|a ${em_dash} b
+FILTER
+[ "$filter_n" -eq 3 ] || fail "the exemption filter cases: expected 3 arms, ran $filter_n"
+# a command failing where the gate does NOT check its status: set -e used to
+# exit with that command's own status, and a 1 reads as "a violation" with no
+# report at all. The ERR trap makes it exit 2, a scan error. Two sites, both
+# in the main shell: _re_escape's sed (a clean tree, so nothing else fires)
+# and arm 8's sort (a real hit, whose report the failure drops).
+unchecked_msg="check-patterns: a command failed where the gate does not check its status"
+r="$work/unchecked-reesc"; seed "$r"
+[ "$(run "$r")" = "0" ] || fail "the unchecked-failure fixture must pass the real gate"
+PATH="$sed_fail:$PATH" ARG_FAIL_ON='s/[].[(){}^$*+?|\]/\\&/g' ARG_FAIL_RC=1 \
+  fails_with_rc 2 "$r" "$unchecked_msg" "an unchecked sed failure (_re_escape) must exit 2" only
+r="$work/unchecked-sort"; seed "$r"
+printf '%s\n' "sed -e 's/\\s//' f" > "$r/lib/g.sh"
+_gate_rc "$cp" "$r" PATH="$sort_fail:$PATH" ARG_FAIL_ON=-k2,2n ARG_FAIL_RC=1
+[ "$gate_rc" = "2" ] && ok || fail "an unchecked sort failure (arm 8) must exit 2, got $gate_rc: $gate_out"
+case "$gate_out" in
+  *"$unchecked_msg"*) ok ;;
+  *) fail "an unchecked sort failure (arm 8) must say so: $gate_out" ;;
+esac
+# ... and inside a FUNCTION the main shell calls: without `set -E` the trap
+# does not reach it and `set -e` exits with the command's own status. No
+# function of the gate runs an unchecked external command today, so a copy
+# of the gate plants a `false` at the top of _scan_roots.
+unchecked_fn="$work/unchecked-fn-gate"
+sed 's|^_scan_roots() {$|&\
+  false|' "$cp" > "$unchecked_fn"
+chmod u+x "$unchecked_fn"
+[ "$(grep -c -x -e '  false' "$unchecked_fn")" = 1 ] \
+  || fail "the unchecked-function gate copy: the sed edit did not land exactly once"
+_gate_rc "$unchecked_fn" "$work/unchecked-reesc"
+[ "$gate_rc" = "2" ] && ok || fail "an unchecked failure inside a function must exit 2, got $gate_rc: $gate_out"
+case "$gate_out" in
+  *"$unchecked_msg (exit 1,"*) ok ;;
+  *) fail "an unchecked failure inside a function must say so: $gate_out" ;;
+esac
+# The ERR trap acts in the main shell only, because bash 3.2 fires ERR in a
+# `$(...)` even when the caller checks its status: without that guard a
+# clean tree exits 2 under 3.2 (measured locally on bash 3.2.57). The gate
+# starts through `env bash`, which need not be 3.2 even on a mac, so this
+# runs the gate under a 3.x bash explicitly: /bin/bash (3.2 on the macOS
+# legs) or the bash on PATH. With neither, a loud SKIP: the guard is then
+# proven only where such a bash exists.
+b3=""
+for b3_c in /bin/bash "$(command -v bash)"; do
+  if [ -x "$b3_c" ] && [ "$("$b3_c" -c 'echo "${BASH_VERSINFO[0]}"' 2>/dev/null || true)" = 3 ]; then
+    b3="$b3_c"; break
+  fi
+done
+if [ -n "$b3" ]; then
+  gate_rc=0; gate_out="$(STRICT= "$b3" "$cp" "$work/unchecked-reesc" 2>&1)" || gate_rc=$?
+  [ "$gate_rc" = "0" ] && ok || fail "a clean tree under $b3 (bash 3) must exit 0, got $gate_rc: $gate_out"
+  gate_rc=0; gate_out="$(STRICT= "$b3" "$cp" "$work/split-fail-1" 2>&1)" || gate_rc=$?
+  [ "$gate_rc" = "1" ] && ok || fail "a violation under $b3 (bash 3) must exit 1, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"check-patterns: hardcoded Homebrew prefix"*) ok ;;
+    *) fail "a violation under $b3 (bash 3) must be reported: $gate_out" ;;
+  esac
+else
+  echo "  SKIP: no bash 3.x at /bin/bash or on PATH - the ERR trap's subshell guard is not exercised under the bash it exists for"
+fi
+# An inherited GREP_OPTIONS reaches every grep of the gate: BSD grep (macOS)
+# honours it, GNU grep 3.6+ ignores it. A grep shim stands in for BSD's,
+# failing any call that still sees one: the gate unsets it.
+go_shim="$work/grep-options-shim"; mkdir -p "$go_shim"
+{
+  printf '#!/bin/sh\n'
+  printf 'if [ -n "${GREP_OPTIONS:-}" ]; then echo "grep: GREP_OPTIONS reached grep" >&2; exit 2; fi\n'
+  printf 'exec "%s" "$@"\n' "$(command -v grep)"
+} > "$go_shim/grep"
+chmod u+x "$go_shim/grep"
+PATH="$go_shim:$PATH" GREP_OPTIONS=-I \
+  fails_with_rc 1 "$work/split-fail-1" "check-patterns: hardcoded Homebrew prefix" "an inherited GREP_OPTIONS must not reach the gate's greps" only
 
 # === a relative ROOT starting with `-` is a path, not an option =============
 # find reads a leading-dash operand as an expression, and arm 3's grep (GNU
