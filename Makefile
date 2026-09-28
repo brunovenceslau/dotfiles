@@ -86,8 +86,8 @@ lint: check-patterns py-syntax
 	  for f in $(ZSH_FILES); do echo "zsh -n $$f"; zsh -n "$$f" || exit 1; done; \
 	else echo "zsh -n: no .zsh files yet, skipping"; fi
 
-# Static-pattern checks - forbid `curl|sh` runtime fetches,
-# ad-hoc `uname -m` outside lib/os.sh (all arch
+# Static-pattern checks - forbid runtime fetches piped into a shell (curl or
+# wget into sh), ad-hoc `uname -m` outside lib/os.sh (all arch
 #   branching goes through the is-arm64/is-amd64 helpers), a hardcoded Homebrew
 #   prefix or brew prefix-probe fork, and bash 4 syntax in the 3.2 surface (which
 #   the /bin/bash -n pass above cannot see at all). The logic lives in

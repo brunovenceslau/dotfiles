@@ -11,17 +11,20 @@
 #   `make lint` includes. Twelve checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded by their
 #   one exact path, zsh/plugins - we police our code, not upstream's):
-#     (1) `curl|sh` / `wget|bash` runtime fetches - the static CI half of the
-#         no-runtime-download rule (the startup-path half is the
-#         fast-syntax-highlighting neutralization in zsh/zshrc).
-#     (2) ad-hoc `uname -m` outside lib/os.sh - arch branching MUST go through
+#     (1) a curl or wget download piped into sh or bash (or otherwise executed
+#         on the same line) - the static CI half of the no-runtime-download
+#         rule (the startup-path half is the fast-syntax-highlighting
+#         neutralization in zsh/zshrc). It reads the shared surface plus the
+#         Makefile and .github/, and this file through a narrow
+#         self-scan (as arms 2 and 11 do).
+#     (2) an ad-hoc uname with -m outside lib/os.sh - arch branching MUST go through
 #         the is-arm64 / is-amd64 helpers.
 #     (3) an unescaped `#` inside a Makefile `$(shell ...)` / `${shell ...}` - macOS's
 #         system make (3.81) reads a bare `#` in a function argument as a comment and
 #         aborts ("unterminated call to function shell"), which GNU make 4.x on Linux
 #         silently tolerates; it MUST be escaped `\#`. A targeted, heuristic
-#         check on the Makefile (excluded from the scan surface - its recipes legitimately
-#         hold the very literals rules 1-2 forbid); a `#` after a nested `$(...)` or on a
+#         check on the Makefile (off the shared scan surface; arms 1, 8 and
+#         10-12 read it too); a `#` after a nested `$(...)` or on a
 #         `\`-continued line is not caught (the macOS CI leg's real make 3.81 backstops it).
 #     (4) a drifted pinned-plugin shim premise in the SHA-pinned zsh plugins - the one pinned
 #         `$(uname -a)` shape the startup fork-free path relies on; a bump that
@@ -57,8 +60,8 @@
 #    (11) the Unicode em dash (U+2014) anywhere in the repo's own prose - the
 #         house style (CONTRIBUTING.md and .claude/rules/docs.md) is a plain
 #         hyphen. Unlike arms 5-10 it does NOT strip comments first: a comment
-#         is prose too, the same reasoning arms 1-2 use for curl|sh and
-#         uname -m. Vendored legal text and one auto-generated lockfile are
+#         is prose too, the same reasoning arms 1-2 use for a fetch piped
+#         into a shell and for uname with -m. Vendored legal text and one auto-generated lockfile are
 #         allowlisted; see the arm itself.
 #    (12) a symlink anywhere the arms above read, plus (when ROOT has its
 #         own .git) any tracked symlink, or gitlink that is not a pinned
@@ -75,7 +78,7 @@
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
 #   missing path makes grep exit 2, and bash's `if grep ...; then fail` reads a
 #   non-zero exit as "no match" - so BOTH checks were silently disabled whenever
-#   any scan path was absent (fail-OPEN: a real curl|sh would pass). This tool
+#   any scan path was absent (fail-OPEN: a real curl piped into sh would pass). This tool
 #   fixes both halves: it scans only paths that EXIST (an absent optional dir is
 #   skipped, not an error), and it treats a real grep error (exit >= 2) as a hard
 #   failure, never a silent pass. Regression coverage: tests/check_patterns_test.sh.
@@ -88,9 +91,24 @@
 #   although the one config key known to run a program on a read-only call
 #   (core.fsmonitor) is forced off there, the repo's own .git/config is read.
 #   Exit: 0 clean; 1 a forbidden pattern was found; 2 nothing to scan, a scan
-#         error, or a file name arm (12) refuses (fail closed).
+#         error the gate detects (a tool failing, the report sanitizer
+#         included; an unreadable file; a pinned-plugin file STRICT=1 cannot
+#         verify), a file holding a NUL byte, or a file name arm (12) refuses
+#         (fail closed). A command failing where the gate does not check it
+#         exits through `set -e` with that command's own status.
 
 set -euo pipefail
+# The C locale for this script and every tool it runs. In a multibyte locale
+# (C.UTF-8, en_US.UTF-8) GNU grep's `[^|]*` does not match an invalid byte,
+# so arm 1 missed a curl piped into sh whose URL held a 0xFF byte (exit 0 under
+# LC_ALL=C.UTF-8, 1 under LC_ALL=C). Every pattern here is ASCII and every
+# comparison is meant byte-wise (arm 8's sort, the sanitizer, arm 11's em
+# dash bytes), so no arm wants the caller's locale. LC_ALL overrides LANG
+# and every LC_* variable.
+export LC_ALL=C
+# An inherited SHELLOPTS=xtrace would trace every expanded line, file names
+# and contents included, to stderr raw, around the sanitizer below.
+set +x
 # An inherited BASHOPTS (bash 4.1+ imports it) can switch these on: failglob
 # aborts on the first unmatched glob below with rc 1, which reads as "a
 # violation"; dotglob makes `*` repeat the dot entries _scan_roots globs on
@@ -99,14 +117,146 @@ set -euo pipefail
 # exist in bash 3.2 (failglob and nocasematch since 3.0 and 3.1).
 shopt -u failglob dotglob nocaseglob nullglob nocasematch
 
+cp_tmp=""  # the scratch dir, created below; _fatal_mark may run before
+# _fatal_mark's last resort: a subshell that cannot leave its mark signals
+# this shell instead, which exits 2 once the subshell it waits on is done.
+# Only this script sends USR1 to itself.
+trap 'exit 2' USR1
+
+# --- terminal-safe report: ONE sanitizer every print path goes through --------
+# The report echoes file NAMES and file CONTENT from the scanned tree, and
+# either can carry terminal control sequences: OSC 52 writes the clipboard,
+# CSI moves the cursor or clears the screen, a CR or BS overwrites what was
+# already shown. _tty_safe rewrites them into a visible `\xHH`, per line:
+#   - every C0 control (0x01-0x1F) but TAB and LF, and DEL (0x7F). TAB stays
+#     raw: it only advances the cursor to the next tab stop, it cannot open
+#     or carry a sequence, and the Makefile recipe lines the report quotes are
+#     TAB-indented. LF is the record separator itself. NUL is DELETED first
+#     (`tr -d`): no sed can name it portably in a pattern, and a shell string
+#     cannot hold one, but _err_file's input (a tool's stderr) can.
+#   - on a line that is NOT well-formed UTF-8, EVERY byte 0x80-0xFF. A stray
+#     C1 byte (0x80-0x9F) is a control to an 8-bit terminal, and after an
+#     invalid lead (E0 9B, FF 9B) or inside an overlong form (C0 9B, E0 82 9B)
+#     it cannot be told from a continuation byte without decoding the whole
+#     line, which is what the well-formedness test does (the RFC 3629 byte
+#     grammar, as one ERE). The cost: a valid character on such a line prints
+#     escaped too.
+#   - on any line, the UTF-8 encoded C1 controls U+0080-U+009F (C2 80 - C2 9F),
+#     which a UTF-8 terminal may honour as 8-bit controls (C2 9B is CSI).
+# A well-formed line keeps every other character raw, so a name or a line
+# in any script reads as itself. Residuals: a well-formed line still reaches
+# an 8-bit (non-UTF-8) terminal with its continuation bytes, which such a
+# terminal reads as C1 (the terminals this gate runs in - macOS Terminal,
+# iTerm2, the CI log - are UTF-8); and printable characters that REORDER or
+# hide text (the Unicode bidi overrides such as U+202E, zero-width ones) are
+# not controls and pass as is.
+# It changes only what is PRINTED: every arm decides on the raw data first,
+# so no pass/fail outcome depends on it. One pass per line, every command a
+# fixed `s///g` or the one well-formedness test: linear in the line length
+# (an earlier re-run loop was quadratic, 39 s on a 32 KB line of 0x9B).
+# One `s///` per byte, built once here with no fork (`printf -v`): sed cannot
+# compute a byte's hex, and a byte range needs its own replacement. LC_ALL=C
+# makes both GNU and BSD sed match single raw bytes, never decoded characters;
+# BSD sed has no `\xHH` in a pattern, so each pattern holds the raw byte.
+_tty_sed=()
+_tty_byte() {  # $1 = byte value (decimal) -> the globals _tb (the byte), _th (hex)
+  local oct
+  printf -v oct '%03o' "$1"
+  printf -v _th '%02x' "$1"
+  # shellcheck disable=SC2059  # the format IS the octal escape that makes the byte
+  printf -v _tb "\\$oct"
+}
+_tty_esc() {  # $1 = byte value (decimal); appends its escaping `s///g`
+  _tty_byte "$1"
+  _tty_sed+=(-e "s/$_tb/\\\\x$_th/g")
+}
+_tty_i=1
+while [ "$_tty_i" -le 31 ]; do
+  case "$_tty_i" in 9 | 10) ;; *) _tty_esc "$_tty_i" ;; esac
+  _tty_i=$((_tty_i + 1))
+done
+_tty_esc 127
+# The well-formed UTF-8 line, from its bytes. After the C0 pass above, the
+# ASCII left on a line is TAB and 0x20-0x7E.
+_tty_byte 128; _tty_x80="$_tb"; _tty_byte 143; _tty_x8f="$_tb"
+_tty_byte 144; _tty_x90="$_tb"; _tty_byte 159; _tty_x9f="$_tb"
+_tty_byte 160; _tty_xa0="$_tb"; _tty_byte 191; _tty_xbf="$_tb"
+_tty_byte 194; _tty_xc2="$_tb"; _tty_byte 223; _tty_xdf="$_tb"
+_tty_byte 224; _tty_xe0="$_tb"; _tty_byte 225; _tty_xe1="$_tb"
+_tty_byte 236; _tty_xec="$_tb"; _tty_byte 237; _tty_xed="$_tb"
+_tty_byte 238; _tty_xee="$_tb"; _tty_byte 239; _tty_xef="$_tb"
+_tty_byte 240; _tty_xf0="$_tb"; _tty_byte 241; _tty_xf1="$_tb"
+_tty_byte 243; _tty_xf3="$_tb"; _tty_byte 244; _tty_xf4="$_tb"
+_tty_c="[$_tty_x80-$_tty_xbf]"
+_tty_u8="[	 -~]|[$_tty_xc2-$_tty_xdf]$_tty_c"
+_tty_u8="$_tty_u8|${_tty_xe0}[$_tty_xa0-$_tty_xbf]$_tty_c"
+_tty_u8="$_tty_u8|[$_tty_xe1-$_tty_xec$_tty_xee$_tty_xef]$_tty_c$_tty_c"
+_tty_u8="$_tty_u8|${_tty_xed}[$_tty_x80-$_tty_x9f]$_tty_c"
+_tty_u8="$_tty_u8|${_tty_xf0}[$_tty_x90-$_tty_xbf]$_tty_c$_tty_c"
+_tty_u8="$_tty_u8|[$_tty_xf1-$_tty_xf3]$_tty_c$_tty_c$_tty_c"
+_tty_u8="$_tty_u8|${_tty_xf4}[$_tty_x80-$_tty_x8f]$_tty_c$_tty_c"
+_tty_sed+=(-e "/^($_tty_u8)*\$/!{")
+_tty_i=128
+while [ "$_tty_i" -le 255 ]; do _tty_esc "$_tty_i"; _tty_i=$((_tty_i + 1)); done
+_tty_sed+=(-e '}')
+_tty_i=128
+while [ "$_tty_i" -le 159 ]; do
+  _tty_byte "$_tty_i"
+  _tty_sed+=(-e "s/$_tty_xc2$_tb/\\\\xc2\\\\x$_th/g")
+  _tty_i=$((_tty_i + 1))
+done
+unset _tty_i _tb _th
+# _tty_safe - stdin -> stdout, control bytes escaped. The ONLY writer of the
+# report: _err, _out and _err_file below are its callers. Every `>&2` in this
+# file sits on one of those helper lines, and every `find` sends its stderr
+# into a capture or a scratch file that _err_file prints, never straight to
+# the terminal (tests/check_patterns_test.sh asserts both statically).
+# A sanitizer that fails would drop the report while the exit code still said
+# "clean" or "violation", so it fails CLOSED: exit 2 with a fixed message,
+# plus a mark in the scratch dir, which the last line of this script reads,
+# so the exit is 2 even when the failure happened inside a `$(...)`.
+_tty_safe() { LC_ALL=C tr -d '\000' | LC_ALL=C sed -E "${_tty_sed[@]}"; }
+# A mark that cannot be written (the scratch dir gone, the disk full) would
+# let a fail-closed event inside a `$(...)` whose status the caller drops
+# (arm 5's `|| true`) exit 0, so that failure is fatal too: a fixed message,
+# USR1 to the main shell (the trap above), and exit 2 here. Before the
+# scratch dir exists no `$(...)` has run a check, and every caller exits 2
+# on its own.
+_fatal_mark() {
+  [ -n "$cp_tmp" ] || return 0
+  if ! : 2>/dev/null >"$cp_tmp/fatal"; then
+    printf 'check-patterns: could not write the fail-closed mark - failing closed\n' >&2 || :
+    kill -USR1 "$$" 2>/dev/null || :
+    exit 2
+  fi
+}
+_tty_fail() { printf 'check-patterns: the report sanitizer (tr | sed) failed - failing closed\n' >&2 || :; _fatal_mark; exit 2; }
+_err() { printf '%s\n' "$@" | _tty_safe >&2 || _tty_fail; }        # each arg a stderr line
+_out() { printf '%s\n' "$@" | _tty_safe || _tty_fail; }            # each arg a stdout line
+_err_file() { _tty_safe <"$1" >&2 || _tty_fail; }                  # a file's bytes to stderr
+
+# The scratch dir every pass shares (find's stderr, the NUL pass's list, the
+# fatal mark). No mktemp means no fail-closed evidence can be kept: exit 2.
+cp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns.XXXXXX" 2>/dev/null) || {
+  _err "check-patterns: could not create a scratch dir - failing closed"
+  exit 2
+}
+trap 'rm -rf "$cp_tmp"' EXIT
+
 root="${1:-.}"
+# A relative ROOT starting with `-` reaches every tool as "$root/..." in
+# operand position, where find (paths come before its `--`-less expression)
+# and arm 3's grep (GNU permutes argv) read it as an option. `./` in front
+# makes it a path everywhere and names the same directory.
+case "$root" in -*) root="./$root" ;; esac
 # A `:`, LF or CR in the ROOT's path breaks the PATH:NN: split every arm
 # reads, the same way arm 12's file-name rule describes: measured, a real
 # `chmod -R go-w --` under '/tmp/r:1: #' passed. No arm result stands, so this
 # fails closed before any runs. Bash 3.2 reads `$'...'` in a case pattern.
 case "$root" in
   *:* | *$'\n'* | *$'\r'*)
-    printf 'check-patterns: the scan root %q holds a ":", a newline or a CR - every arm reads a hit as PATH:NN:, so such a path can hide a violation; scan it through a path without one\n' "$root" >&2
+    printf -v _root_q '%q' "$root"
+    _err "check-patterns: the scan root $_root_q holds a \":\", a newline or a CR - every arm reads a hit as PATH:NN:, so such a path can hide a violation; scan it through a path without one"
     exit 2 ;;
 esac
 
@@ -117,7 +267,7 @@ esac
 # scan. It cannot be a grep flag: GNU and BSD grep both match --exclude-dir
 # against a BASE NAME at any depth, never a path, so `--exclude-dir=plugins`
 # also hid first-party trees such as config/nvim/lua/plugins/ and
-# lib/plugins/ (a curl|sh there passed).
+# lib/plugins/ (a curl piped into sh there passed).
 #   - A symlinked (or non-directory) zsh stays a root as is: expanding
 #     through a symlinked zsh would hand arm (12)'s find paths below the
 #     link without the link itself.
@@ -156,10 +306,12 @@ _scan_roots() {
   done
 }
 
-# Our own implementing surface. NEVER the Makefile itself (its recipes contain
-# the very patterns they forbid), and the self-exclude on each grep below
-# likewise skips THIS script, which necessarily spells out the forbidden literals
-# in its grep patterns and docs. `home/` is optional - absent = skipped, not an
+# Our own implementing surface, shared by arms 2, 5 and 6 (arm 1 widens it
+# below, arms 7-12 build their own). The Makefile is not on it (its comments
+# state the rules and spell arm 2's literal), and the self-exclude on each
+# recursive grep below skips THIS script, which spells the forbidden literals
+# in its patterns and docs; arms 1, 2 and 11 re-read it through a narrow
+# self-scan instead. `home/` is optional - absent = skipped, not an
 # error (that omission is the whole bug this tool fixes). A tree whose only
 # content is the pinned zsh/plugins, or symlinks under zsh/, is a no-op scan
 # too - and a recursive grep given NO operand would read the cwd or stdin.
@@ -167,11 +319,49 @@ _scan_roots install.sh lib bin zsh config packages security home
 scan=(${roots[@]+"${roots[@]}"})
 scan_links=(${zsh_links[@]+"${zsh_links[@]}"})
 if [ "${#scan[@]}" -eq 0 ]; then
-  echo "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan" >&2
+  _err "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan"
   exit 2
 fi
 
 bad=0
+# fatal=1: a scan ERROR (a tool failed, a name no arm can read): exit 2, not 1,
+# so a caller can tell "the gate could not look" from "it found a violation".
+fatal=0
+
+# NARROW SELF-SCAN target: exactly this file, which every recursive arm skips
+# by base name (--exclude=check-patterns). Arms 1, 2 and 11 grep it again on
+# their own, non-recursively, so tests/plugins_test.sh's recursive-grep
+# invariant does not count those calls and they need no self-exclude. Absent
+# (a fixture tree without bin/check-patterns) is a silent skip, like every
+# optional path.
+self_cp="$root/bin/check-patterns"
+# _self_scan RC OUT GREP_ARGS... - fold the self-scan of $self_cp into one
+# arm's recursive result: sets the globals `rc` (2 if EITHER grep errored, so
+# the arm fails closed; else 0 if either matched; else 1) and `out` (both
+# outputs, recursive first). GREP_ARGS are the arm's options and patterns,
+# never -r.
+_self_scan() {
+  local src=0 sout="" lf=$'\n'
+  rc="$1"; out="$2"; shift 2
+  [ -f "$self_cp" ] || return 0
+  sout=$(grep "$@" -- "$self_cp" 2>&1) || src=$?
+  [ -z "$sout" ] || out="${out:+$out$lf}$sout"
+  if [ "$rc" -ge 2 ] || [ "$src" -ge 2 ]; then
+    rc=2
+  elif [ "$rc" -eq 0 ] || [ "$src" -eq 0 ]; then
+    rc=0
+  else
+    rc=1
+  fi
+}
+# The literals arms 1 and 2 forbid, as their messages print them. Assembled
+# from pieces, as the em dash of arm 11 is, so that the self-scans find
+# nothing in this file: there is NO exemption list, and any line that spells
+# either shape - code, string or comment - fails the gate. That is why the
+# prose in this file writes them as "a curl piped into sh" and "uname with -m".
+bar='|'
+lit_fetch="curl${bar}sh"
+lit_uname="uname"' -m'
 
 # --- code/comment split, used by arms (5)-(10) --------------------------------
 # The comments that STATE these constraints necessarily spell the forbidden
@@ -179,8 +369,8 @@ bad=0
 # header, and every `# never hardcode /opt/homebrew` a reader deserves beside the
 # line it explains. CLAUDE.md REQUIRES those comments, so a gate that flagged
 # them would forbid the repo from documenting its own rules. These arms therefore
-# test CODE, not the raw line. Arms (1) and (2) deliberately do NOT: a `curl|sh`
-# or a `uname -m` spelled anywhere is still a pattern we want out of the tree.
+# test CODE, not the raw line. Arms (1) and (2) deliberately do NOT: a curl piped
+# into sh, or a uname with -m, spelled anywhere is still a pattern we want out of the tree.
 #
 # _code_of splits one `PATH:NN:CONTENT` hit and returns CONTENT with its comment
 # tail removed. A comment starts at a `#` that opens the line OR follows one of the
@@ -214,14 +404,16 @@ _code_hits() {
     [ -n "$code" ] || continue
     rc=0; grep -qE -- "$match" <<<"$code" || rc=$?
     if [ "$rc" -ge 2 ]; then
-      echo "check-patterns: code re-test errored (exit $rc) on '$match' - failing closed" >&2
+      _err "check-patterns: code re-test errored (exit $rc) on '$match' - failing closed"
+      _fatal_mark
       printf '%s\n' "$hit"; continue
     fi
     [ "$rc" -eq 0 ] || continue
     if [ -n "$exempt" ]; then
       rc=0; grep -qE -- "$exempt" <<<"$code" || rc=$?
       if [ "$rc" -ge 2 ]; then
-        echo "check-patterns: exemption re-test errored (exit $rc) on '$exempt' - exempting nothing" >&2
+        _err "check-patterns: exemption re-test errored (exit $rc) on '$exempt' - exempting nothing"
+        _fatal_mark
       elif [ "$rc" -eq 0 ]; then
         continue
       fi
@@ -231,8 +423,8 @@ _code_hits() {
   return 0
 }
 
-# (1) forbid curl|sh / wget|bash runtime fetches that EXECUTE the downloaded
-# text on the same line. W below is curl or wget, optionally written with a path
+# (1) forbid a curl / wget runtime fetch that EXECUTES the downloaded text on
+# the same line. W below is curl or wget, optionally written with a path
 # (`/usr/bin/curl`) or behind `command `, `env `, `sudo [options] ` or `\`.
 # SHELL is sh, bash, zsh, ksh or dash, optionally quoted, with a path
 # (`/bin/bash`), and behind any of `sudo [options] `, `env `, `command `,
@@ -270,36 +462,46 @@ opt='[[:space:]]+-[^[:space:]"'"'"'`$]*'
 fetch_pipe="(curl|wget)[^|]*\\|&?[[:space:]]*$runner([^[:alnum:]_.-]|\$)"
 fetch_subst="(^|[^[:alnum:]_.-])(eval([[:space:]]+--)?|$runner($opt)*[[:space:]]+-[[:alnum:]]*c[[:alnum:]]*($opt)*)[[:space:]]+[\"']?[[:space:]]*(\\\$\\(|\`)[[:space:]]*$fetcher"
 fetch_procsub="(^|[^[:alnum:]_.-])(source|\\.|$runner)[[:space:]]+(<[[:space:]]*)?<\\([[:space:]]*$fetcher"
-if out=$(grep -rInE --exclude=check-patterns \
-    -e "$fetch_pipe" -e "$fetch_subst" -e "$fetch_procsub" "${scan[@]}" 2>&1); then
-  printf '%s\n' "$out"
-  echo "check-patterns: forbidden curl|sh runtime fetch" >&2
+# SURFACE: the shared `scan` roots plus the Makefile and the whole .github/ -
+# a recipe line, a workflow `run:` step and a composite action's step
+# execute on every CI leg exactly as a line in lib/ does. tests/, docs/ and .claude/ stay OUT: tests/ plants
+# real fetch shapes as fixtures, and docs/ and .claude/ are prose that names
+# them. tests/check_patterns_test.sh's surface-coverage section derives this
+# from the gate's own grep calls. Plus the narrow self-scan of this file.
+_scan_roots install.sh lib bin zsh config packages security home Makefile .github
+fetch_scan=(${roots[@]+"${roots[@]}"})
+rc=0
+out=$(grep -rHnaE --exclude=check-patterns \
+  -e "$fetch_pipe" -e "$fetch_subst" -e "$fetch_procsub" -- "${fetch_scan[@]}" 2>&1) || rc=$?
+_self_scan "$rc" "$out" -HnaE -e "$fetch_pipe" -e "$fetch_subst" -e "$fetch_procsub"
+if [ "$rc" -eq 0 ]; then
+  _out "$out"
+  _err "check-patterns: forbidden $lit_fetch runtime fetch"
   bad=1
-else
-  rc=$?
-  if [ "$rc" -ge 2 ]; then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: curl|sh scan errored (exit $rc) - failing closed" >&2
-    bad=1
-  fi
+elif [ "$rc" -ge 2 ]; then
+  _err "$out" \
+    "check-patterns: $lit_fetch scan errored (exit $rc) - failing closed"
+  bad=1; fatal=1
 fi
 
-# (2) forbid ad-hoc `uname -m` outside lib/os.sh (its sanctioned home). The grep
+# (2) forbid an ad-hoc uname with -m outside lib/os.sh (its sanctioned home). The grep
 # prints paths as "<root>/lib/os.sh:...", so anchor the allow-line on the tail.
-if out=$(grep -rIn --exclude=check-patterns 'uname -m' "${scan[@]}" 2>&1); then
+# The pattern's one space is written as the class `[ ]`, the same match, so
+# the pattern line does not spell the literal it looks for (see lit_uname).
+rc=0
+out=$(grep -rHna --exclude=check-patterns -e 'uname[ ]-m' -- "${scan[@]}" 2>&1) || rc=$?
+_self_scan "$rc" "$out" -Hna -e 'uname[ ]-m'
+if [ "$rc" -eq 0 ]; then
   viol=$(printf '%s\n' "$out" | grep -vE '(^|/)lib/os\.sh:' || true)
   if [ -n "$viol" ]; then
-    printf '%s\n' "$viol" >&2
-    echo "check-patterns: ad-hoc 'uname -m' outside lib/os.sh - use is-arm64/is-amd64" >&2
+    _err "$viol" \
+      "check-patterns: ad-hoc '$lit_uname' outside lib/os.sh - use is-arm64/is-amd64"
     bad=1
   fi
-else
-  rc=$?
-  if [ "$rc" -ge 2 ]; then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: uname scan errored (exit $rc) - failing closed" >&2
-    bad=1
-  fi
+elif [ "$rc" -ge 2 ]; then
+  _err "$out" \
+    "check-patterns: uname scan errored (exit $rc) - failing closed"
+  bad=1; fatal=1
 fi
 
 # (3) forbid an UNESCAPED `#` inside a Makefile `$(shell ...)` / `${shell ...}`. macOS's system
@@ -312,19 +514,19 @@ fi
 # `$(...)`'s `)`, nor one on a `\`-continued physical line (grep cannot paren-balance or join
 # lines); the macOS CI leg's real make 3.81 is the backstop for those. The repo's only
 # `$(shell)` (Makefile:20) is single-line, non-nested, and `\#`-escaped. Targeted at the
-# Makefile, which is absent from the `want` scan surface above.
+# Makefile, which is absent from the shared `scan` surface above.
 mk="$root/Makefile"
 if [ -f "$mk" ]; then
   if out=$(grep -nE '\$[({]shell[^)}]*[^\\)}]#' "$mk" 2>&1); then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: unescaped '#' inside a Makefile \$(shell ...)/\${shell ...} - macOS make 3.81 reads it as a comment; escape it as '\\#'" >&2
+    _err "$out" \
+      "check-patterns: unescaped '#' inside a Makefile \$(shell ...)/\${shell ...} - macOS make 3.81 reads it as a comment; escape it as '\\#'"
     bad=1
   else
     rc=$?
     if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: Makefile \$(shell ...) scan errored (exit $rc) - failing closed" >&2
-      bad=1
+      _err "$out" \
+        "check-patterns: Makefile \$(shell ...) scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
     fi
   fi
 fi
@@ -340,17 +542,26 @@ fi
 # in a SHA-pinned submodule EXCLUDED from the shared scan above, so reference it by explicit
 # path; a present-but-missing shape fails closed, while an ABSENT file (uninitialized submodule)
 # is a loud skip, STRICT-escalated.
+# grep's stderr is captured and printed through the sanitizer: an error names
+# the file. An absent file under STRICT=1 is a check that could not run, a
+# scan error (exit 2) like any other, not a violation.
 _shim_shape() {  # $1=file  $2=fixed-string shape  $3=human description
+  local sout src=0
   if [ -r "$1" ]; then
-    if ! grep -qF -- "$2" "$1"; then
-      echo "check-patterns: $3 - the pinned '$2' shape is GONE from ${1#"$root"/}; a submodule bump changed the shim's premise (re-verify the shim)" >&2
+    sout=$(grep -qF -- "$2" "$1" 2>&1) || src=$?
+    if [ "$src" -ge 2 ]; then
+      _err "$sout" \
+        "check-patterns: $3 - reading ${1#"$root"/} errored (exit $src) - failing closed"
+      bad=1; fatal=1
+    elif [ "$src" -eq 1 ]; then
+      _err "check-patterns: $3 - the pinned '$2' shape is GONE from ${1#"$root"/}; a submodule bump changed the shim's premise (re-verify the shim)"
       bad=1
     fi
   elif [ -n "${STRICT:-}" ]; then
-    echo "check-patterns: cannot verify $3 - ${1#"$root"/} absent (uninitialized submodule) and STRICT=1 - init submodules" >&2
-    bad=1
+    _err "check-patterns: cannot verify $3 - ${1#"$root"/} absent (uninitialized submodule) and STRICT=1 - init submodules"
+    bad=1; fatal=1
   else
-    echo "check-patterns: SKIP $3 - ${1#"$root"/} absent (uninitialized submodule); set STRICT=1 to fail closed" >&2
+    _err "check-patterns: SKIP $3 - ${1#"$root"/} absent (uninitialized submodule); set STRICT=1 to fail closed"
   fi
 }
 # shellcheck disable=SC2016  # the shapes are FIXED-STRING grep patterns: they MUST stay literal, not expand
@@ -393,22 +604,22 @@ _re_escape() {
 # would exempt a decoy file elsewhere ending in the same segments (e.g.
 # tests/config/gnupg/gpg-agent.conf) too - fail OPEN.
 _gpg_agent_path=$(_re_escape "$root/config/gnupg/gpg-agent.conf")
-if out=$(grep -rIn --exclude=check-patterns \
+if out=$(grep -rna --exclude=check-patterns \
     -F '/opt/homebrew' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)' \
     | grep -vE "^${_gpg_agent_path}:[0-9]+:" || true)
   if [ -n "$viol" ]; then
-    printf '%s\n' "$viol" >&2
-    echo "check-patterns: hardcoded Homebrew prefix - '/opt/homebrew' with no '/usr/local' as the ADJACENT word; resolve the prefix by directory existence, and keep the arm64/Intel pair on one line" >&2
+    _err "$viol" \
+      "check-patterns: hardcoded Homebrew prefix - '/opt/homebrew' with no '/usr/local' as the ADJACENT word; resolve the prefix by directory existence, and keep the arm64/Intel pair on one line"
     bad=1
   fi
 else
   rc=$?
   if [ "$rc" -ge 2 ]; then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: Homebrew-prefix scan errored (exit $rc) - failing closed" >&2
-    bad=1
+    _err "$out" \
+      "check-patterns: Homebrew-prefix scan errored (exit $rc) - failing closed"
+    bad=1; fatal=1
   fi
 fi
 
@@ -420,20 +631,20 @@ fi
 # openssl@3` asks where a FORMULA lives, which is a different question this rule has
 # no answer for, and flagging it would offer a remedy that does not apply. Every other
 # brew call is untouched - lib/packages.sh's `brew bundle` is how packages install.
-if out=$(grep -rIn --exclude=check-patterns \
+if out=$(grep -rna --exclude=check-patterns \
     -E 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" | _code_hits 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))')
   if [ -n "$viol" ]; then
-    printf '%s\n' "$viol" >&2
-    echo "check-patterns: a 'brew shellenv' / 'brew --prefix' fork - resolve the Homebrew prefix by directory existence instead" >&2
+    _err "$viol" \
+      "check-patterns: a 'brew shellenv' / 'brew --prefix' fork - resolve the Homebrew prefix by directory existence instead"
     bad=1
   fi
 else
   rc=$?
   if [ "$rc" -ge 2 ]; then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: brew-shellenv scan errored (exit $rc) - failing closed" >&2
-    bad=1
+    _err "$out" \
+      "check-patterns: brew-shellenv scan errored (exit $rc) - failing closed"
+    bad=1; fatal=1
   fi
 fi
 
@@ -461,16 +672,16 @@ if [ "${#b32[@]}" -gt 0 ]; then
   if out=$(grep -HnE "$b4" "${b32[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$b4")
     if [ -n "$viol" ]; then
-      printf '%s\n' "$viol" >&2
-      echo "check-patterns: bash 4 syntax in the bash-3.2 surface (install.sh, lib/) - no associative arrays, no mapfile/readarray, no \${var,,}" >&2
+      _err "$viol" \
+        "check-patterns: bash 4 syntax in the bash-3.2 surface (install.sh, lib/) - no associative arrays, no mapfile/readarray, no \${var,,}"
       bad=1
     fi
   else
     rc=$?
     if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: bash-3.2 scan errored (exit $rc) - failing closed" >&2
-      bad=1
+      _err "$out" \
+        "check-patterns: bash-3.2 scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
     fi
   fi
 fi
@@ -543,7 +754,7 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
     local -a exc=(--exclude=check-patterns)
     [ -n "$py" ] && exc+=(--exclude="$py")
     local out rc
-    if out=$(grep -rHnIE "${exc[@]}" -- "$gnu_re" "$@" 2>&1); then
+    if out=$(grep -rHnaE "${exc[@]}" -- "$gnu_re" "$@" 2>&1); then
       printf '%s\n' "$out" | _code_hits "$gnu_re"
       return 0
     else
@@ -555,14 +766,14 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
       return 1
     fi
   }
-  # _gnu_fail MSG - print MSG and set bad=1 as one call. A call site that
+  # _gnu_fail MSG - print MSG and set bad=1 (and fatal=1) as one call. A call site that
   # stops calling _gnu_fail loses its pass-specific message, which the two
   # arm-8 fixtures in tests/check_patterns_test.sh catch. That is the only
   # guarantee this gives: an inline reimplementation that keeps the printf
   # but drops `bad=1` is NOT caught by those fixtures.
   _gnu_fail() {
-    printf '%s\n' "$1" >&2
-    bad=1
+    _err "$1"
+    bad=1; fatal=1
   }
   gnu_viol=""
   if [ "${#gnu_rest[@]}" -gt 0 ]; then
@@ -594,8 +805,8 @@ if [ "${#gnu_rest[@]}" -gt 0 ] || [ "${#gnu_tests[@]}" -gt 0 ]; then
     # file name holding one (see _code_of). check-patterns
     # is a lint tool, not a startup-path script, so this fork is fine.
     gnu_viol="$(printf '%s\n' "$gnu_viol" | LC_ALL=C sort -t: -k1,1 -k2,2n)"
-    printf '%s\n' "$gnu_viol" >&2
-    printf '%s\n' "$gnu_msg" >&2
+    _err "$gnu_viol" \
+      "$gnu_msg"
     bad=1
   fi
 fi
@@ -630,19 +841,19 @@ eex=(${roots[@]+"${roots[@]}"})
 if [ "${#eex[@]}" -gt 0 ]; then
   eex_re='(^|[^|])\|&?[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
   eex_re="$eex_re"'([ef]?grep([[:space:]]+-[^[:space:]]*)*[[:space:]]+(-[A-Za-z]*[qmlL][A-Za-z0-9]*|--(quiet|silent|max-count[=[:alnum:]]*|files-with(out)?-match(es)?))([^[:alnum:]_-]|$)|head([^[:alnum:]_-]|$))'
-  if out=$(grep -rHnIE --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
+  if out=$(grep -rHnaE --exclude=check-patterns -- "$eex_re" "${eex[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$eex_re")
     if [ -n "$viol" ]; then
-      printf '%s\n' "$viol" >&2
-      echo "check-patterns: an early-exit reader (grep -q/-m/-l, head) on the right of a pipe - under pipefail the writer can die of SIGPIPE and fail the pipeline at random; feed it a here-string (grep -q PAT <<<\"\$var\") or use a reader that drains (sed -n 1p)" >&2
+      _err "$viol" \
+        "check-patterns: an early-exit reader (grep -q/-m/-l, head) on the right of a pipe - under pipefail the writer can die of SIGPIPE and fail the pipeline at random; feed it a here-string (grep -q PAT <<<\"\$var\") or use a reader that drains (sed -n 1p)"
       bad=1
     fi
   else
     rc=$?
     if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: early-exit-reader scan errored (exit $rc) - failing closed" >&2
-      bad=1
+      _err "$out" \
+        "check-patterns: early-exit-reader scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
     fi
   fi
 fi
@@ -714,19 +925,19 @@ if [ "${#dd[@]}" -gt 0 ]; then
   dd_re="$dd_re|$(_dd_family 'touch' 'Adrt')"
   dd_re="$dd_re|$(_dd_family '[ef]?grep' 'ABCDdefm')"
   dd_re="$dd_re|$(_dd_family 'sed' 'efi')"
-  if out=$(grep -rHnIE --exclude=check-patterns -- "$dd_re" "${dd[@]}" 2>&1); then
+  if out=$(grep -rHnaE --exclude=check-patterns -- "$dd_re" "${dd[@]}" 2>&1); then
     viol=$(printf '%s\n' "$out" | _code_hits "$dd_re")
     if [ -n "$viol" ]; then
-      printf '%s\n' "$viol" >&2
-      echo "check-patterns: a '--' after the first operand - BSD getopt (macOS) stops at the first non-option, so the '--' becomes a file operand; put it before the first operand (chmod -R -- go-w \"\$d\")" >&2
+      _err "$viol" \
+        "check-patterns: a '--' after the first operand - BSD getopt (macOS) stops at the first non-option, so the '--' becomes a file operand; put it before the first operand (chmod -R -- go-w \"\$d\")"
       bad=1
     fi
   else
     rc=$?
     if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: '--' placement scan errored (exit $rc) - failing closed" >&2
-      bad=1
+      _err "$out" \
+        "check-patterns: '--' placement scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
     fi
   fi
 fi
@@ -771,40 +982,37 @@ _scan_roots docs tests .github .claude Makefile REUSE.toml cliff.toml \
   SECURITY.md THIRD-PARTY-NOTICES.md README.md
 prose=("${scan[@]}" ${roots[@]+"${roots[@]}"})
 _lazy_lock_path=$(_re_escape "$root/config/nvim/lazy-lock.json")
-if out=$(LC_ALL=C grep -rHIn --exclude=check-patterns \
+if out=$(LC_ALL=C grep -rHna --exclude=check-patterns \
     -F "$em_dash" "${prose[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | grep -vE "^${_lazy_lock_path}:[0-9]+:" || true)
   if [ -n "$viol" ]; then
-    printf '%s\n' "$viol" >&2
-    echo "check-patterns: an em dash (U+2014) in repo prose - house style is a plain '-'; replace it" >&2
+    _err "$viol" \
+      "check-patterns: an em dash (U+2014) in repo prose - house style is a plain '-'; replace it"
     bad=1
   fi
 else
   rc=$?
   if [ "$rc" -ge 2 ]; then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: em-dash scan errored (exit $rc) - failing closed" >&2
-    bad=1
+    _err "$out" \
+      "check-patterns: em-dash scan errored (exit $rc) - failing closed"
+    bad=1; fatal=1
   fi
 fi
 
-# NARROW SELF-SCAN of exactly this file, which the recursive scan above
-# excludes by name. No `-r`/`-R`, so tests/plugins_test.sh's recursive-grep
-# invariant does not count it and it needs no self-exclude. Absent (a fixture
-# tree without bin/check-patterns) is a silent skip, like every optional path.
-self_cp="$root/bin/check-patterns"
+# NARROW SELF-SCAN of exactly this file (self_cp, defined above arm 1),
+# which the recursive scan above excludes by name.
 if [ -f "$self_cp" ]; then
-  if out=$(LC_ALL=C grep -Fn -- "$em_dash" "$self_cp" 2>&1); then
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: an em dash (U+2014) in check-patterns' own source - house style is a plain '-'; replace it" >&2
+  if out=$(LC_ALL=C grep -Fna -- "$em_dash" "$self_cp" 2>&1); then
+    _err "$out" \
+      "check-patterns: an em dash (U+2014) in check-patterns' own source - house style is a plain '-'; replace it"
     bad=1
   else
     rc=$?
     if [ "$rc" -ge 2 ]; then
-      printf '%s\n' "$out" >&2
-      echo "check-patterns: check-patterns self-scan errored (exit $rc) - failing closed" >&2
-      bad=1
+      _err "$out" \
+        "check-patterns: check-patterns self-scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
     fi
   fi
 fi
@@ -849,15 +1057,67 @@ if out=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} -type l -print 2
   viol="$out"
 else
   rc=$?
-  printf '%s\n' "$out" >&2
-  echo "check-patterns: symlink scan (find) errored (exit $rc) - failing closed" >&2
-  bad=1
+  _err "$out" \
+    "check-patterns: symlink scan (find) errored (exit $rc) - failing closed"
+  bad=1; fatal=1
   viol=""
 fi
 if [ -n "$viol" ]; then
-  printf '%s\n' "$viol" >&2
-  echo "check-patterns: a symlink where a recursive scan reads - its target is never scanned; remove it or replace it with the real file" >&2
+  _err "$viol" \
+    "check-patterns: a symlink where a recursive scan reads - its target is never scanned; remove it or replace it with the real file"
   bad=1
+fi
+
+# NUL-BEARING FILES where the arms read: FAIL CLOSED (exit 2). grep reads a
+# file with a NUL byte as binary, and with `-I` (the arms' old flag) skipped
+# it whole, so a NUL anywhere in a file hid every violation in it (measured:
+# `printf '# \000\n'` appended to this script beside a planted fetch piped
+# into sh passed, exit 0). The arms now pass `-a` (read a binary file as
+# text, GNU and BSD alike, which also stops GNU's UTF-8-locale habit of
+# calling a file with an invalid byte binary), but a line tool's reading of
+# a NUL is still not a contract, and no first-party file here needs one:
+# refuse the file instead. The surface is `prose`, the widest the grep arms
+# read (every arm's roots, this file included, lie inside it).
+# Detection is bash's own `read -d ''`, which returns 0 only when it met a
+# NUL delimiter: no fork per file, and a NUL at any offset counts (GNU grep's
+# binary test samples the start of a large file and missed a late NUL,
+# measured on an 800 KB file). An unreadable file fails closed too: its bytes
+# were never checked. That is decided by the redirect itself, not an earlier
+# `-r` test, so a file that turns unreadable after such a test cannot read
+# as "no NUL": `nul_st` keeps `open-failed` unless the group behind the
+# redirect ran.
+# Cost, unmeasured: bash 3.2's `read -d ''` may read one byte per syscall.
+# That matters only if `env bash` resolves to a 3.2 (the gate keeps to its
+# syntax but runs on a modern bash in practice), and then only for time,
+# never for the outcome.
+nul_msg="check-patterns: a file holding a NUL byte where the arms read - grep reads it as binary, so no arm can be trusted to check it; remove the NUL byte or move the file out of the scanned surface"
+nul_found=""
+nul_lf=$'\n'
+nul_rc=0
+find "${prose[@]}" -type f -print0 >"$cp_tmp/nul-list" 2>"$cp_tmp/nul-find.err" || nul_rc=$?
+if [ "$nul_rc" -ne 0 ]; then
+  _err_file "$cp_tmp/nul-find.err"
+  _err "check-patterns: NUL-byte scan (find) errored (exit $nul_rc) - failing closed"
+  bad=1; fatal=1
+else
+  while IFS= read -r -d '' f; do
+    nul_st=open-failed
+    # read's status alone: 0 only when it met a NUL delimiter.
+    { nul_st=none; IFS= read -r -d '' _ && nul_st=nul; } 2>/dev/null <"$f" || :
+    case "$nul_st" in
+      nul)
+        printf -v q '%q' "$f"
+        nul_found="$nul_found$q"$'\n' ;;
+      open-failed)
+        printf -v q '%q' "$f"
+        _err "check-patterns: NUL-byte scan cannot read $q - failing closed"
+        bad=1; fatal=1 ;;
+    esac
+  done <"$cp_tmp/nul-list"
+  if [ -n "$nul_found" ]; then
+    _err "${nul_found%"$nul_lf"}" "$nul_msg"
+    bad=1; fatal=1
+  fi
 fi
 
 # FILE NAMES the arms cannot read or skip, over the same surface as the find
@@ -869,12 +1129,11 @@ fi
 #     the strip leaves ` #...`, which empties every hit of arms 5-10.
 #   - a file named `check-patterns` other than exactly $root/bin/check-patterns:
 #     every recursive arm passes `--exclude=check-patterns`, a BASE-NAME match
-#     at any depth, so nothing in it is ever scanned (measured: a curl|sh in
-#     lib/sub/check-patterns passed). A directory of that name is still walked.
+#     at any depth, so nothing in it is ever scanned (measured: a curl piped into
+#     sh in lib/sub/check-patterns passed). A directory of that name is still walked.
 # zsh/plugins stays out for the reason every arm leaves it out: its contents
 # are upstream's and no arm reads them. Names print `%q`-quoted, so a LF or
 # CR in one shows as `$'...'`, not as a broken line.
-fatal=0
 nl=$'\n'
 cr=$'\r'
 names_msg="check-patterns: a file name holding ':', a newline or a CR - every arm reads a hit as PATH:NN:, so such a name can hide a violation; rename it"
@@ -891,22 +1150,25 @@ _quote_nul() {
 # _name_pass MSG EXCEPT PREDICATE... - find over the surface; any match but
 # EXCEPT prints with MSG and sets fatal=1, and the quoted list is left in
 # `name_out` so the git pass below skips what it already printed. find's
-# stderr is not captured (a NUL stream cannot share it), and a find error
+# stderr cannot share the NUL stream, so it goes to a scratch file that
+# _err_file prints: an error names the path it failed on, and that name is
+# as hostile as any other (an unreadable dir named with OSC 52). A find error
 # fails closed. `name_out` holds ONLY what was printed: on a find error the
 # partial list is dropped, or the git pass would skip a tracked name nobody
-# reported and the fail-closed exit 2 would degrade to 1.
+# reported.
 _name_pass() {
   local msg="$1" except="$2" names="" rc=0
   shift 2
   name_out=""
-  names=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} \( "$@" \) -print0 \
+  names=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} \( "$@" \) -print0 2>"$cp_tmp/name-find.err" \
     | _quote_nul "$except") || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "check-patterns: file-name scan (find) errored (exit $rc) - failing closed" >&2
-    bad=1
+    _err_file "$cp_tmp/name-find.err"
+    _err "check-patterns: file-name scan (find) errored (exit $rc) - failing closed"
+    bad=1; fatal=1
   elif [ -n "$names" ]; then
-    printf '%s\n' "$names" >&2
-    echo "$msg" >&2
+    _err "$names" \
+      "$msg"
     fatal=1
     name_out="$names"
   fi
@@ -921,15 +1183,15 @@ if [ -d "$root/zsh/plugins" ] && [ ! -L "$root/zsh/plugins" ]; then
   # counts a symlink to a directory too.
   if out=$(find "$root/zsh/plugins" -mindepth 1 -maxdepth 1 ! -type d -print 2>&1); then
     if [ -n "$out" ]; then
-      printf '%s\n' "$out" >&2
-      echo "$plugins_msg" >&2
+      _err "$out" \
+        "$plugins_msg"
       bad=1
     fi
   else
     rc=$?
-    printf '%s\n' "$out" >&2
-    echo "check-patterns: zsh/plugins scan (find) errored (exit $rc) - failing closed" >&2
-    bad=1
+    _err "$out" \
+      "check-patterns: zsh/plugins scan (find) errored (exit $rc) - failing closed"
+    bad=1; fatal=1
   fi
 fi
 
@@ -951,8 +1213,8 @@ fi
 # names a program, and git runs it even for a read-only ls-files.
 _git_symlink_pass() (
   tmpd=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns-sym.XXXXXX" 2>/dev/null) || {
-    echo "check-patterns: could not create a scratch dir for the repo-wide symlink scan - failing closed" >&2
-    exit 1
+    _err "check-patterns: could not create a scratch dir for the repo-wide symlink scan - failing closed"
+    exit 2
   }
   trap 'rm -rf "$tmpd"' EXIT
 
@@ -969,9 +1231,9 @@ _git_symlink_pass() (
     [ -n "$v" ] && git_unset+=("$v")
   done <"$tmpd/lev"
   if [ "$lev_rc" -ne 0 ] || [ "$has_dir" -ne 1 ] || [ "$has_index" -ne 1 ]; then
-    cat "$tmpd/lev.err" >&2
-    echo "check-patterns: symlink scan (git, repo-wide) could not list git's local env vars (git rev-parse --local-env-vars: exit $lev_rc, GIT_DIR listed: $has_dir, GIT_INDEX_FILE listed: $has_index) - failing closed" >&2
-    exit 1
+    _err_file "$tmpd/lev.err"
+    _err "check-patterns: symlink scan (git, repo-wide) could not list git's local env vars (git rev-parse --local-env-vars: exit $lev_rc, GIT_DIR listed: $has_dir, GIT_INDEX_FILE listed: $has_index) - failing closed"
+    exit 2
   fi
   _git_clean() {
     local -a e=()
@@ -987,16 +1249,16 @@ _git_symlink_pass() (
   # Defensive: --show-toplevel runs no fsmonitor today (an equivalent
   # mutant), kept so every git call inside `$root` carries the flag.
   if ! top=$(_git_clean -C "$root" -c core.fsmonitor=false rev-parse --show-toplevel 2>"$tmpd/probe.err"); then
-    cat "$tmpd/probe.err" >&2
-    echo "check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel of '$root' - failing closed" >&2
-    exit 1
+    _err_file "$tmpd/probe.err"
+    _err "check-patterns: symlink scan (git, repo-wide) could not resolve the toplevel of '$root' - failing closed"
+    exit 2
   fi
   # -ef compares device and inode, so a case-variant or symlinked spelling of
   # $root (macOS) still matches. A core.worktree or gitfile can point the work
   # tree away from $root even when $root/.git exists.
   if ! [ "$top" -ef "$root" ]; then
-    echo "check-patterns: symlink scan (git, repo-wide) resolved a different toplevel ('$top') for '$root' - failing closed" >&2
-    exit 1
+    _err "check-patterns: symlink scan (git, repo-wide) resolved a different toplevel ('$top') for '$root' - failing closed"
+    exit 2
   fi
 
   # A pinned plugin is a `submodule.<name>.path` in .gitmodules AND a direct
@@ -1009,9 +1271,9 @@ _git_symlink_pass() (
       >"$tmpd/gm" 2>"$tmpd/gm.err" || gm_rc=$?
     # exit 1 = no such key, an empty pin set; anything higher is an error.
     if [ "$gm_rc" -gt 1 ]; then
-      cat "$tmpd/gm.err" >&2
-      echo "check-patterns: symlink scan (git, repo-wide) could not read .gitmodules (exit $gm_rc) - failing closed" >&2
-      exit 1
+      _err_file "$tmpd/gm.err"
+      _err "check-patterns: symlink scan (git, repo-wide) could not read .gitmodules (exit $gm_rc) - failing closed"
+      exit 2
     fi
     while read -r _gm_key gm_path; do
       case "$gm_path" in
@@ -1024,15 +1286,15 @@ _git_symlink_pass() (
   ls_rc=0
   _git_clean -C "$root" -c core.fsmonitor=false ls-files -s -z >"$tmpd/list" 2>"$tmpd/ls.err" || ls_rc=$?
   if [ "$ls_rc" -ne 0 ]; then
-    cat "$tmpd/ls.err" >&2
-    echo "check-patterns: symlink scan (git ls-files, repo-wide) errored (exit $ls_rc) - failing closed" >&2
-    exit 1
+    _err_file "$tmpd/ls.err"
+    _err "check-patterns: symlink scan (git ls-files, repo-wide) errored (exit $ls_rc) - failing closed"
+    exit 2
   fi
   # ls-files' own stderr file: a traced probe above writes to stderr too.
   if [ -s "$tmpd/ls.err" ]; then
-    cat "$tmpd/ls.err" >&2
-    echo "check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr (a GIT_TRACE* variable, or a trace2.* config key?) - failing closed" >&2
-    exit 1
+    _err_file "$tmpd/ls.err"
+    _err "check-patterns: symlink scan (git ls-files, repo-wide) wrote to stderr (a GIT_TRACE* variable, or a trace2.* config key?) - failing closed"
+    exit 2
   fi
 
   # `<mode> <oid> <stage><TAB><path>`, sha1 or sha256 oid. Anything else (a
@@ -1045,8 +1307,8 @@ _git_symlink_pass() (
   entry=""
   while IFS= read -r -d '' entry; do
     if ! [[ $entry =~ $rec_re ]]; then
-      echo "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed" >&2
-      exit 1
+      _err "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed"
+      exit 2
     fi
     mode="${entry%% *}"
     gpath="${entry#*$'\t'}"
@@ -1127,30 +1389,30 @@ _git_symlink_pass() (
   done <"$tmpd/list"
   # read returns non-zero on a trailing record with no NUL terminator.
   if [ -n "$entry" ]; then
-    echo "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed" >&2
-    exit 1
+    _err "check-patterns: symlink scan (git ls-files, repo-wide) returned a malformed record - failing closed"
+    exit 2
   fi
 
   rc=0
   if [ -n "$git_viol" ]; then
-    printf '%s' "$git_viol" >&2
-    echo "check-patterns: a tracked symlink, or a gitlink that is not a pinned plugin - remove it; a plugin is pinned as submodule.<name>.path = zsh/plugins/<name> in .gitmodules" >&2
+    _err "${git_viol%"$nl"}" \
+      "check-patterns: a tracked symlink, or a gitlink that is not a pinned plugin - remove it; a plugin is pinned as submodule.<name>.path = zsh/plugins/<name> in .gitmodules"
     rc=1
   fi
   if [ -n "$plugins_viol" ]; then
-    printf '%s' "$plugins_viol" >&2
-    echo "$plugins_msg" >&2
+    _err "${plugins_viol%"$nl"}" \
+      "$plugins_msg"
     rc=1
   fi
   # 2, not 1: the caller turns it into the fail-closed exit.
   if [ -n "$names_viol" ]; then
-    printf '%s' "$names_viol" >&2
-    echo "$names_msg" >&2
+    _err "${names_viol%"$nl"}" \
+      "$names_msg"
     rc=2
   fi
   if [ -n "$stray_viol" ]; then
-    printf '%s' "$stray_viol" >&2
-    echo "$stray_msg" >&2
+    _err "${stray_viol%"$nl"}" \
+      "$stray_msg"
     rc=2
   fi
   exit "$rc"
@@ -1158,8 +1420,8 @@ _git_symlink_pass() (
 
 if [ "$has_git" -eq 1 ]; then
   if ! command -v git >/dev/null 2>&1; then
-    echo "check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH, yet '$root/.git' exists - failing closed" >&2
-    bad=1
+    _err "check-patterns: symlink scan (git, repo-wide) cannot run: git is not on PATH, yet '$root/.git' exists - failing closed"
+    bad=1; fatal=1
   else
     git_rc=0
     _git_symlink_pass || git_rc=$?
@@ -1168,5 +1430,8 @@ if [ "$has_git" -eq 1 ]; then
   fi
 fi
 
+# The fatal mark: a sanitizer failure or a re-test error inside a `$(...)`
+# subshell, which cannot set `fatal` here.
+[ ! -e "$cp_tmp/fatal" ] || fatal=1
 [ "$fatal" -eq 0 ] || exit 2
 [ "$bad" -eq 0 ]
