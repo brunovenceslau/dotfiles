@@ -127,6 +127,18 @@ ok
 grep -q 'canga-completion.zsh' "$repo_root/zsh/zshrc" \
   || fail "zsh/zshrc does not source the cached canga completion"
 ok
+# sbx (the Docker Sandboxes CLI) rides the identical contract, one tool later in
+# the same _cache_shell_inits loop: same subprocess-shape check, same
+# cache-is-sourced check. Comment lines are stripped first for the same reason
+# as canga's check above.
+if grep -qE '(^|[^[:alnum:]_-])sbx[[:space:]]+completion' \
+  <<<"$(grep -vE '^[[:space:]]*#' "$repo_root/zsh/zshrc")"; then
+  fail "zsh/zshrc runs 'sbx completion' as a subprocess - the startup path must source the cached script"
+fi
+ok
+grep -q 'sbx-completion.zsh' "$repo_root/zsh/zshrc" \
+  || fail "zsh/zshrc does not source the cached sbx completion"
+ok
 grep -q '_cache_shell_inits' "$repo_root/install.sh" \
   || fail "install.sh no longer generates the cached shell inits"
 ok

@@ -206,6 +206,7 @@ uuidgen, osascript, lesspipe) are described, with the helpers that use them, in 
 | [zoxide](https://github.com/ajeetdsouza/zoxide) | MIT | Provides the `z` jump command, cached and sourced the same way. |
 | [fzf](https://github.com/junegunn/fzf) | MIT | Backs Ctrl-R, Ctrl-T and Alt-C. `zsh/fzf.zsh` returns on its first line when the binary is absent. |
 | [canga](https://github.com/brunovenceslau/canga) | GPL-3.0 | Supplies its own zsh completion, which `install.sh` caches when the binary is present and skips when it is not. |
+| sbx (the Docker Sandboxes CLI, Docker, Inc.) | Not redistributed; used under its vendor's terms | Supplies its own zsh completion, which install.sh caches when the binary is present and skips when it is not. |
 
 `config/starship/starship.toml` and `config/lazygit/config.yml` are this
 repository's own configuration. Lines in them that match upstream

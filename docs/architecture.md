@@ -328,9 +328,9 @@ load-bearing, and the reasons are noted where they are not obvious.
    the evaluated form because `$LS_COLORS` is exported later, by `aliases.zsh`.
 9. Source `lib/os.sh`, then `functions.zsh`, `aliases.zsh` and
    `restic.zsh`. Functions load before aliases so an alias can wrap a helper.
-10. Source the cached `starship` and `zoxide` inits and the cached `canga`
-    completion. The zoxide and canga caches must come after `compinit`, because
-    both register a completion through `compdef`.
+10. Source the cached `starship` and `zoxide` inits and the cached `canga` and
+    `sbx` completions. The zoxide, canga and sbx caches must come after
+    `compinit`, because each registers a completion through `compdef`.
 11. Pin `FAST_WORK_DIR` under `$XDG_CACHE_HOME/zsh`, pre-seed its
     `secondary_theme.zsh` guard file, then source `zsh-autosuggestions` and
     `fast-syntax-highlighting`, in that order. Highlighting loads last because it
