@@ -17,6 +17,7 @@ this page no longer exists in the code.
 | Slow shell, blank prompt, missing completions or highlighting | [Degraded shell](#degraded-shell) |
 | `z` does not exist, or the prompt is plain zsh | [The prompt or `z` is missing](#the-prompt-or-z-is-missing) |
 | `canga <TAB>` completes nothing | [canga has no completion](#canga-has-no-completion) |
+| `sbx <TAB>` completes nothing | [sbx has no completion](#sbx-has-no-completion) |
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
 | `git pull` asks `Username for github.com` | [Git prompts for a username](#git-prompts-for-a-username) |
@@ -120,6 +121,11 @@ whose binary has since been uninstalled.
 **Cause.** The completion is sourced from a cache that `install.sh` writes only
 when it finds `canga` on `PATH` or in `~/.local/bin` at install, link or
 upgrade time. A `canga` installed after the last of those has no cache yet.
+Even with a cache on disk, `zsh/zshrc` also checks `canga` is on `PATH` before
+sourcing it (`(( $+commands[canga] ))`), and that check runs before
+`~/.zshrc.local` is sourced - so putting `canga` on `PATH` only in
+`~/.zshrc.local` still shows no completion. It needs to be reachable via
+`zshenv`, `zprofile`, the detected Homebrew prefix, or `~/.local/bin` instead.
 
 ```sh
 command -v canga                                             # is it installed?
@@ -155,6 +161,54 @@ was written. Resolve the refused link first, see
 
 A `canga upgrade` does not need this step. The cached script asks the binary
 for its completions on every TAB, so new subcommands appear without a refresh.
+
+## sbx has no completion
+
+`sbx <TAB>` offers files, or nothing, instead of the subcommands.
+
+**Cause.** Same mechanism as canga above: the completion is sourced from a
+cache that `install.sh` writes only when it finds `sbx` on `PATH` or in
+`~/.local/bin` at install, link or upgrade time. An `sbx` installed after the
+last of those has no cache yet. The same `~/.zshrc.local` timing note applies:
+`zsh/zshrc` checks `sbx` is on `PATH` before sourcing its cache, and that check
+runs before `~/.zshrc.local` is sourced, so `sbx` needs to be reachable via
+`zshenv`, `zprofile`, the detected Homebrew prefix, or `~/.local/bin` instead.
+
+```sh
+command -v sbx                                               # is it installed?
+ls "${XDG_CACHE_HOME:-$HOME/.cache}"/zsh/sbx-completion.zsh    # is the cache there?
+```
+
+**Fix.** Same fix as canga's: regenerate the caches, then reload the shell.
+
+```sh
+dotfiles-upgrade
+exec zsh
+```
+
+If that does not resolve it, follow the same relink and refused-link steps as
+[canga has no completion](#canga-has-no-completion) - the two tools share
+`_cache_shell_inits`, so every step there applies to `sbx` unchanged.
+
+An `sbx` upgrade does not need this step either: the cached script asks the
+binary for its completions on every TAB (measured on sbx v0.45.1: the
+generated script references `__complete` exactly once), so new subcommands
+appear without a refresh.
+
+**Two related, non-error messages.** If `install.sh link` (or `dotfiles-upgrade`)
+prints this, `canga`/`sbx` ran but its output was not a real completion script
+(cobra's zsh template emits `#compdef <tool>` first, measured on sbx v0.45.1
+and canga v0.10.5) - the same regenerate-then-reload fix above applies once
+the binary itself prints one correctly:
+
+```
+install: <tool> <args> did not produce a completion script (want first line '<want>') - its shell integration is skipped
+```
+
+And a cache left behind by a canga or sbx that was later uninstalled is not an
+error at all: `zsh/zshrc`'s `(( $+commands[<tool>] ))` guard skips a stale
+cache silently at every shell startup, with nothing printed, until the next
+`install.sh link` (or `dotfiles-upgrade`) removes the file itself.
 
 ## Unsigned commits
 

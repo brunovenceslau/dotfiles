@@ -312,7 +312,7 @@ Everything the framework generates, all removed by `dotfiles-uninstall --purge`.
 | `$XDG_STATE_HOME/zsh/history` | Shell history. 1,000,000 entries, shared across live shells. A pre-XDG `~/.zsh_history` is copied here, mode 600, on the first install. |
 | `$XDG_CACHE_HOME/zsh/zcompdump` and `.zwc`, `.stamp` | The completion dump, its compiled form, and the 24 hour audit clock. |
 | `$XDG_CACHE_HOME/zsh/zcompcache` | The completion system's own cache. |
-| `$XDG_CACHE_HOME/zsh/starship-init.zsh`, `zoxide-init.zsh`, `canga-completion.zsh` | Pre-compiled shell integrations. All three tools are optional. `starship` and `zoxide` come from the Brewfile; [canga](https://github.com/brunovenceslau/canga) is a separate project this framework never installs. Each cache is written only when its binary is on `PATH` at install, link or upgrade time, and removed once the binary is gone. |
+| `$XDG_CACHE_HOME/zsh/starship-init.zsh`, `zoxide-init.zsh`, `canga-completion.zsh`, `sbx-completion.zsh` | Pre-compiled shell integrations. All four tools are optional. `starship` and `zoxide` come from the Brewfile; [canga](https://github.com/brunovenceslau/canga) and `sbx` (the Docker Sandboxes CLI) are separate projects this framework never installs. Each cache is written only when its binary is on `PATH` at install, link or upgrade time, and removed once the binary is gone. |
 | `$XDG_CACHE_HOME/zsh/fast-syntax-highlighting/` | The pinned `FAST_WORK_DIR`, including the empty theme guard file. |
 | `$XDG_CACHE_HOME/zsh/starship/` | starship's own session logs, through `STARSHIP_CACHE`. starship creates the directory on every call. Without the variable it would write `~/.cache/starship`, which `--purge` does not remove. |
 

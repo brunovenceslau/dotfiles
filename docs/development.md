@@ -368,7 +368,8 @@ flags the misplaced form for the common file and text tools.
 optional tool with `(( $+commands[x] ))`. If an integration ships as
 `eval "$(tool init zsh)"`, or its completion as a generator command such as
 `canga completion zsh` (canga is an optional external tool,
-<https://github.com/brunovenceslau/canga>), cache it at install time in
+<https://github.com/brunovenceslau/canga>) or `sbx completion zsh` (`sbx`, the
+Docker Sandboxes CLI, is optional too), cache it at install time in
 `_cache_shell_inits` and source the cache instead. `make forkgate` catches
 violations, but the cached form is the house pattern, not a workaround.
 

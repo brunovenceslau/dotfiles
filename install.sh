@@ -263,32 +263,41 @@ _migrate_legacy_history() {
 }
 
 # _cache_shell_inits - pre-compile the zsh integration the startup path sources:
-# `<tool> init zsh` for starship and zoxide, `canga completion zsh` for canga.
-# The startup path takes no subprocess (bin/startup-fork-gate proves it), and
-# these tools ship their integration as a command to eval - so the fork happens
-# HERE, once per install/upgrade, instead of once per shell.
+# `<tool> init zsh` for starship and zoxide, `<tool> completion zsh` for the
+# cobra-based CLIs canga and sbx. The startup path takes no subprocess
+# (bin/startup-fork-gate proves it), and these tools ship their integration as
+# a command to eval - so the fork happens HERE, once per install/upgrade,
+# instead of once per shell.
 #
-# canga's script is cobra's DYNAMIC completion: it asks `canga __complete` on
-# every TAB, so the subcommands a `canga upgrade` adds are offered without
-# regenerating this cache. Only a change to cobra's script format would need a
-# refresh, and the next link/upgrade provides it.
+# canga's and sbx's scripts are cobra's DYNAMIC completion: each asks its own
+# binary's `__complete` on every TAB, so the subcommands a `canga upgrade` or an
+# `sbx` release adds are offered without regenerating this cache. Only a change
+# to cobra's script format would need a refresh, and the next link/upgrade
+# provides it. Measured on sbx v0.45.1: the generated script's first line is
+# `#compdef sbx` and exactly one line references `__complete`.
 #
-# Best-effort by design: a missing tool leaves no cache and zshrc's `[ -r ]` guard
-# then skips it silently. Written via a temp + mv so a half-written cache is never
-# sourced. The cache lives under $XDG_CACHE_HOME/zsh - these ARE zsh scripts, and
-# that is a directory `dotfiles-uninstall --purge` already sweeps, so the
-# no-trace audit keeps holding without teaching uninstall a new path.
+# Best-effort by design: a missing tool leaves no cache and zshrc's guard
+# (binary present AND cache readable) then skips it silently. Written via a
+# temp + mv so a half-written cache is never sourced. The cache lives under
+# $XDG_CACHE_HOME/zsh - these ARE zsh scripts, and that is a directory
+# `dotfiles-uninstall --purge` already sweeps, so the no-trace audit keeps
+# holding without teaching uninstall a new path.
 _cache_shell_inits() {
-  local cache_dir="$xdg_cache/zsh" tool bin out tmp
+  local cache_dir="$xdg_cache/zsh" tool bin out tmp want first_line
   mkdir -p "$cache_dir" || { warn "could not create $cache_dir - shell integrations will be skipped"; return 0; }
-  for tool in starship zoxide canga; do
+  for tool in starship zoxide canga sbx; do
     # A case, not a lookup table: bash 3.2 has no associative arrays. `set --`
     # carries the generator's argv, so the call below stays one quoted "$@".
+    # `want` is the required first line of a completion script (empty for the
+    # `init zsh` tools, which have no fixed shape to check).
     case "$tool" in
-      # canga is OPTIONAL, like starship and zoxide, and is not installed by
-      # this framework: https://github.com/brunovenceslau/canga
-      canga) out="$cache_dir/canga-completion.zsh"; set -- completion zsh ;;
-      *)     out="$cache_dir/$tool-init.zsh";       set -- init zsh ;;
+      # canga and sbx are OPTIONAL, like starship and zoxide, and neither is
+      # installed by this framework. canga: https://github.com/brunovenceslau/canga.
+      # sbx (the Docker Sandboxes CLI, Docker, Inc.) is a separate product this
+      # framework never installs either.
+      canga) out="$cache_dir/canga-completion.zsh"; set -- completion zsh; want="#compdef canga" ;;
+      sbx)   out="$cache_dir/sbx-completion.zsh";   set -- completion zsh; want="#compdef sbx" ;;
+      *)     out="$cache_dir/$tool-init.zsh";       set -- init zsh; want="" ;;
     esac
     # Resolve against the PATH the SHELL will have, not the installer's own:
     # zshrc prepends ~/.local/bin, where canga installs, but a bash, a script or
@@ -304,10 +313,32 @@ _cache_shell_inits() {
     # STARSHIP_CACHE MUST match zsh/zshenv's export. This runs from bash, which
     # never reads zshenv, and starship creates its log dir on every call - without
     # it, `starship init` writes ~/.cache/starship, outside the tree --purge sweeps.
-    # A prefix assignment scopes it to this one call; zoxide and canga ignore it.
+    # A prefix assignment scopes it to this one call; zoxide, canga and sbx ignore it.
+    #
+    # No time bound on the subprocess itself: bash 3.2 (macOS's /bin/bash, which
+    # runs this installer) has no builtin timeout and ships no GNU `timeout` /
+    # `gtimeout`, and a new dependency is ask-first. A pure-bash watchdog IS
+    # possible - tests/lib/bounded_run.sh's job-control trick shows one - but is
+    # not warranted for a measured 1.4s generator; that trick exists for the
+    # test suite's own hermetic probes, which must survive an actual hang, not
+    # this non-interactive installer.
     if STARSHIP_CACHE="$cache_dir/starship" "$bin" "$@" > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-      mv -f -- "$tmp" "$out"
-      log "cached the $tool shell integration"
+      # `[ -s ]` alone accepts any non-empty noise (a warning banner, a partial
+      # write). canga and sbx are cobra completion scripts; cobra's zsh
+      # template emits `#compdef <tool>` first (measured on sbx v0.45.1:
+      # `#compdef sbx`, and on canga v0.10.5's host build: `#compdef canga`,
+      # then `compdef _canga canga`) - reject anything else so a malformed
+      # generator output is never cached, exactly like an empty
+      # one.
+      first_line=""
+      [ -z "$want" ] || first_line="$(head -n 1 -- "$tmp" 2>/dev/null)"
+      if [ -n "$want" ] && [ "$first_line" != "$want" ]; then
+        rm -f -- "$tmp"
+        warn "$tool $* did not produce a completion script (want first line '$want') - its shell integration is skipped"
+      else
+        mv -f -- "$tmp" "$out"
+        log "cached the $tool shell integration"
+      fi
     else
       rm -f -- "$tmp"
       warn "$tool $* produced nothing - its shell integration is skipped"
@@ -648,7 +679,7 @@ case "$cmd" in
     fi
     harden_plugin_perms
     # Pre-compile the shell integrations the startup path sources (starship, zoxide,
-    # canga's completion) so `zsh -i` never forks to build one.
+    # canga's and sbx's completion) so `zsh -i` never forks to build one.
     _cache_shell_inits
     _signing_advisory   # warn if commit signing isn't set up yet
     if _link_failed "$link_rc"; then

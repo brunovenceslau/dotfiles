@@ -299,12 +299,34 @@ fi
 # --- canga completion, from a PRE-GENERATED script -----------------------------
 # `canga completion zsh` is a SUBPROCESS, so install.sh's _cache_shell_inits
 # writes it once and this only sources the file - same contract as the two blocks
-# above, guarded on the FILE (no cache = no completion, never a fork to build one).
+# above. Guarded on BOTH the binary ($+commands, a builtin hash-table lookup,
+# forks nothing) AND the FILE ([[ -r ]]): the cache is only cleaned up at
+# install, link or upgrade time (install.sh's _cache_shell_inits), so a stale
+# cache left behind by an uninstalled canga must not register a completion for
+# a command that no longer exists.
 # The script is cobra's dynamic completion: the fork to `canga __complete`
 # happens on TAB, not at startup.
-# MUST stay after compinit: the script's first command is `compdef _canga canga`.
-if [[ -r $XDG_CACHE_HOME/zsh/canga-completion.zsh ]]; then
+# MUST stay after compinit: the script's first command is `compdef _canga canga`
+# (measured on canga v0.10.5's host build: first line `#compdef canga`, second
+# `compdef _canga canga`).
+if (( $+commands[canga] )) && [[ -r $XDG_CACHE_HOME/zsh/canga-completion.zsh ]]; then
   source "$XDG_CACHE_HOME/zsh/canga-completion.zsh"
+fi
+
+# --- sbx (Docker Sandboxes CLI) completion, from a PRE-GENERATED script --------
+# Same contract as canga above, guard included: `sbx completion zsh` is a
+# SUBPROCESS, so install.sh's _cache_shell_inits writes it once and this only
+# sources the file, on the binary being present ($+commands, forks nothing) AND
+# the cache being readable ([[ -r ]]) - a stale cache left behind by an
+# uninstalled sbx (cleaned up only at install, link or upgrade time) must not
+# register a completion for a missing command. sbx is not installed by this
+# framework.
+# The script is cobra's dynamic completion: the fork to `sbx __complete`
+# happens on TAB, not at startup (measured on sbx v0.45.1: first line
+# `#compdef sbx`, one `__complete` reference in the generated script).
+# MUST stay after compinit: the script's first command is `compdef _sbx sbx`.
+if (( $+commands[sbx] )) && [[ -r $XDG_CACHE_HOME/zsh/sbx-completion.zsh ]]; then
+  source "$XDG_CACHE_HOME/zsh/sbx-completion.zsh"
 fi
 
 # --- Plugins: source half ---------------------------------------

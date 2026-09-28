@@ -23,9 +23,10 @@ there is a cost the user pays on every prompt.
   lookup against the command hash table and forks nothing.
 - Never write `eval "$(<tool> init zsh)"`. `install.sh` runs `<tool> init zsh`
   once at install time and caches the output under `$XDG_CACHE_HOME/zsh`. The
-  zshrc sources that cache, guarded on the file existing. starship and zoxide
-  (`<tool> init zsh`) and canga (`canga completion zsh`) all work this way. It
-  is the house pattern, not a workaround.
+  zshrc sources that cache, guarded on the file existing (and, for canga and
+  sbx, on the binary too - see the `$+commands` guard above). starship and
+  zoxide (`<tool> init zsh`) and canga and sbx (`<tool> completion zsh`) all
+  work this way. It is the house pattern, not a workaround.
 - `make forkgate` (`bin/startup-fork-gate`) fails the build when an external
   binary is invoked during `zsh -i -c exit`. It is a blocking gate. Do not skip
   it.
