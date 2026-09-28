@@ -2161,7 +2161,13 @@ if [ "$(id -u)" -ne 0 ]; then
   chmod u+rwx "$r/lib/d${osc52}"
   [ "$tty_rc" = "2" ] && ok || fail "tty unreadable dir: expected exit 2 (a scan error), got $tty_rc"
   _tty_clean "tty unreadable dir" "$esc" "$bel"
-  _tty_has "tty unreadable dir" "$tty_err" "lib/d${osc52_x}"
+  # The name must be SHOWN, escaped by someone: GNU grep and find print it
+  # raw, so the gate's sanitizer escapes it (\x1b ... \x07); the macOS BSD
+  # grep and find escape a control byte in a name themselves (\033 ... \a,
+  # measured on both macOS CI legs), so it reaches the sanitizer already
+  # safe. _tty_clean above is the security half; this is the "named" half.
+  LC_ALL=C grep -qF -e "lib/d${osc52_x}" -e 'lib/d\033]52;c;aGk=\a' "$tty_err" && ok \
+    || fail "tty unreadable dir: expected the name escaped in tty-stderr, got: $(cat "$tty_err")"
 else
   echo "  SKIP: running as root - cannot exercise the unreadable-dir terminal-safe case"
 fi
