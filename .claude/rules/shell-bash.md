@@ -105,9 +105,14 @@ and cannot join it: `tests/check_patterns_test.sh` plants real `curl|sh` and
 scanning `tests/` would make those arms fail on the suite itself. The one
 exception is the GNU-regex arm, which does scan `tests/`, the `Makefile` and the
 workflows, and does not scan `config/`, where editor configs use their own regex
-dialects. The early-exit-reader arm (next section) scans `tests/` and the
-workflows too. Under `tests/` every other rule on this page is discipline, not a
-gate.
+dialects. The `curl|sh` arm also scans the `Makefile` and all of `.github/`.
+It and the `uname -m` arm both re-read `bin/check-patterns` itself, with no
+exemption: in that file write "a curl piped into sh" and "uname with -m",
+never the literal shapes, or the gate fails on its own source. The
+early-exit-reader arm (next section) scans `tests/` and the workflows too. A
+file holding a NUL byte anywhere the gate reads fails it closed (exit 2),
+since grep treats such a file as binary. Under `tests/` every other rule on
+this page is discipline, not a gate.
 
 ## Never pipe into a reader that exits early
 
