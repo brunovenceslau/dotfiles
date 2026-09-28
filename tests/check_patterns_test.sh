@@ -2181,13 +2181,30 @@ if command -v git >/dev/null 2>&1; then
   # The lone-0x9B name goes straight into the index as a symlink entry: git
   # stores a path as bytes, so this runs where the filesystem (APFS) would
   # refuse the name. After `add -A`, which would drop an index entry with no
-  # file on disk.
+  # file on disk. The path goes in on STDIN (`--index-info`), never argv:
+  # git passes every builtin's argv through precompose_argv_prefix (git.c),
+  # which on macOS with core.precomposeunicode (git init sets it there) runs
+  # each non-ASCII argument through iconv UTF-8-MAC -> UTF-8 and keeps the
+  # original only when iconv errors (compat/precompose_utf8.c). The
+  # `--cacheinfo` form stored some other path on both macOS CI legs, silently.
+  # read_index_info has no precompose step; the -c is belt and braces. The
+  # gate itself passes git no tree path (ls-files -s -z, no pathspec), so it
+  # reads the index bytes as they are.
   tty_blob="$(printf '../lib/os.sh' | git -C "$r" hash-object -w --stdin)"
-  git -C "$r" update-index --add --cacheinfo "120000,$tty_blob,other/j${lone}" \
-    || fail "tty git pass: update-index --cacheinfo refused the lone-0x9B path"
+  printf '120000 %s\tother/j%s\000' "$tty_blob" "$lone" \
+    | git -C "$r" -c core.precomposeunicode=false update-index -z --index-info \
+    || fail "tty git pass: update-index --index-info refused the lone-0x9B path"
   git -C "$r" commit -qm init
-  [ -n "$(git -C "$r" ls-files -z | tr '\000' '\n' | LC_ALL=C grep -F -e "other/j${lone}" || true)" ] \
-    || fail "tty git pass: the lone-0x9B name did not reach the index"
+  # A byte compare in bash over the NUL-separated listing (no tr or grep to
+  # doubt), and on a miss the listing itself, `od -c`-escaped.
+  git -C "$r" ls-files -z > "$work/tty-git-ls" \
+    || fail "tty git pass: git ls-files failed"
+  tty_found=0
+  while IFS= read -r -d '' p; do
+    [ "$p" = "other/j${lone}" ] && tty_found=1
+  done < "$work/tty-git-ls"
+  [ "$tty_found" = 1 ] \
+    || fail "tty git pass: the lone-0x9B name did not reach the index; ls-files -z: $(od -c < "$work/tty-git-ls" | sed -n 1,40p)"
   _tty_run "$r"
   [ "$tty_rc" = "2" ] && ok || fail "tty git pass: expected exit 2 (a CR in a tracked name), got $tty_rc"
   _tty_clean "tty git pass" "$esc" "$del" $'\r' "$c1" "$lone"
