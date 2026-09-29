@@ -241,10 +241,11 @@ The git pass fails closed when the root has its own `.git` but git is missing,
 cannot list its own local environment variables (`git rev-parse
 --local-env-vars` fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors,
 returns a malformed record, or resolves a toplevel other than the root (a
-repository git refuses as dubiously owned included). Of its stderr, only the `ls-files` listing's fails
-closed (a `GIT_TRACE*` variable or a `trace2.*` config key, say); the toplevel
-probe's is shown only when the probe itself fails. Git runs inside the root with
-`core.fsmonitor` forced off, but the root must still be a checkout you trust.
+repository git refuses as dubiously owned included). Of its stderr, only the
+`ls-files` listing's fails closed (a `GIT_TRACE*` variable or a `trace2.*`
+config key, say); the toplevel probe's is shown only when the probe itself
+fails. Git runs inside the root with `core.fsmonitor` forced off, but the root
+must still be a checkout you trust.
 
 A file holding a NUL byte anywhere these rules read (the em-dash rule's surface,
 `bin/check-patterns` included) fails the gate closed, exit 2: grep reads such a
