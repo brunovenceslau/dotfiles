@@ -36,6 +36,10 @@ git config --file ~/.config/git/config.local user.name  "Your Name"
 git config --file ~/.config/git/config.local user.email "you@example.com"
 ```
 
+Bare Mac, no `git` yet? Start with [Provision a new mac host](docs/new-mac-host.md).
+Before you run `install.sh`, the [Security model](#security-model) lists what it
+does and does not protect.
+
 ## Contents
 
 - [Quick start](#quick-start)
@@ -147,7 +151,7 @@ lines in the [Quick start](#quick-start)), and nothing commits as the
 maintainer.
 
 Until commit signing is configured, the installer prints a warning that it is
-not enabled. Signing is optional: nothing refuses an unsigned commit, but GitHub
+not enabled. Signing is optional: nothing on this machine refuses an unsigned commit, but GitHub
 will not show it as verified. To set it up, see
 [Provision a new mac host](docs/new-mac-host.md#4-set-identity-and-signing) and
 `config/git/config.local.example`.
@@ -274,9 +278,12 @@ that reviewable:
   submodules pinned to exact commits, loaded by a static loader, and the
   fast-syntax-highlighting theme download is neutralized, so a pinned commit
   cannot be bypassed at source time.
-- **Object checking on every fetch.** `transfer`, `fetch` and
-  `receive.fsckObjects` are on, and the upgrade path re-asserts them after
-  scrubbing ambient git config, so a hostile global config cannot turn them off.
+- **Object checking on every fetch after install.** `transfer`, `fetch` and
+  `receive.fsckObjects` are on once the framework's git config is linked, and
+  the upgrade path re-asserts them after scrubbing ambient git config, so a
+  hostile global config cannot turn them off. The first `git clone` runs before
+  that config exists, so it is checked only by your own git settings;
+  `install.sh` forces object checking for the plugin submodules it fetches.
 - **Fast-forward-only upgrades.** A rewound or diverged remote history is
   refused rather than checked out.
 - **A fork-free startup.** Nothing on the interactive startup path runs a
@@ -285,7 +292,7 @@ that reviewable:
 - **Backups before overwrites.** No user file is overwritten without a `.bak`
   copy first, and uninstall restores it.
 - **Two secret scanners.** Two independent scanners run as gates over the tree in
-  `make local-ci` and in CI on every push and pull request.
+  `make local-ci` and in CI on every push to `main` and every pull request.
 
 None of this verifies signatures on what you fetch. `dotfiles-upgrade` is a
 fetch plus a fast-forward merge, and it trusts whatever the remote you cloned

@@ -484,8 +484,9 @@ auditing them: each row names the file, test or gate that enforces it.
 | --- | --- |
 | Pinned plugins, no plugin manager | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
 | No runtime theme download | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
-| Object checking on every fetch | `config/git/config`, the `vgit` wrapper in `install.sh`, `tests/git_config_test.sh`, [the upgrade path](#the-upgrade-path) |
-| Fast-forward-only upgrade | `install.sh`, [the upgrade path](#the-upgrade-path) |
+| Object checking on every fetch after install | `config/git/config`, the `vgit` wrapper in `install.sh`, `ensure_submodules` in `install.sh`, the background fetch in `zsh/update-check.zsh`, `tests/git_config_test.sh`, `tests/upgrade_test.sh` (case 25), `tests/ensure_submodules_test.sh`, `tests/update_check_test.sh` (case 11), [the upgrade path](#the-upgrade-path) |
+| Fast-forward-only upgrade | `install.sh`, `tests/upgrade_test.sh` (case 5), [the upgrade path](#the-upgrade-path) |
+| Refuses to run as root | `_install_refuse_root` in `install.sh`, `tests/root_refusal_test.sh` |
 | Fork-free startup, one background fetch | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
 | Backup before overwrite | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh`, [what `link()` does at each destination](#what-link-does-at-each-destination) |
 | Two secret scanners | `make secret-scan`, `make gitleaks`, [the two secret scanners](development.md#the-two-secret-scanners) |
