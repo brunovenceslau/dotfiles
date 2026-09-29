@@ -526,7 +526,7 @@ fi
 # it and rmdir the dirs the installer created to hold it. rmdir only removes an
 # EMPTY dir, so any OTHER survivor keeps the dir non-empty and still fails the audit
 # below - leak detection is preserved, only the intended machine-local seed is swept.
-# The docs (README "Uninstalling") promise the file SURVIVES, so when the ROOT
+# The docs (README "What uninstall leaves behind") promise the file SURVIVES, so when the ROOT
 # ships the tracked git config the seed must be present here, not merely allowed.
 seed="$xdg_config/git/config"
 if [ -f "$root/config/git/config" ]; then

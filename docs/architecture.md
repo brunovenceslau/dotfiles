@@ -482,16 +482,13 @@ auditing them: each row names the file, test or gate that enforces it.
 
 | Property | Where it is enforced |
 | --- | --- |
-| No plugin manager and no runtime download. The three zsh plugins are submodules pinned to exact commits, loaded by a static loader. | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
-| The fast-syntax-highlighting theme download is neutralized, so a pinned commit cannot be bypassed at source time. | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
-| Object checking is on for every fetch (`transfer`, `fetch` and `receive.fsckObjects`), and the upgrade path re-asserts it after scrubbing ambient git config, so a hostile global config cannot turn it off. | `config/git/config`, the `vgit` wrapper in `install.sh`, `tests/git_config_test.sh` |
-| The upgrade merge is `--ff-only`, so a rewound or diverged remote history is refused rather than checked out. | `install.sh`, [the upgrade path](#the-upgrade-path) |
-| Nothing on the interactive startup path runs a subprocess or waits on the network. The single exception is the update check: at most once per cadence window (3 days by default) it launches a detached background `git fetch` of this repository, and `DOTFILES_UPDATE_DISABLE` set to any non-empty value turns it off. | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
-| No user file is overwritten without a `.bak` copy first, and uninstall restores it. | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh` |
-| Two independent secret scanners run as gates over the tree in `make local-ci` and in CI on every push and pull request. | `make secret-scan`, `make gitleaks`, [the two secret scanners](development.md#the-two-secret-scanners) |
-
-None of these verify signatures on what is fetched; see
-[the upgrade path](#the-upgrade-path).
+| Pinned plugins, no plugin manager | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
+| No runtime theme download | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
+| Object checking on every fetch | `config/git/config`, the `vgit` wrapper in `install.sh`, `tests/git_config_test.sh`, [the upgrade path](#the-upgrade-path) |
+| Fast-forward-only upgrade | `install.sh`, [the upgrade path](#the-upgrade-path) |
+| Fork-free startup, one background fetch | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
+| Backup before overwrite | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh`, [what `link()` does at each destination](#what-link-does-at-each-destination) |
+| Two secret scanners | `make secret-scan`, `make gitleaks`, [the two secret scanners](development.md#the-two-secret-scanners) |
 
 ## Platform differences
 

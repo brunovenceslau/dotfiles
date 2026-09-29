@@ -16,10 +16,8 @@ runtime downloads.
 
 The repository is the install. You clone it to `~/.config/dotfiles`, run
 `./install.sh`, and that same clone is what every shell loads, so editing it is
-the way you change your setup. It is for someone on macOS who wants their shell
-configuration to be one git repository with an exact uninstall, and who is
-willing to read the code and adapt it. It is a starting point you own, not a
-product you configure: read [Who this is for](#who-this-is-for) before you clone.
+the way you change your setup. It is a starting point you own, not a product
+you configure: read [Who this is for](#who-this-is-for) before you clone.
 
 ## Quick start
 
@@ -37,9 +35,6 @@ Then give this machine its own git identity:
 git config --file ~/.config/git/config.local user.name  "Your Name"
 git config --file ~/.config/git/config.local user.email "you@example.com"
 ```
-
-Starting from a bare Mac instead? Follow
-[Provision a new mac host](docs/new-mac-host.md).
 
 ## Contents
 
@@ -102,7 +97,7 @@ adapt it.
   manifest, every file it replaces is backed up first, and uninstall reverses
   both. CI verifies it with a before and after diff of a scratch home on every
   run. The one file left on purpose is described in
-  [Uninstalling](#uninstalling).
+  [What uninstall leaves behind](#what-uninstall-leaves-behind).
 - **A per-host `.local` layer.** The shell, git, terminal, tmux and package
   surfaces each load an untracked `.local` companion, so two machines differ
   without forking the repository. The
@@ -185,7 +180,7 @@ prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
 | `./install.sh` | Create the state and cache directories, copy a pre-XDG `~/.zsh_history` over, create every link, initialize missing plugin submodules, and cache the shell integrations. Idempotent. |
 | `./install.sh link` | Recreate the links and the manifest, then refresh the cached shell integrations. This is what an upgrade re-runs. |
 | `./install.sh packages` | `brew bundle` over `packages/Brewfile`, then the pinned `gh` extensions. |
-| `./install.sh --help` | Print the usage line. |
+| `./install.sh --help` | Print the usage (`-h` and `help` work too). |
 | `dotfiles-upgrade` | Fetch, fast-forward merge, update submodules, relink, recompile. Same as `./install.sh upgrade`. |
 | `dotfiles-uninstall [--purge]` | Remove the framework's links and restore backups. `--purge` also deletes generated cache and state, **including your shell history**. Same as `./install.sh uninstall [--purge]`. |
 | `reload` | Re-source `$ZDOTDIR/.zshrc` in the current shell. |
@@ -243,10 +238,8 @@ your untracked `.local` files. How a link is judged to be the framework's,
 including links another checkout made, is in
 [The manifest closes the loop](docs/architecture.md#the-manifest-closes-the-loop).
 
-`--purge` also deletes `$XDG_CACHE_HOME/zsh`, `$XDG_STATE_HOME/zsh` and
-`$XDG_STATE_HOME/dotfiles`.
-
-> **Warning:** `--purge` deletes `$XDG_STATE_HOME/zsh`, which holds your shell
+> **Warning:** `--purge` also deletes `$XDG_CACHE_HOME/zsh`,
+> `$XDG_STATE_HOME/dotfiles` and `$XDG_STATE_HOME/zsh`, which holds your shell
 > history (`$XDG_STATE_HOME/zsh/history`, by default
 > `~/.local/state/zsh/history`). Copy that file somewhere else first if you want
 > to keep it.
