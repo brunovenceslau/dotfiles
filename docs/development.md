@@ -29,6 +29,11 @@ maintainer decision, and last the step-by-step recipes for common changes.
 - [Hard rules](#hard-rules)
 - [Ask before doing any of these](#ask-before-doing-any-of-these)
 - [Common changes](#common-changes)
+  - [Add a config for a new program](#add-a-config-for-a-new-program)
+  - [Add a `.local` layer to a surface](#add-a-local-layer-to-a-surface)
+  - [Bump a plugin pin](#bump-a-plugin-pin)
+  - [Add a gh extension](#add-a-gh-extension)
+  - [Change something on the upgrade path](#change-something-on-the-upgrade-path)
 - [Landing a change](#landing-a-change)
 - [Cutting a release](#cutting-a-release)
   - [Which number to bump](#which-number-to-bump)
@@ -83,7 +88,7 @@ parity by construction. Run `make local-ci` before every push.
 | Target | What it runs | What it proves |
 | --- | --- | --- |
 | `make lint` | shellcheck over `install.sh`, `lib/`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` and `py-syntax` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
-| `make check-patterns` | `bin/check-patterns` | No downloaded code is executed, and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
+| `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
 | `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
@@ -102,18 +107,19 @@ each one is pinned to.
 
 Three files cannot carry a header: `config/nvim/lazy-lock.json`,
 `.claude/settings.json` and `.github/repo-settings.json`, because JSON has no
-comment syntax. `REUSE.toml` declares them, and `tests/reuse_gate_test.sh`
-fails if a new tracked `.json` file is not declared there. Everything else states its licence in its own
-comment syntax. A block copied from an upstream project is bracketed by
-`SPDX-SnippetBegin` and `SPDX-SnippetEnd` and repeats that upstream's licence
-in place. A whole file that is someone else's work carries that work's licence
-in its own header instead: `CODE_OF_CONDUCT.md` is the Contributor Covenant
-under `CC-BY-SA-4.0`, which is why `LICENSES/` holds a fifth licence text.
+comment syntax. `REUSE.toml` declares them, and `tests/reuse_gate_test.sh` fails
+if a new tracked `.json` file is not declared there. Everything else states its
+licence in its own comment syntax. A block copied from an upstream project is
+bracketed by `SPDX-SnippetBegin` and `SPDX-SnippetEnd` and repeats that
+upstream's licence in place. A whole file that is someone else's work carries
+that work's licence in its own header instead: `CODE_OF_CONDUCT.md` is the
+Contributor Covenant under `CC-BY-SA-4.0`, which is why `LICENSES/` holds a
+fifth licence text.
 
 ### What `make check-patterns` checks
 
-`bin/check-patterns` is the static half of the gates. Each rule below names
-what it rejects and which paths it reads. The rules:
+Each rule below names what it rejects, and, where it applies to only some
+paths, which ones. The rules:
 
 - No `curl` or `wget` download executed on the same line: piped into `sh`,
   `bash`, `zsh`, `ksh` or `dash` (also through `|&`, `sudo` with options, `env`,
@@ -231,7 +237,7 @@ hand-kept list.
 
 #### How the gate fails closed
 
-The git pass fails closed when that `.git` exists but git is missing, cannot
+The git pass fails closed when the root has its own `.git` but git is missing, cannot
 list its own local environment variables (`git rev-parse --local-env-vars`
 fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors, returns a malformed
 record, or resolves a toplevel other than the root (a repository git refuses as
@@ -467,11 +473,12 @@ Two checks hold the file to the rest of the world:
 expected value and the live one. Beyond the branch ruleset, it reads the rules
 that actually apply to `main` from every source and requires each one to come
 from that ruleset, and it requires classic branch protection to be absent, so a
-second ruleset or a classic rule cannot add enforcement the file does not
-state. A setting is `ok` only when its live value was read and matches. A failed call or a field the API left out, such as
-`bypass_actors` for a caller without admin rights, is `UNREADABLE` and fails the
-run, so a partial read never passes. It needs `gh` authenticated as a repository
-admin and `jq`, and it only issues `GET` requests.
+second ruleset or a classic rule cannot add enforcement the file does not state.
+A setting is `ok` only when its live value was read and matches. A failed call
+or a field the API left out, such as `bypass_actors` for a caller without admin
+rights, is `UNREADABLE` and fails the run, so a partial read never passes. It
+needs `gh` authenticated as a repository admin and `jq`, and it only issues
+`GET` requests.
 
 It is not a pull request gate on purpose. Reading these settings needs an
 authenticated token, and a workflow that runs on a pull request from a fork
@@ -583,10 +590,10 @@ except for their README and `*.example` files. `make secret-scan` is the backsto
 
 ## Ask before doing any of these
 
-The contributor-facing version of this list, with what to do instead, is in
-[CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). This
-one also names the link exceptions table and any write outside
-`~/.config/dotfiles`.
+The canonical list, with what to do instead, is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). The
+list below is the maintainer's working copy; where the two differ, the
+CONTRIBUTING list governs.
 
 - Adding a submodule or a binary dependency.
 - Any change to the security model: the plugin pinning scheme, the

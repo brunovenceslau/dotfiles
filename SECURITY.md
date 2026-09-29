@@ -50,8 +50,8 @@ In short, the properties are:
 
 - the plugin supply chain: pinned plugins, a static loader and the neutralized
   fast-syntax-highlighting theme download;
-- the SSH signing setup, which keeps unsigned or wrongly attributed commits off
-  `main`;
+- signed commits on `main`: the SSH signing setup and the branch ruleset that
+  requires signatures;
 - object checking on every fetch after install, forced on the command line
   wherever the framework fetches;
 - the git-config scrubbing on the upgrade path and the update check;

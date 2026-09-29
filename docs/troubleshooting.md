@@ -36,7 +36,7 @@ this page no longer exists in the code.
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
 | `install: refusing to run as root`, or `cannot tell who is running this` | [Install refuses to run as root](#install-refuses-to-run-as-root) |
 | `the manifest keeps an entry the framework may not act on` | [Manifest keeps an entry the framework may not act on](#manifest-keeps-an-entry-the-framework-may-not-act-on) |
-| `<tool> <args> did not produce a completion script` | [sbx has no completion](#sbx-has-no-completion) |
+| `<tool> <args> did not produce a completion script` (canga or sbx) | [sbx has no completion](#sbx-has-no-completion) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
 | `make lint` fails with `check-patterns: an entry under zsh/plugins/ that is not a pinned plugin` | [check-patterns rejects a file under zsh/plugins](#check-patterns-rejects-a-file-under-zshplugins) |
 
@@ -541,9 +541,9 @@ Two things are left on purpose, with no message:
 - `~/.config/git/config`, the machine-local git config the installer wrote. It
   is where `git config --global` writes, so it can hold your own settings.
   Delete it by hand if you no longer want it.
-- An empty directory the uninstall did not empty itself. Directories are pruned
-  only when a removed link leaves them empty, so a directory holding a `.local`
-  file stays. That is intended: `.local` files are never removed.
+- A directory the uninstall did not empty. Directories are pruned only when a
+  removed link leaves them empty, so one holding a `.local` file stays;
+  `.local` files are never removed.
 
 `--purge` does **not** leave your shell history: it deletes
 `$XDG_STATE_HOME/zsh`, which holds it. See

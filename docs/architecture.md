@@ -13,7 +13,8 @@ quality gates, see [development](development.md).
 - [Design goals](#design-goals)
 - [Repository layout](#repository-layout)
 - [How linking works](#how-linking-works)
-  - [Conventions](#conventions) and [Exceptions](#exceptions)
+  - [Conventions](#conventions)
+  - [Exceptions](#exceptions)
   - [What `link()` does at each destination](#what-link-does-at-each-destination)
   - [Who owns a link](#who-owns-a-link)
   - [The manifest closes the loop](#the-manifest-closes-the-loop)
@@ -22,6 +23,7 @@ quality gates, see [development](development.md).
   - [The prompt and `z` are cached, not evaluated](#the-prompt-and-z-are-cached-not-evaluated)
   - [The one sanctioned background spawn](#the-one-sanctioned-background-spawn)
 - [Plugins and the supply chain](#plugins-and-the-supply-chain)
+  - [Neutralizing the fast-syntax-highlighting theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch)
 - [The upgrade path](#the-upgrade-path)
 - [The installer refuses root](#the-installer-refuses-root)
 - [Security properties and where they are enforced](#security-properties-and-where-they-are-enforced)
@@ -388,10 +390,10 @@ non-interactively (it fails instead of prompting for credentials), and writes
 only into the clone's object store and `$XDG_STATE_HOME/dotfiles`.
 `tests/update_check_test.sh` covers the redirect ("ambient url.insteadOf cannot
 redirect the background fetch") and a malformed object ("a malformed object on
-origin is refused, even with fsck off ambiently"). `make forkgate` pre-seeds a fresh
-stamp, so the gate measures the cadence check and never the fetch itself. To
-turn the check off, set `DOTFILES_UPDATE_DISABLE` to any non-empty value, in the
-environment or in `$ZDOTDIR/.zshrc.local`, which zshrc sources before
+origin is refused, even with fsck off ambiently"). `make forkgate` pre-seeds a
+fresh stamp, so the gate measures the cadence check and never the fetch itself.
+To turn the check off, set `DOTFILES_UPDATE_DISABLE` to any non-empty value, in
+the environment or in `$ZDOTDIR/.zshrc.local`, which zshrc sources before
 `update-check.zsh`.
 
 ## Plugins and the supply chain
@@ -507,12 +509,12 @@ that enforces each property.
 | --- | --- | --- |
 | Pinned plugins, no plugin manager. The three zsh plugins are submodules pinned to exact commits and loaded by a static loader. | A way for unpinned or unreviewed plugin code to reach the startup path. | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
 | No runtime theme download | A way around the neutralized fast-syntax-highlighting theme download. | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
-| Signed commits on `main` | A way to land an unsigned or wrongly attributed commit on `main`. | The GitHub settings recorded in `.github/repo-settings.json`, held to the docs by `tests/repo_settings_test.sh`; see [signed commits are required](../CONTRIBUTING.md#signed-commits-are-required) |
+| Signed commits on `main` | A way to land an unsigned or wrongly attributed commit on `main`. | The live `main-protection` branch ruleset on GitHub (`required_signatures`, no bypass actors), recorded in `.github/repo-settings.json`, held to the docs by `tests/repo_settings_test.sh`, and diffed against the live repository by the maintainer-run `make repo-settings-check`; see [signed commits are required](../CONTRIBUTING.md#signed-commits-are-required) |
 | Object checking on every fetch after install. `transfer`, `fetch` and `receive.fsckObjects` are on in the tracked git config, and the upgrade, the background update check and the installer's plugin submodule step each force them on the command line, whatever the ambient configuration says. | A way to turn any of that off from outside the repository. | `config/git/config`, the `vgit` wrapper in `install.sh`, `ensure_submodules` in `install.sh`, the background fetch in `zsh/update-check.zsh`, `tests/git_config_test.sh`, `tests/upgrade_test.sh` ("a malformed object on origin is refused at fetch time"), `tests/ensure_submodules_test.sh`, `tests/update_check_test.sh` ("a malformed object on origin is refused, even with fsck off ambiently"), [the upgrade path](#the-upgrade-path) |
 | Scrubbed ambient git config. The upgrade and the background update fetch run with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at `/dev/null` and the `GIT_CONFIG_*` environment families removed. | A way to inject configuration back into either path. | The `vgit` wrapper in `install.sh`, `zsh/update-check.zsh`, `tests/upgrade_test.sh` ("ambient url.insteadOf cannot redirect the upgrade fetch"), `tests/update_check_test.sh` ("ambient url.insteadOf cannot redirect the background fetch"), [the upgrade path](#the-upgrade-path) |
 | Fast-forward-only upgrade | A way to make `dotfiles-upgrade` accept a rewound or diverged history. | `install.sh`, `tests/upgrade_test.sh` ("rollback: divergent (non-descendant) history"), [the upgrade path](#the-upgrade-path) |
 | The link engine and the manifest: backup before overwrite, links only under `$HOME`, uninstall removes only framework links | Overwriting a user file without the `.bak` copy, writing outside the paths the installer declares, or making `dotfiles-uninstall` remove something it did not create. | `lib/link.sh` (`_link_owned`, `_link_under_home`), `lib/uninstall.sh`, `tests/link_test.sh`, `tests/uninstall_test.sh`, [what `link()` does at each destination](#what-link-does-at-each-destination), [who owns a link](#who-owns-a-link) |
-| Refuses to run as root | A way to make any `install.sh` subcommand run as root. | `_install_refuse_root` in `install.sh`, `tests/root_refusal_test.sh`, [the installer refuses root](#the-installer-refuses-root) |
+| Refuses to run as root | A way to make any `install.sh` subcommand run as root. A root `dotfiles-upgrade` from an older release still runs that release's own git steps as root; that is a known limitation, not a report (see [the installer refuses root](#the-installer-refuses-root)). | `_install_refuse_root` in `install.sh`, `tests/root_refusal_test.sh`, [the installer refuses root](#the-installer-refuses-root) |
 | Fork-free startup, one background fetch | A subprocess or a network call on the path to the first prompt that `make forkgate` does not catch. The background fetch of the update check counts only if it can be made to block the prompt, prompt for input, fetch from anywhere but the clone's `origin`, or skip object checking. | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
 | Two secret scanners | Anything secret-shaped that is committed, or a way past both `make secret-scan` and `make gitleaks`. | `make secret-scan`, `make gitleaks`, `tests/secret_scan_test.sh`, `tests/gitleaks_gate_test.sh`, [the two secret scanners](development.md#the-two-secret-scanners) |
 
