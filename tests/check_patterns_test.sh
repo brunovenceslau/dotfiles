@@ -2920,12 +2920,12 @@ chmod u+x "$go_shim/grep"
 PATH="$go_shim:$PATH" GREP_OPTIONS=-I \
   fails_with_rc 1 "$work/split-fail-1" "check-patterns: hardcoded Homebrew prefix" "an inherited GREP_OPTIONS must not reach the gate's greps" only
 
-# === arm (13): a raw readlink in lib/ outside _link_readlink =================
+# === arm (13): a raw readlink in install.sh/lib/ outside _link_readlink ======
 # $(readlink) strips a target's trailing newline, and BSD readlink's own
-# terminator differs from GNU's, so lib/ reads a link target only through
-# lib/link.sh's _link_readlink. The exemption is that function's BODY in that
-# exact file, found at scan time: never a line number, a file, or a name
-# defined elsewhere.
+# terminator differs from GNU's, so install.sh and lib/ read a link target
+# only through lib/link.sh's _link_readlink. The exemption is the helper's
+# exact call line inside that function's body in that exact file, found at
+# scan time: never a line number, a file, or a name defined elsewhere.
 _rl_helper() {  # $1 = file: the helper, and a caller of it
   printf '%s\n' \
     '# _link_readlink DEST - a comment that names readlink and $(readlink)' \
@@ -3186,7 +3186,7 @@ done
 # === arm (14): a localizing declaration of zsh's path specials ===============
 # `local path` in a function keeps the special tie, so assigning it rewrites
 # $PATH for the whole call. A line scanner cannot tell a function body from
-# the top level, so every declaration of the eight names without -g fails.
+# the top level, so every declaration of the ten names without -g fails.
 i=0
 while IFS= read -r line; do
   i=$((i + 1)); r="$work/tied-shape-$i"; seed "$r"; mkdir -p "$r/zsh/sub"
