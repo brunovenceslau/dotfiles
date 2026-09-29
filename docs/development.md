@@ -237,11 +237,11 @@ hand-kept list.
 
 #### How the gate fails closed
 
-The git pass fails closed when the root has its own `.git` but git is missing, cannot
-list its own local environment variables (`git rev-parse --local-env-vars`
-fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors, returns a malformed
-record, or resolves a toplevel other than the root (a repository git refuses as
-dubiously owned included). Of its stderr, only the `ls-files` listing's fails
+The git pass fails closed when the root has its own `.git` but git is missing,
+cannot list its own local environment variables (`git rev-parse
+--local-env-vars` fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors,
+returns a malformed record, or resolves a toplevel other than the root (a
+repository git refuses as dubiously owned included). Of its stderr, only the `ls-files` listing's fails
 closed (a `GIT_TRACE*` variable or a `trace2.*` config key, say); the toplevel
 probe's is shown only when the probe itself fails. Git runs inside the root with
 `core.fsmonitor` forced off, but the root must still be a checkout you trust.
@@ -592,8 +592,9 @@ except for their README and `*.example` files. `make secret-scan` is the backsto
 
 The canonical list, with what to do instead, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). The
-list below is the maintainer's working copy; where the two differ, the
-CONTRIBUTING list governs.
+list below is the maintainer's working copy. An item on either list needs a
+maintainer decision; CONTRIBUTING's list is the fuller statement of the
+security model.
 
 - Adding a submodule or a binary dependency.
 - Any change to the security model: the plugin pinning scheme, the
