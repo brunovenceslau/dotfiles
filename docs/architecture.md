@@ -474,6 +474,25 @@ is a fetch plus a fast-forward merge. The protections that do apply are object
 fsck on every fetch, the scrubbed ambient config, and the refusal to merge a
 non-descendant history.
 
+## Security properties and where they are enforced
+
+The [README's security model](../README.md#security-model) states these
+properties for someone deciding whether to install. This table is for someone
+auditing them: each row names the file, test or gate that enforces it.
+
+| Property | Where it is enforced |
+| --- | --- |
+| No plugin manager and no runtime download. The three zsh plugins are submodules pinned to exact commits, loaded by a static loader. | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
+| The fast-syntax-highlighting theme download is neutralized, so a pinned commit cannot be bypassed at source time. | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
+| Object checking is on for every fetch (`transfer`, `fetch` and `receive.fsckObjects`), and the upgrade path re-asserts it after scrubbing ambient git config, so a hostile global config cannot turn it off. | `config/git/config`, the `vgit` wrapper in `install.sh`, `tests/git_config_test.sh` |
+| The upgrade merge is `--ff-only`, so a rewound or diverged remote history is refused rather than checked out. | `install.sh`, [the upgrade path](#the-upgrade-path) |
+| Nothing on the interactive startup path runs a subprocess or waits on the network. The single exception is the update check: at most once per cadence window (3 days by default) it launches a detached background `git fetch` of this repository, and `DOTFILES_UPDATE_DISABLE` set to any non-empty value turns it off. | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
+| No user file is overwritten without a `.bak` copy first, and uninstall restores it. | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh` |
+| Two independent secret scanners run as gates over the tree in `make local-ci` and in CI on every push and pull request. | `make secret-scan`, `make gitleaks`, [the two secret scanners](development.md#the-two-secret-scanners) |
+
+None of these verify signatures on what is fetched; see
+[the upgrade path](#the-upgrade-path).
+
 ## Platform differences
 
 Apple Silicon and Intel are both first-class targets. Architecture differences
