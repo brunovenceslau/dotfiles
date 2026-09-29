@@ -36,8 +36,9 @@ git config --file ~/.config/git/config.local user.name  "Your Name"
 git config --file ~/.config/git/config.local user.email "you@example.com"
 ```
 
-Bare Mac, no `git` yet? Start with [Provision a new mac host](docs/new-mac-host.md).
-Before you run `install.sh`, the [Security model](#security-model) lists what it
+Bare Mac, no `git` yet? Start with
+[Provision a new mac host](docs/new-mac-host.md). Before you trust `install.sh`
+with your home directory, the [Security model](#security-model) lists what it
 does and does not protect.
 
 ## Contents
@@ -151,8 +152,8 @@ lines in the [Quick start](#quick-start)), and nothing commits as the
 maintainer.
 
 Until commit signing is configured, the installer prints a warning that it is
-not enabled. Signing is optional: nothing on this machine refuses an unsigned commit, but GitHub
-will not show it as verified. To set it up, see
+not enabled. Signing is optional: nothing on this machine refuses an unsigned
+commit, but GitHub will not show it as verified. To set it up, see
 [Provision a new mac host](docs/new-mac-host.md#4-set-identity-and-signing) and
 `config/git/config.local.example`.
 
@@ -289,10 +290,12 @@ that reviewable:
 - **A fork-free startup.** Nothing on the interactive startup path runs a
   subprocess or waits on the network, except
   [the background update check](#the-background-update-check).
+- **No root.** `install.sh` refuses to run as root for every subcommand and
+  never needs `sudo`.
 - **Backups before overwrites.** No user file is overwritten without a `.bak`
   copy first, and uninstall restores it.
-- **Two secret scanners.** Two independent scanners run as gates over the tree in
-  `make local-ci` and in CI on every push to `main` and every pull request.
+- **Two secret scanners.** Two independent scanners run as gates over the tree
+  in `make local-ci` and in CI on every push to `main` and every pull request.
 
 None of this verifies signatures on what you fetch. `dotfiles-upgrade` is a
 fetch plus a fast-forward merge, and it trusts whatever the remote you cloned
