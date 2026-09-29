@@ -86,8 +86,9 @@ rclone listremotes            # expect: backup:
 
 ## 3. Configure a restic repository
 
-Copy the per-repository template and fill in references. `$DOTFILES` is the repository root, wherever you cloned it; the framework's
-`~/.zshenv` exports it in every zsh.
+Copy the per-repository template and fill in references. `$DOTFILES` is the
+repository root, wherever you cloned it; the framework's `~/.zshenv` exports it
+in every zsh.
 
 ```sh
 mkdir -p ~/.config/restic
@@ -226,8 +227,8 @@ working directory.
 
 If you do not use a secret runner, restic also reads its settings from the plain
 environment. Copy `$DOTFILES/config/restic/restic.env.example` to
-`~/.config/restic/env`, fill in `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_FILE`, `chmod 600` it, and load
-it from your `.local` layer:
+`~/.config/restic/env`, fill in `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_FILE`,
+`chmod 600` it, and load it from your `.local` layer:
 
 ```sh
 # in ~/.config/zsh/.zshrc.local

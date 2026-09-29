@@ -34,6 +34,9 @@ this page no longer exists in the code.
 | `backed up <path> -> <path>.bak` for links another checkout made, or `link: not recording the target of` | [Links from another checkout were backed up](#links-from-another-checkout-were-backed-up) |
 | `packages: Homebrew is not installed` | [Packages will not install](#packages-will-not-install) |
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
+| `install: refusing to run as root`, or `cannot tell who is running this` | [Install refuses to run as root](#install-refuses-to-run-as-root) |
+| `the manifest keeps an entry the framework may not act on` | [Manifest keeps an entry the framework may not act on](#manifest-keeps-an-entry-the-framework-may-not-act-on) |
+| `<tool> <args> did not produce a completion script` | [sbx has no completion](#sbx-has-no-completion) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
 | `make lint` fails with `check-patterns: an entry under zsh/plugins/ that is not a pinned plugin` | [check-patterns rejects a file under zsh/plugins](#check-patterns-rejects-a-file-under-zshplugins) |
 
@@ -78,6 +81,10 @@ for i in 1 2 3 4 5; do time zsh -i -c exit; done
 make -C ~/.config/dotfiles forkgate     # proves the startup path forks nothing
 ```
 
+A synchronous subprocess or network call in `.zshrc.local` is the usual cause.
+The fork gate measures the tracked path only, so it will not flag your own local
+file, but it will confirm the framework is not the problem.
+
 **Third cause: group-writable plugin directories.** A clone or submodule
 checkout made under `umask 002` leaves `zsh/plugins` group-writable. compinit's
 audit then runs `getent` on every audited start, and on a shared group it asks
@@ -87,10 +94,6 @@ whether to use the "insecure directories". `./install.sh` and
 ```sh
 chmod -R go-w ~/.config/dotfiles/zsh/plugins
 ```
-
-A synchronous subprocess or network call in `.zshrc.local` is the usual cause.
-The fork gate measures the tracked path only, so it will not flag your own local
-file, but it will confirm the framework is not the problem.
 
 ## The prompt or `z` is missing
 
@@ -539,11 +542,14 @@ Two things are left on purpose, with no message:
   is where `git config --global` writes, so it can hold your own settings.
   Delete it by hand if you no longer want it.
 - An empty directory the uninstall did not empty itself. Directories are pruned
-  only when a removed link leaves them empty.
+  only when a removed link leaves them empty, so a directory holding a `.local`
+  file stays. That is intended: `.local` files are never removed.
 
 `--purge` does **not** leave your shell history: it deletes
 `$XDG_STATE_HOME/zsh`, which holds it. See
 [Uninstalling](../README.md#uninstalling).
+
+## Install refuses to run as root
 
 ```
 install: refusing to run as root - run it as the owning user; sudo is never needed here
@@ -559,9 +565,6 @@ other two messages mean the check could not read the uid from `/usr/bin/id` (the
 installer does not run there.
 
 **Fix.** Run the command as the owning user. Sudo is never needed.
-
-Directories are pruned only while they are empty, so a directory holding a
-`.local` file stays. That is intended: `.local` files are never removed.
 
 ## Manifest keeps an entry the framework may not act on
 
@@ -618,7 +621,8 @@ then ignores its own `shell-integration-features` line.
 check-patterns: an entry under zsh/plugins/ that is not a pinned plugin - no arm scans zsh/plugins/; move it out, or pin it as submodule.<name>.path = zsh/plugins/<name> in .gitmodules
 ```
 
-`bin/check-patterns` exits 1 with this message, so `make lint` or `make check-patterns` fails (make reports `Error 1`).
+`bin/check-patterns` exits 1 with this message, so `make lint` or
+`make check-patterns` fails (make reports `Error 1`).
 
 **Cause.** No check reads `zsh/plugins/`, because the pinned plugins there are
 third-party code. So anything in it other than a pinned plugin fails the gate,

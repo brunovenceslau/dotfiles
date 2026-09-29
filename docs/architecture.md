@@ -10,6 +10,23 @@ How the framework is built and why. This page explains the design. For exact
 command and file lists, see the [shell reference](shell-reference.md). For the
 quality gates, see [development](development.md).
 
+- [Design goals](#design-goals)
+- [Repository layout](#repository-layout)
+- [How linking works](#how-linking-works)
+  - [Conventions](#conventions) and [Exceptions](#exceptions)
+  - [What `link()` does at each destination](#what-link-does-at-each-destination)
+  - [Who owns a link](#who-owns-a-link)
+  - [The manifest closes the loop](#the-manifest-closes-the-loop)
+- [The `.local` layer](#the-local-layer)
+- [The interactive startup path](#the-interactive-startup-path)
+  - [The prompt and `z` are cached, not evaluated](#the-prompt-and-z-are-cached-not-evaluated)
+  - [The one sanctioned background spawn](#the-one-sanctioned-background-spawn)
+- [Plugins and the supply chain](#plugins-and-the-supply-chain)
+- [The upgrade path](#the-upgrade-path)
+- [The installer refuses root](#the-installer-refuses-root)
+- [Security properties and where they are enforced](#security-properties-and-where-they-are-enforced)
+- [Platform differences](#platform-differences)
+
 ## Design goals
 
 Four constraints shape every decision here.
@@ -150,29 +167,6 @@ exits 1. Uninstall skips the line and exits 1. Prune drops the line when
 nothing exists at the path or its `.bak` (checked without following links), and
 otherwise keeps it and exits 1 with a message of its own. See
 [Manifest keeps an entry the framework may not act on](troubleshooting.md#manifest-keeps-an-entry-the-framework-may-not-act-on).
-
-`install.sh` refuses to run as root, for every subcommand and with no
-override (`_install_refuse_root`, the first thing the script does). A root
-process must never be steered by anything a user controls, and here nearly
-everything is the user's: the checkout it sources and re-executes, the manifest
-and targets file it acts on, the `$HOME` and XDG directories it writes, and the
-tools it runs from the user's `PATH` (`starship` on `~/.local/bin`, `git`,
-`gh`). Guarding each of those was a list that kept growing, so there is one
-rule instead. The check runs before any `lib/` file is sourced and before the
-script reads any variable of its own. Bash itself reads `BASH_ENV`, `SHELLOPTS`
-and `BASHOPTS` before the first line; sudo's default `env_delete` strips them.
-It reads the uid from the absolute `/usr/bin/id`, not from `PATH` (where a
-user's fake `id` could answer) and not from `$EUID` or `$UID` (which the
-environment can set), and it fails closed when that uid cannot be read, as on
-NixOS, which has no `/usr/bin/id`. The shebang is the absolute `/bin/bash`
-(macOS's 3.2, the version the installer targets), not `env bash`, so a fake
-`bash` earlier on root's `PATH` never runs either. The check also runs when the
-file is sourced, so no function in `install.sh` needs to ask again. Nothing in
-the framework needs root: Homebrew is user-scoped.
-
-A root `dotfiles-upgrade` run from an older release still runs that release's
-own git steps (fetch, merge, submodule update) as root; only the new tree's
-`install.sh`, which the upgrade re-enters for the relink, refuses.
 
 A symlink is the framework's when either holds:
 
@@ -392,8 +386,9 @@ families, so an ambient `url.insteadOf` cannot redirect it, and it re-reads only
 the credential helper from the XDG config. It forces object fsck on, runs
 non-interactively (it fails instead of prompting for credentials), and writes
 only into the clone's object store and `$XDG_STATE_HOME/dotfiles`.
-`tests/update_check_test.sh` cases 10 and 11 cover the redirect and a malformed
-object. `make forkgate` pre-seeds a fresh
+`tests/update_check_test.sh` covers the redirect ("ambient url.insteadOf cannot
+redirect the background fetch") and a malformed object ("a malformed object on
+origin is refused, even with fsck off ambiently"). `make forkgate` pre-seeds a fresh
 stamp, so the gate measures the cadence check and never the fetch itself. To
 turn the check off, set `DOTFILES_UPDATE_DISABLE` to any non-empty value, in the
 environment or in `$ZDOTDIR/.zshrc.local`, which zshrc sources before
@@ -474,22 +469,52 @@ is a fetch plus a fast-forward merge. The protections that do apply are object
 fsck on every fetch, the scrubbed ambient config, and the refusal to merge a
 non-descendant history.
 
+## The installer refuses root
+
+`install.sh` refuses to run as root, for every subcommand and with no
+override (`_install_refuse_root`, the first thing the script does). A root
+process must never be steered by anything a user controls, and here nearly
+everything is the user's: the checkout it sources and re-executes, the manifest
+and targets file it acts on, the `$HOME` and XDG directories it writes, and the
+tools it runs from the user's `PATH` (`starship` on `~/.local/bin`, `git`,
+`gh`). Guarding each of those was a list that kept growing, so there is one
+rule instead. The check runs before any `lib/` file is sourced and before the
+script reads any variable of its own. Bash itself reads `BASH_ENV`, `SHELLOPTS`
+and `BASHOPTS` before the first line; sudo's default `env_delete` strips them.
+It reads the uid from the absolute `/usr/bin/id`, not from `PATH` (where a
+user's fake `id` could answer) and not from `$EUID` or `$UID` (which the
+environment can set), and it fails closed when that uid cannot be read, as on
+NixOS, which has no `/usr/bin/id`. The shebang is the absolute `/bin/bash`
+(macOS's 3.2, the version the installer targets), not `env bash`, so a fake
+`bash` earlier on root's `PATH` never runs either. The check also runs when the
+file is sourced, so no function in `install.sh` needs to ask again. Nothing in
+the framework needs root: Homebrew is user-scoped.
+
+A root `dotfiles-upgrade` run from an older release still runs that release's
+own git steps (fetch, merge, submodule update) as root; only the new tree's
+`install.sh`, which the upgrade re-enters for the relink, refuses.
+
 ## Security properties and where they are enforced
 
-The [README's security model](../README.md#security-model) states these
-properties for someone deciding whether to install. This table is for someone
-auditing them: each row names the file, test or gate that enforces it.
+This is the authoritative list of the security properties the framework claims.
+The [README's security model](../README.md#security-model) summarizes them for
+someone deciding whether to install, and [SECURITY.md](../SECURITY.md) uses this
+list to decide what is in scope: a report is in scope when it shows the
+condition in the middle column. The last column names the file, test or gate
+that enforces each property.
 
-| Property | Where it is enforced |
-| --- | --- |
-| Pinned plugins, no plugin manager | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
-| No runtime theme download | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
-| Object checking on every fetch after install | `config/git/config`, the `vgit` wrapper in `install.sh`, `ensure_submodules` in `install.sh`, the background fetch in `zsh/update-check.zsh`, `tests/git_config_test.sh`, `tests/upgrade_test.sh` ("a malformed object on origin is refused at fetch time"), `tests/ensure_submodules_test.sh`, `tests/update_check_test.sh` ("a malformed object on origin is refused, even with fsck off ambiently"), [the upgrade path](#the-upgrade-path) |
-| Fast-forward-only upgrade | `install.sh`, `tests/upgrade_test.sh` ("rollback: divergent (non-descendant) history"), [the upgrade path](#the-upgrade-path) |
-| Refuses to run as root | `_install_refuse_root` in `install.sh`, `tests/root_refusal_test.sh` |
-| Fork-free startup, one background fetch | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
-| Backup before overwrite | `lib/link.sh`, `lib/uninstall.sh`, `tests/uninstall_test.sh`, [what `link()` does at each destination](#what-link-does-at-each-destination) |
-| Two secret scanners | `make secret-scan`, `make gitleaks`, [the two secret scanners](development.md#the-two-secret-scanners) |
+| Property | A report is in scope when it shows | Where it is enforced |
+| --- | --- | --- |
+| Pinned plugins, no plugin manager. The three zsh plugins are submodules pinned to exact commits and loaded by a static loader. | A way for unpinned or unreviewed plugin code to reach the startup path. | `.gitmodules`, `zsh/zshrc`, [plugins and the supply chain](#plugins-and-the-supply-chain) |
+| No runtime theme download | A way around the neutralized fast-syntax-highlighting theme download. | `zsh/zshrc`, `tests/fsyh_fetch_test.sh`, [neutralizing the theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch) |
+| Signed commits on `main` | A way to land an unsigned or wrongly attributed commit on `main`. | The GitHub settings recorded in `.github/repo-settings.json`, held to the docs by `tests/repo_settings_test.sh`; see [signed commits are required](../CONTRIBUTING.md#signed-commits-are-required) |
+| Object checking on every fetch after install. `transfer`, `fetch` and `receive.fsckObjects` are on in the tracked git config, and the upgrade, the background update check and the installer's plugin submodule step each force them on the command line, whatever the ambient configuration says. | A way to turn any of that off from outside the repository. | `config/git/config`, the `vgit` wrapper in `install.sh`, `ensure_submodules` in `install.sh`, the background fetch in `zsh/update-check.zsh`, `tests/git_config_test.sh`, `tests/upgrade_test.sh` ("a malformed object on origin is refused at fetch time"), `tests/ensure_submodules_test.sh`, `tests/update_check_test.sh` ("a malformed object on origin is refused, even with fsck off ambiently"), [the upgrade path](#the-upgrade-path) |
+| Scrubbed ambient git config. The upgrade and the background update fetch run with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` pointed at `/dev/null` and the `GIT_CONFIG_*` environment families removed. | A way to inject configuration back into either path. | The `vgit` wrapper in `install.sh`, `zsh/update-check.zsh`, `tests/upgrade_test.sh` ("ambient url.insteadOf cannot redirect the upgrade fetch"), `tests/update_check_test.sh` ("ambient url.insteadOf cannot redirect the background fetch"), [the upgrade path](#the-upgrade-path) |
+| Fast-forward-only upgrade | A way to make `dotfiles-upgrade` accept a rewound or diverged history. | `install.sh`, `tests/upgrade_test.sh` ("rollback: divergent (non-descendant) history"), [the upgrade path](#the-upgrade-path) |
+| The link engine and the manifest: backup before overwrite, links only under `$HOME`, uninstall removes only framework links | Overwriting a user file without the `.bak` copy, writing outside the paths the installer declares, or making `dotfiles-uninstall` remove something it did not create. | `lib/link.sh` (`_link_owned`, `_link_under_home`), `lib/uninstall.sh`, `tests/link_test.sh`, `tests/uninstall_test.sh`, [what `link()` does at each destination](#what-link-does-at-each-destination), [who owns a link](#who-owns-a-link) |
+| Refuses to run as root | A way to make any `install.sh` subcommand run as root. | `_install_refuse_root` in `install.sh`, `tests/root_refusal_test.sh`, [the installer refuses root](#the-installer-refuses-root) |
+| Fork-free startup, one background fetch | A subprocess or a network call on the path to the first prompt that `make forkgate` does not catch. The background fetch of the update check counts only if it can be made to block the prompt, prompt for input, fetch from anywhere but the clone's `origin`, or skip object checking. | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
+| Two secret scanners | Anything secret-shaped that is committed, or a way past both `make secret-scan` and `make gitleaks`. | `make secret-scan`, `make gitleaks`, `tests/secret_scan_test.sh`, `tests/gitleaks_gate_test.sh`, [the two secret scanners](development.md#the-two-secret-scanners) |
 
 ## Platform differences
 

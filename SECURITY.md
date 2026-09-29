@@ -42,40 +42,28 @@ tag. If you run an older tag, upgrade rather than wait for a patch release.
 
 ## What is in scope
 
-A report is in scope when it weakens one of the properties the framework
-claims. These are the same surfaces that require a maintainer decision before
-any change, listed in
-[CONTRIBUTING.md](CONTRIBUTING.md#ask-before-you-build-any-of-these):
+A report is in scope when it weakens one of the security properties the
+framework claims. The authoritative list, with the condition that makes a
+report in scope for each property and the file or test that enforces it, is
+[Security properties and where they are enforced](docs/architecture.md#security-properties-and-where-they-are-enforced).
+In short, the properties are:
 
-- **The plugin supply chain.** The three zsh plugins are submodules pinned to
-  exact commits and loaded by a static loader. Anything that lets unpinned or
-  unreviewed plugin code reach the startup path is in scope, including a way
-  around the neutralized fast-syntax-highlighting theme download.
-- **The SSH signing setup.** A way to land an unsigned or wrongly attributed
-  commit on `main`.
-- **Object checking on fetch.** `transfer`, `fetch` and `receive.fsckObjects`
-  are on in the tracked git config, and the upgrade path, the background update
-  check and the installer's plugin submodule step each force them on the
-  command line, whatever the ambient configuration says. A way to turn any of that off from outside
-  the repository is in scope.
-- **The git-config scrubbing on the upgrade path and the update check.** The
-  `vgit` wrapper in `install.sh` runs the upgrade, and `zsh/update-check.zsh`
-  runs its background fetch, with `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM`
-  pointed at `/dev/null` and the `GIT_CONFIG_*` environment families removed.
-  A way to inject configuration back into either path is in scope.
-- **The anti-rollback merge.** `dotfiles-upgrade` merges `--ff-only`. A way to
-  make it accept a rewound or diverged history is in scope.
-- **The link engine and the manifest.** Overwriting a user file without the
-  `.bak` copy, writing outside the paths the installer declares, or making
-  `dotfiles-uninstall` remove something it did not create.
-- **The startup path.** Getting a subprocess or a network call onto the path to
-  the first prompt, in a way `make forkgate` does not catch. The one documented
-  exception, the detached background `git fetch` of the update check (see
-  [architecture](docs/architecture.md#the-one-sanctioned-background-spawn)), is
-  in scope only if it can be made to block the prompt, prompt for input, fetch
-  from anywhere but the clone's `origin`, or skip object checking.
-- **Secrets.** Anything secret-shaped that is committed, or a way past both
-  `make secret-scan` and `make gitleaks`.
+- the plugin supply chain: pinned plugins, a static loader and the neutralized
+  fast-syntax-highlighting theme download;
+- the SSH signing setup, which keeps unsigned or wrongly attributed commits off
+  `main`;
+- object checking on every fetch after install, forced on the command line
+  wherever the framework fetches;
+- the git-config scrubbing on the upgrade path and the update check;
+- the anti-rollback merge (`--ff-only`);
+- the link engine and the manifest;
+- the refusal to run as root;
+- the startup path, with its one documented background fetch;
+- secrets, and the two scanners that keep them out.
+
+A change to any of these needs a maintainer decision before the code is written;
+see
+[CONTRIBUTING.md](CONTRIBUTING.md#ask-before-you-build-any-of-these).
 
 ## What is out of scope
 
