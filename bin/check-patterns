@@ -94,8 +94,14 @@
 #         error the gate detects (a tool failing, the report sanitizer
 #         included; an unreadable file; a pinned-plugin file STRICT=1 cannot
 #         verify), a file holding a NUL byte, or a file name arm (12) refuses
-#         (fail closed). A command failing where the gate does not check it
-#         exits through `set -e` with that command's own status.
+#         (fail closed). A command failing in the main shell where `set -e`
+#         would stop the script exits 2 as well (the ERR trap below), never
+#         with its own status, which a 1 would make read as "a violation".
+#         Inside a `$(...)` that holds only where the failure surfaces as
+#         its status in the main shell; see the trap. The git pass runs
+#         under the caller's `||`, where neither `set -e` nor the trap acts:
+#         only the statuses it checks by hand count, and a non-zero one it
+#         returns reads as a violation (exit 1), or exit 2 when it is 2.
 
 set -euo pipefail
 # The C locale for this script and every tool it runs. In a multibyte locale
@@ -106,6 +112,10 @@ set -euo pipefail
 # dash bytes), so no arm wants the caller's locale. LC_ALL overrides LANG
 # and every LC_* variable.
 export LC_ALL=C
+# BSD grep (macOS) prepends an inherited GREP_OPTIONS to every call's
+# options, so a `-I` there would skip every file holding a NUL and a `-v`
+# would invert every arm; GNU grep 3.6+ ignores the variable.
+unset GREP_OPTIONS
 # An inherited SHELLOPTS=xtrace would trace every expanded line, file names
 # and contents included, to stderr raw, around the sanitizer below.
 set +x
@@ -218,10 +228,10 @@ unset _tty_i _tb _th
 _tty_safe() { LC_ALL=C tr -d '\000' | LC_ALL=C sed -E "${_tty_sed[@]}"; }
 # A mark that cannot be written (the scratch dir gone, the disk full) would
 # let a fail-closed event inside a `$(...)` whose status the caller drops
-# (arm 5's `|| true`) exit 0, so that failure is fatal too: a fixed message,
-# USR1 to the main shell (the trap above), and exit 2 here. Before the
-# scratch dir exists no `$(...)` has run a check, and every caller exits 2
-# on its own.
+# (arm 8's _gnu_scan returns 0 after its _code_hits pipeline) exit 0, so
+# that failure is fatal too: a fixed message, USR1 to the main shell (the
+# trap above), and exit 2 here. Before the scratch dir exists no `$(...)`
+# has run a check, and every caller exits 2 on its own.
 _fatal_mark() {
   [ -n "$cp_tmp" ] || return 0
   if ! : 2>/dev/null >"$cp_tmp/fatal"; then
@@ -235,13 +245,43 @@ _err() { printf '%s\n' "$@" | _tty_safe >&2 || _tty_fail; }        # each arg a 
 _out() { printf '%s\n' "$@" | _tty_safe || _tty_fail; }            # each arg a stdout line
 _err_file() { _tty_safe <"$1" >&2 || _tty_fail; }                  # a file's bytes to stderr
 
+# An UNCHECKED failure - a command failing where `set -e` would stop the
+# script - exits 2, a scan error, never the command's own status: a failing
+# sed or sort exits 1, which reads as "a violation" and comes with no report.
+# `set -E` carries the trap into functions, where most of the work runs. It
+# acts in the main shell only (BASH_SUBSHELL 0): bash 3.2 fires ERR in a
+# `$(...)` even when the caller checks the status (`x=$(cmd) || rc=$?`), so
+# exiting there would fail a checked call closed (measured on bash 3.2.57:
+# without this guard a clean tree exits 2). A subshell's failure surfaces
+# as its status in the main shell instead, where the caller checks it or
+# this trap fires. Everything above this line is shell builtins and
+# function definitions, so nothing there can fail before the trap exists.
+# The _err inside cannot re-enter it: bash does not run the ERR trap while
+# the trap itself runs.
+# RESIDUAL: a `$(...)` does not inherit `set -e` (no inherit_errexit here;
+# a `( )` subshell does), so a failure there that is not its last command
+# is not seen at all: `v=$(false; echo after)` sets v and succeeds. The
+# `$(...)` bodies in this file end in the command whose status matters, or
+# check the ones before it by hand, with one deliberate exception:
+# _gnu_scan ends in `return 0` after its _code_hits pipeline, whose errors
+# the fatal mark carries instead.
+_unchecked() {  # $1 = the failed command's status, $2 = its line
+  [ "${BASH_SUBSHELL:-0}" -eq 0 ] || return 0
+  _err "check-patterns: a command failed where the gate does not check its status (exit $1, line $2) - failing closed"
+  exit 2
+}
+set -E
+trap '_unchecked "$?" "$LINENO"' ERR
+
 # The scratch dir every pass shares (find's stderr, the NUL pass's list, the
 # fatal mark). No mktemp means no fail-closed evidence can be kept: exit 2.
 cp_tmp=$(mktemp -d "${TMPDIR:-/tmp}/check-patterns.XXXXXX" 2>/dev/null) || {
   _err "check-patterns: could not create a scratch dir - failing closed"
   exit 2
 }
-trap 'rm -rf "$cp_tmp"' EXIT
+# `|| :`: a scratch dir that cannot be removed is not a scan result, and
+# without it the ERR trap would turn the 0 or 1 already decided into 2.
+trap 'rm -rf "$cp_tmp" || :' EXIT
 
 root="${1:-.}"
 # A relative ROOT starting with `-` reaches every tool as "$root/..." in
@@ -394,15 +434,50 @@ _code_of() {  # $1 = one "PATH:NN:CONTENT" hit -> its CODE on stdout
 # for the entire tree, which is the fail-OPEN shape this tool exists to refuse.
 # FAILS CLOSED on a broken ERE: a grep exit >= 2 is not "no match". An unusable
 # pattern reports every hit instead of silently disabling the arm, and an unusable
-# EXEMPT pattern exempts nothing, because the caller's `|| true` would otherwise
-# swallow any status this function returned.
+# EXEMPT pattern exempts nothing. It runs inside the caller's `$(...)`, and
+# returns 0 either way: the fatal mark carries the error out (arm 8's
+# _gnu_scan drops the pipeline's status; for arms 5-7, 9 and 10 a subshell
+# that exits 2 on its own also fails the `viol=$(...)`, which the ERR trap
+# turns into 2).
+# Each re-test is `printf | grep -c`, never a here-string: bash 3.2 backs
+# `<<<` with a temp file (in TMPDIR, else /tmp), and one that cannot be
+# created (a full or unwritable /tmp) makes the command return 1 without
+# running it, which would read as "no match" and drop the hit (reasoned from
+# bash's redirection rules; a failing /tmp was not staged). A
+# re-test stands only as a count grep printed: 0 with rc 1 is "no match", a
+# positive count with rc 0 a match, anything else an error. `-c` reads its
+# whole input, so the pipe has no early-exit reader (arm 9).
+# FAILS CLOSED the same way when _code_of itself fails: its empty answer would
+# otherwise read as "a comment-only line" and drop the hit (measured: a sed
+# failing only there passed `P=/opt/homebrew` with exit 0 and no output).
+# _retest ERE TEXT -> the global rc: 0 TEXT matches, 1 it does not, 2 or
+# more an error (grep's own, or a count that is not grep's answer: empty,
+# not all digits, or not agreeing with the status). A non-numeric count
+# such as `1x` read as a match would EXEMPT the hit on the exemption
+# re-test, so it is checked first.
+_retest() {
+  local n
+  rc=0
+  n=$(printf '%s\n' "$2" | grep -cE -- "$1") || rc=$?
+  case "$rc:$n" in
+    *: | *:*[!0-9]*) rc=2 ;;
+    0:[1-9]*) rc=0 ;;
+    1:0) rc=1 ;;
+    0:* | 1:*) rc=2 ;;
+  esac
+}
 _code_hits() {
   local match="$1" exempt="${2:-}" hit code rc
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    code="$(_code_of "$hit")"
+    rc=0; code="$(_code_of "$hit")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      _err "check-patterns: the code/comment split (sed) errored (exit $rc) on a hit - failing closed"
+      _fatal_mark
+      printf '%s\n' "$hit"; continue
+    fi
     [ -n "$code" ] || continue
-    rc=0; grep -qE -- "$match" <<<"$code" || rc=$?
+    _retest "$match" "$code"
     if [ "$rc" -ge 2 ]; then
       _err "check-patterns: code re-test errored (exit $rc) on '$match' - failing closed"
       _fatal_mark
@@ -410,7 +485,7 @@ _code_hits() {
     fi
     [ "$rc" -eq 0 ] || continue
     if [ -n "$exempt" ]; then
-      rc=0; grep -qE -- "$exempt" <<<"$code" || rc=$?
+      _retest "$exempt" "$code"
       if [ "$rc" -ge 2 ]; then
         _err "check-patterns: exemption re-test errored (exit $rc) on '$exempt' - exempting nothing"
         _fatal_mark
@@ -420,6 +495,36 @@ _code_hits() {
     fi
     printf '%s\n' "$hit"
   done
+  return 0
+}
+
+# _drop_hits HITS ERE LABEL - HITS (lines) minus the lines matching ERE, on
+# stdout: the path exemptions of arms 2, 5 and 11. grep -v exits 1 when it
+# drops every line, a legitimate answer, so 0 and 1 both stand; 2 or more is
+# an error, and a filter that cannot run exempts NOTHING: HITS print whole,
+# the error is reported, and the fatal mark carries the exit 2 out of the
+# caller's `$(...)` (the earlier `grep -v ... || true` read an error as
+# "every hit exempted" and passed the violation with exit 0). grep's stderr
+# goes to a scratch file printed through the sanitizer, since ERE holds the
+# caller-supplied root. That redirect is on a group that records whether
+# grep RAN: when the file cannot be opened (the scratch dir gone, the disk
+# or quota full, no free descriptor) bash skips the command and returns 1,
+# grep's own "every line dropped" (measured: a directory in its place
+# passed violations in arms 2, 5 and 11 with exit 0). The hits go in
+# through a pipe, not a here-string, for the reason _code_hits gives.
+_drop_hits() {
+  local rc=0 ran=0
+  [ -n "$1" ] || return 0
+  { ran=1; printf '%s\n' "$1" | grep -vE -- "$2" || rc=$?; } 2>"$cp_tmp/drop.err" || :
+  [ "$ran" -eq 1 ] || rc=2
+  if [ "$rc" -ge 2 ]; then
+    if [ -f "$cp_tmp/drop.err" ]; then
+      _err_file "$cp_tmp/drop.err"
+    fi
+    _err "check-patterns: the $3 exemption filter (grep -v) errored (exit $rc) - failing closed"
+    _fatal_mark
+    printf '%s\n' "$1"
+  fi
   return 0
 }
 
@@ -492,7 +597,7 @@ rc=0
 out=$(grep -rHna --exclude=check-patterns -e 'uname[ ]-m' -- "${scan[@]}" 2>&1) || rc=$?
 _self_scan "$rc" "$out" -Hna -e 'uname[ ]-m'
 if [ "$rc" -eq 0 ]; then
-  viol=$(printf '%s\n' "$out" | grep -vE '(^|/)lib/os\.sh:' || true)
+  viol=$(_drop_hits "$out" '(^|/)lib/os\.sh:' "lib/os.sh")
   if [ -n "$viol" ]; then
     _err "$viol" \
       "check-patterns: ad-hoc '$lit_uname' outside lib/os.sh - use is-arm64/is-amd64"
@@ -607,8 +712,8 @@ _gpg_agent_path=$(_re_escape "$root/config/gnupg/gpg-agent.conf")
 if out=$(grep -rna --exclude=check-patterns \
     -F '/opt/homebrew' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
-    | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)' \
-    | grep -vE "^${_gpg_agent_path}:[0-9]+:" || true)
+    | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)')
+  viol=$(_drop_hits "$viol" "^${_gpg_agent_path}:[0-9]+:" "gpg-agent.conf")
   if [ -n "$viol" ]; then
     _err "$viol" \
       "check-patterns: hardcoded Homebrew prefix - '/opt/homebrew' with no '/usr/local' as the ADJACENT word; resolve the prefix by directory existence, and keep the arm64/Intel pair on one line"
@@ -845,7 +950,7 @@ if [ "${#eex[@]}" -gt 0 ]; then
     viol=$(printf '%s\n' "$out" | _code_hits "$eex_re")
     if [ -n "$viol" ]; then
       _err "$viol" \
-        "check-patterns: an early-exit reader (grep -q/-m/-l, head) on the right of a pipe - under pipefail the writer can die of SIGPIPE and fail the pipeline at random; feed it a here-string (grep -q PAT <<<\"\$var\") or use a reader that drains (sed -n 1p)"
+        "check-patterns: an early-exit reader (grep -q/-m/-l, head) on the right of a pipe - under pipefail the writer can die of SIGPIPE and fail the pipeline at random; use a reader that drains its input (grep -c PAT, sed -n 1p)"
       bad=1
     fi
   else
@@ -984,8 +1089,7 @@ prose=("${scan[@]}" ${roots[@]+"${roots[@]}"})
 _lazy_lock_path=$(_re_escape "$root/config/nvim/lazy-lock.json")
 if out=$(LC_ALL=C grep -rHna --exclude=check-patterns \
     -F "$em_dash" "${prose[@]}" 2>&1); then
-  viol=$(printf '%s\n' "$out" \
-    | grep -vE "^${_lazy_lock_path}:[0-9]+:" || true)
+  viol=$(_drop_hits "$out" "^${_lazy_lock_path}:[0-9]+:" "lazy-lock.json")
   if [ -n "$viol" ]; then
     _err "$viol" \
       "check-patterns: an em dash (U+2014) in repo prose - house style is a plain '-'; replace it"
@@ -1434,4 +1538,6 @@ fi
 # subshell, which cannot set `fatal` here.
 [ ! -e "$cp_tmp/fatal" ] || fatal=1
 [ "$fatal" -eq 0 ] || exit 2
-[ "$bad" -eq 0 ]
+# An explicit exit, not a bare failing test, which the ERR trap would turn
+# into 2.
+[ "$bad" -eq 0 ] || exit 1
