@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Twelve checks across our OWN runtime surface
+#   `make lint` includes. Fourteen checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded by their
 #   one exact path, zsh/plugins - we police our code, not upstream's):
 #     (1) a curl or wget download piped into sh or bash (or otherwise executed
@@ -73,6 +73,18 @@
 #         same passes FAIL CLOSED (exit 2) on a file name the arms cannot
 #         read (a `:`, LF or CR in it) or skip (`check-patterns` anywhere but
 #         bin/).
+#    (13) a raw readlink in install.sh or lib/ outside lib/link.sh's
+#         _link_readlink - `$(readlink)` strips a target's trailing newline
+#         and BSD readlink's terminator is not GNU's. The one exempt line is
+#         the helper's own call, found inside its body at scan time, never
+#         a line number kept here; an ambiguous helper fails closed. Text
+#         matching, so the word in a string or as a name (`echo "readlink"`,
+#         `readlink=x`) is flagged too.
+#    (14) a local/typeset (declare, integer, float, readonly, private)
+#         without -g, or a for/foreach/select loop variable, of zsh's path,
+#         cdpath, fpath, manpath, module_path or their scalars in zsh/ -
+#         a local copy keeps its tie and rewrites the command search path
+#         for the whole call; a loop variable overwrites the global.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -403,7 +415,7 @@ bar='|'
 lit_fetch="curl${bar}sh"
 lit_uname="uname"' -m'
 
-# --- code/comment split, used by arms (5)-(10) --------------------------------
+# --- code/comment split, used by arms (5)-(10), (13) and (14) ---------------
 # The comments that STATE these constraints necessarily spell the forbidden
 # literals - install.sh's own "no associative arrays, no mapfile, no ${var,,}"
 # header, and every `# never hardcode /opt/homebrew` a reader deserves beside the
@@ -436,7 +448,7 @@ _code_of() {  # $1 = one "PATH:NN:CONTENT" hit -> its CODE on stdout
 # pattern reports every hit instead of silently disabling the arm, and an unusable
 # EXEMPT pattern exempts nothing. It runs inside the caller's `$(...)`, and
 # returns 0 either way: the fatal mark carries the error out (arm 8's
-# _gnu_scan drops the pipeline's status; for arms 5-7, 9 and 10 a subshell
+# _gnu_scan drops the pipeline's status; for arms 5-7, 9, 10, 13 and 14 a subshell
 # that exits 2 on its own also fails the `viol=$(...)`, which the ERR trap
 # turns into 2).
 # Each re-test is `printf | grep -c`, never a here-string: bash 3.2 backs
@@ -499,7 +511,7 @@ _code_hits() {
 }
 
 # _drop_hits HITS ERE LABEL - HITS (lines) minus the lines matching ERE, on
-# stdout: the path exemptions of arms 2, 5 and 11. grep -v exits 1 when it
+# stdout: the path exemptions of arms 2, 5, 11 and 13. grep -v exits 1 when it
 # drops every line, a legitimate answer, so 0 and 1 both stand; 2 or more is
 # an error, and a filter that cannot run exempts NOTHING: HITS print whole,
 # the error is reported, and the fatal mark carries the exit 2 out of the
@@ -1531,6 +1543,197 @@ if [ "$has_git" -eq 1 ]; then
     _git_symlink_pass || git_rc=$?
     [ "$git_rc" -eq 0 ] || bad=1
     [ "$git_rc" -ne 2 ] || fatal=1
+  fi
+fi
+
+# (13) forbid a raw readlink of a link target in install.sh and lib/ outside
+# the one helper that reads it exactly, lib/link.sh's _link_readlink.
+# `$(readlink X)` strips every trailing newline of the target, so a target
+# "T<newline>" reads as "T"; and the terminator itself is not portable (GNU
+# readlink always appends one, BSD readlink only when the target does not
+# already end in one), so no stripping after the fact can undo it. The
+# helper's comment has the detail. The link engine decides "is this OUR link"
+# on that answer, so a raw call there lets a crafted target pass for a repo
+# path.
+# SURFACE: install.sh (it sources lib/link.sh) and lib/, where the link
+# engine and the uninstaller read link targets. bin/ is not scanned: its
+# tools do not decide link ownership.
+# SHAPE: the word readlink (or greadlink, coreutils' name on a Homebrew mac)
+# in CODE, comments stripped (_code_hits): a bare call, a `$(readlink`, a
+# path `/usr/bin/readlink`, `command readlink`. `_link_readlink` itself does
+# not match: `_` is a word character, so the word boundary fails there.
+# EXEMPTION, ONE line, found by awk at scan time, never a line number kept
+# here: the line inside the body of the one `_link_readlink() {` definition
+# in exactly $root/lib/link.sh whose text is exactly the helper's
+# `t="$(readlink -n "$1" && printf x)" || return 1` (any indentation). The
+# body is the lines after that definition up to the next line that is
+# exactly `}` at column 0 (lib/'s function style). So the helper can move
+# and stay exempt, while any other readlink - in another function of
+# link.sh, in a same-named function elsewhere, in another shape inside the
+# helper - is not. The awk answer is one line number, dropped by
+# _drop_hits on the EXACT `_re_escape`d path (see arm 5), so a decoy
+# lib/sub/link.sh does not share it.
+#   - no definition (or no lib/link.sh): nothing to exempt; every hit is a
+#     violation (exit 1). Not ambiguous: there is no helper to trust.
+#   - more than one definition-shaped line (`_link_readlink()` or `function
+#     _link_readlink`, comment lines aside), heredoc or string text included,
+#     or the one not written exactly `_link_readlink() {`: which body is the
+#     helper is ambiguous, so the gate FAILS CLOSED (exit 2) and exempts
+#     nothing.
+#   - a body that meets any other column-0 line before its `}` (`} # end`,
+#     `} 2>/dev/null`, a new function), or never closes: void, exempts
+#     nothing, so its hits are violations (exit 1). An indented `}` never
+#     closes the body, and voids nothing on its own.
+# FAILS CLOSED: an awk that fails, or answers anything but one line number
+# (or nothing), exempts nothing and exits 2, like a failing grep.
+# NOT covered: a readlink behind a variable (`$RL`), an alias, `stat -f %Y`,
+# `realpath`, or `find -printf %l`. KNOWN FALSE POSITIVES, from matching text,
+# not parsing shell: the word inside a string or as a name (`echo
+# "readlink"`, `readlink=x`); rephrase it.
+_scan_roots install.sh lib
+rl_scan=(${roots[@]+"${roots[@]}"})
+if [ "${#rl_scan[@]}" -gt 0 ]; then
+  rl_re='(^|[^[:alnum:]_-])g?readlink([^[:alnum:]_-]|$)'
+  rl_msg="check-patterns: a raw readlink in install.sh or lib/ outside lib/link.sh's _link_readlink - \$(readlink) strips a target's trailing newline and BSD readlink's terminator is not GNU's; call _link_readlink (or _link_target_is)"
+  if out=$(grep -rHnaE --exclude=check-patterns -e "$rl_re" -- "${rl_scan[@]}" 2>&1); then
+    viol=$(printf '%s\n' "$out" | _code_hits "$rl_re")
+    rl_file="$root/lib/link.sh"
+    if [ -n "$viol" ] && [ -f "$rl_file" ]; then
+      # Bracket classes, never a backslash escape (`\(`, `\|`), whose meaning
+      # in an awk ERE differs between BSD awk, mawk and gawk; `[ \t]`, not
+      # `[[:space:]]`, for the same reason. The answer is ONE line: a line
+      # number, nothing, or `refuse <reason>` for the fail-closed cases.
+      rc=0
+      rl_lines=$(awk '
+        {
+          code = $0
+          sub(/^[ \t]*#.*/, "", code)
+          isdef = (code ~ /(^|[^A-Za-z0-9_])(function[ \t]+_link_readlink([^A-Za-z0-9_]|$)|_link_readlink[ \t]*[(][ \t]*[)])/)
+          if (isdef) {
+            ndef++
+            if ($0 !~ /^_link_readlink[(][)][ \t]*[{][ \t]*$/) badform = NR
+            if (ndef == 1 && !badform) { inb = 1; next }
+          }
+          if (inb) {
+            if ($0 ~ /^[}][ \t]*$/) { inb = 0; closed = 1; next }
+            if ($0 ~ /^[^ \t]/) { inb = 0; voided = 1; next }
+            if (!cand && $0 ~ /^[ \t]*t="[$][(]readlink -n "[$]1" && printf x[)]" [|][|] return 1[ \t]*$/) cand = NR
+          }
+        }
+        END {
+          if (ndef > 1) { print "refuse " ndef " definition-shaped _link_readlink lines"; exit }
+          if (badform) { print "refuse line " badform " is not the exact `_link_readlink() {` form"; exit }
+          if (closed && !voided && cand) print cand
+        }
+      ' "$rl_file" 2>"$cp_tmp/rl-awk.err") || rc=$?
+      # rc 0 with an empty answer: nothing exempt. One line number: exempt
+      # it. `refuse ...`: fail closed. Anything else is not awk's answer.
+      rl_why=""
+      case "$rc:$rl_lines" in
+        0:) ;;
+        0:refuse\ *) rl_why="${rl_lines#refuse }"; rc=2 ;;
+        0:0* | 0:*[!0-9]*) rl_why="an unexpected answer from awk"; rc=2 ;;
+        0:*) viol=$(_drop_hits "$viol" "^$(_re_escape "$rl_file"):$rl_lines:" "_link_readlink line") ;;
+        *) rl_why="awk exited $rc" ;;
+      esac
+      if [ "$rc" -ne 0 ]; then
+        if [ -f "$cp_tmp/rl-awk.err" ]; then
+          _err_file "$cp_tmp/rl-awk.err"
+        fi
+        _err "check-patterns: the _link_readlink exemption lookup (awk) cannot trust lib/link.sh ($rl_why) - exempting nothing, failing closed"
+        bad=1; fatal=1
+      fi
+    fi
+    if [ -n "$viol" ]; then
+      _err "$viol" \
+        "$rl_msg"
+      bad=1
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      _err "$out" \
+        "check-patterns: raw-readlink scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
+    fi
+  fi
+fi
+
+# (14) forbid a LOCALIZING declaration, or a loop variable, of zsh's
+# command-search specials: the tied arrays path, cdpath, fpath, manpath,
+# module_path and their scalars PATH, CDPATH, FPATH, MANPATH, MODULE_PATH.
+# Inside a function `local path` (or `typeset`, `declare`, `integer`,
+# `float`, `readonly`, `private`, all local there unless given -g, `-x`
+# included) creates a function-local copy that KEEPS its special tie:
+# assigning it rewrites $PATH for the rest of the call, so every command the
+# function runs is looked up in the wrong place (zsh/functions.zsh's up()
+# names its variable `target` for exactly this reason); a localized
+# module_path steers zmodload the same way. A `for`, `foreach` or `select`
+# loop variable of one of these names is not local at all: it overwrites the
+# global.
+# SURFACE: zsh/ (_scan_roots, so the pinned zsh/plugins leave by their exact
+# path), the only zsh sources the framework ships.
+# "INSIDE A FUNCTION": a line-based grep cannot tell a function body from the
+# top level (a `{` may open a function, a brace group or an anonymous
+# function). So this flags EVERY such declaration anywhere in the surface
+# unless it carries -g, including a top-level one where zsh would make it
+# global anyway: the fix there costs a `-g`, and the rule stays one a reader
+# can apply without parsing. `local` is flagged with any options, `-g`
+# included: zsh's local takes no -g. A plain assignment (`path=(...)`,
+# zsh/zshrc) declares nothing and does not match; `export` is always global
+# and is not a keyword here.
+# SHAPE, on CODE (_code_hits): a keyword after a line start, whitespace, one
+# of `; & | ( ) { } !` or a backtick, then EITHER
+#   - a declaration: option words (`-x`, `+g`, `--`), none holding a `g` for
+#     the -g-able keywords; then any names (not starting with `-` or `+`, so
+#     an option word holding `g` cannot pass as one); then one of the ten
+#     names, ended by `=`, whitespace, `; & | ) }` or end of line. `-g` is
+#     tested per option word, so `typeset -Ug path`, `typeset -xg path` and
+#     `typeset -U -g path` all pass, and a `g` in a later NAME buys nothing;
+#   - a loop: `for`, `foreach` or `select`, then identifiers other than `in`,
+#     then one of the ten names, ended by whitespace, `; & | ( )` or end of
+#     line: `for path in ...`, `for x path (...)`. A name AFTER `in` is a
+#     loop WORD, not the variable (`for d in path fpath`), and passes.
+# NOT covered - a name word holding `(`, `)`, `;`, `&` or `|` ends the scan
+# of that line, and quoting or escaping hides a name; each one is pinned as
+# uncaught in tests/check_patterns_test.sh, so a widening is noticed:
+# `local foo=$(pwd) path`, `local -a arr=() path`, `local x='a;b' path`,
+# `local "path"`, `local p\ath`, `\local path`, `local {path,x}`; also a
+# declaration split across `\` lines, a name built by expansion, mailpath
+# (a localized one steers only mail checks), and the other writers of a
+# global - `for (( path=0; ... ))`, `read path`, `getopts a: path` - which
+# are assignments, excluded by design like `path=(...)`. KNOWN FALSE
+# POSITIVE, from matching text, not parsing shell: the shape inside quoted
+# prose followed by a space (`print "a local path here"`, `print "use for
+# path lookup"`; `print "a local path"` does not fire, the `"` ends the
+# name); rephrase it.
+_scan_roots zsh
+tied_scan=(${roots[@]+"${roots[@]}"})
+if [ "${#tied_scan[@]}" -gt 0 ]; then
+  tied_names='(path|cdpath|fpath|manpath|module_path|PATH|CDPATH|FPATH|MANPATH|MODULE_PATH)'
+  tied_word='[^[:space:];&|)]'
+  # An identifier other than `in`: `i`, one not starting with `i`, or one
+  # starting with `i` that is not exactly `in`.
+  tied_ident='(i|[A-Za-hj-z_][A-Za-z0-9_]*|i[A-Za-mo-z0-9_][A-Za-z0-9_]*|in[A-Za-z0-9_]+)'
+  tied_re='(^|[[:space:];&|(){}!`])((local([[:space:]]+[-+]'"$tied_word"'*)*'
+  tied_re="$tied_re"'|(typeset|declare|integer|float|readonly|private)([[:space:]]+(-[^[:space:];&|)g]*|[+]'"$tied_word"'*))*)'
+  tied_re="$tied_re"'([[:space:]]+[^-+[:space:];&|)]'"$tied_word"'*)*'
+  tied_re="$tied_re"'[[:space:]]+'"$tied_names"'(=|[[:space:];&|)}]|$)'
+  tied_re="$tied_re"'|(for|foreach|select)([[:space:]]+'"$tied_ident"')*[[:space:]]+'"$tied_names"'([[:space:];&|()]|$))'
+  if out=$(grep -rHnaE --exclude=check-patterns -e "$tied_re" -- "${tied_scan[@]}" 2>&1); then
+    viol=$(printf '%s\n' "$out" | _code_hits "$tied_re")
+    if [ -n "$viol" ]; then
+      _err "$viol" \
+        "check-patterns: a local/typeset without -g, or a for/foreach/select loop variable, of zsh's path, cdpath, fpath, manpath or module_path (or PATH, CDPATH, FPATH, MANPATH, MODULE_PATH) - a local copy keeps its tie and rewrites the command search path for the whole call, and a loop variable overwrites the global; rename the variable, or declare it -g"
+      bad=1
+    fi
+  else
+    rc=$?
+    if [ "$rc" -ge 2 ]; then
+      _err "$out" \
+        "check-patterns: tied-path declaration scan errored (exit $rc) - failing closed"
+      bad=1; fatal=1
+    fi
   fi
 fi
 

@@ -131,6 +131,26 @@ without `exit`). `make check-patterns` flags `grep -q/-m/-l` and `head` after a
 the workflows. An awk `exit`, and a line that ENDS in `|` with the reader on the
 next line, are discipline, not a gate.
 
+## Read a link target through _link_readlink
+
+In `install.sh` and `lib/`, read a symlink's target only through
+`lib/link.sh`'s `_link_readlink` (or `_link_target_is`, which wraps it).
+`$(readlink X)` strips every trailing newline of the target, and the
+terminator is not portable: GNU readlink always appends one, BSD readlink only
+when the target does not already end in one. The link engine decides "is this
+our link" on that answer.
+
+`make check-patterns` flags a `readlink` or `greadlink` in the code of
+`install.sh` and `lib/` (a comment is not code; the word in a string or as a
+name is flagged too). It exempts ONE line: the helper's own
+`t="$(readlink -n "$1" && printf x)" || return 1`, inside the body of the one
+`_link_readlink() {` in `lib/link.sh`. The body ends at the next line that is
+exactly `}` at column 0; any other column-0 line first (`} # end`,
+`} 2>/dev/null`, the next function) voids it, and so does a body that never
+closes. A second definition-shaped line (a heredoc included), or a definition
+not written exactly `_link_readlink() {`, fails the gate closed. Keep the helper
+in that form, and change its call line and the gate together.
+
 ## Leave the user's .local files alone
 
 `lib/uninstall.sh` is manifest-driven: it removes only links the manifest
