@@ -51,6 +51,17 @@ rather than a hardcode.
 ## Style
 
 - Keep functions small. Declare variables `local`.
+- Never name a variable `path`, `cdpath`, `fpath`, `manpath` or `module_path`
+  (or `PATH`, `CDPATH`, `FPATH`, `MANPATH`, `MODULE_PATH`). They are zsh's
+  tied specials: a `local path` keeps the tie, so assigning it rewrites the
+  command search path for the whole call, and a `for path in ...` loop
+  overwrites the global. `make check-patterns` flags any `local`, `typeset`,
+  `declare`, `integer`, `float`, `readonly` or `private` of these names under
+  `zsh/` without `-g`, and any `for`, `foreach` or `select` loop over one. It
+  cannot tell a function body from the top level, so a top-level declaration
+  needs the `-g` too, as `zsh/zshrc`'s `typeset -gU path` has. It matches
+  text: quoted prose followed by a space, such as `print "a local path here"`,
+  is flagged too; rephrase it.
 - Send errors to stderr and return a non-zero code.
 - Name user-facing commands in `kebab-case`, such as `dotfiles-upgrade`.
   `go_test` and `go_test_cover` are the legacy exceptions, kept under the names

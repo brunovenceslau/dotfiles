@@ -8,7 +8,9 @@
 # Unit tests for bin/check-patterns (static-pattern gate). Proves the
 # gate CATCHES a real curl|sh / wget|bash fetch, an ad-hoc `uname -m` outside
 # lib/os.sh, a hardcoded Homebrew prefix, a `brew shellenv` fork, bash 4 syntax
-# in the bash-3.2 surface, a `--` after a tool's first operand, a symlink
+# in the bash-3.2 surface, a `--` after a tool's first operand, a raw readlink
+# in lib/ outside _link_readlink's body, a -g-less local/typeset of zsh's
+# path specials, a symlink
 # where a recursive scan reads (on disk, always; tracked or an unpinned
 # submodule, repo-wide, in a real checkout), and its own fixtures'
 # git calls surviving a leaked GIT_DIR, and a report line carrying terminal
@@ -322,6 +324,8 @@ uname_msg="check-patterns: ad-hoc 'uname -m'"
 brew_msg="check-patterns: hardcoded Homebrew prefix"
 fork_msg="check-patterns: a 'brew shellenv' / 'brew --prefix' fork"
 b32_msg="check-patterns: bash 4 syntax in the bash-3.2 surface"
+rl_msg="check-patterns: a raw readlink in install.sh or lib/ outside lib/link.sh's _link_readlink"
+tied_msg="check-patterns: a local/typeset without -g, or a for/foreach/select loop variable, of zsh's path"
 
 # === the Homebrew prefix arm ====================================================
 # The prefix is /opt/homebrew on Apple Silicon and /usr/local on Intel and MUST be
@@ -1539,12 +1543,14 @@ _plug_case() {
     9) printf '%s|%s' "$eex_msg" "cmd $P grep -q x" ;;
     10) printf '%s|%s' "$dd_msg" "chmod -R go-w $D \"\$d\"" ;;
     11) printf '%s|%s' "$em_dash_msg" "# a note $em_dash trailing" ;;
+    13) printf '%s|%s' "$rl_msg" 't=$(readlink "$1")' ;;
+    14) printf '%s|%s' "$tied_msg" 'f() { local path=/x; }' ;;
   esac
 }
 # DIR:ARMS - each first-party `plugins` dir and the arms whose surface holds it.
 for plug in 'config/nvim/lua/plugins/p.lua:1 2 5 6 11' \
-    'lib/plugins/p.sh:1 2 5 6 8 9 10 11' \
-    'zsh/sub/plugins/p.zsh:1 2 5 6 8 10 11' \
+    'lib/plugins/p.sh:1 2 5 6 8 9 10 11 13' \
+    'zsh/sub/plugins/p.zsh:1 2 5 6 8 10 11 14' \
     'tests/plugins/p.sh:8 9 10 11' \
     'docs/plugins/p.md:11'; do
   plug_file="${plug%%:*}"
@@ -1561,7 +1567,7 @@ done
 _plant_all_shapes() {  # $1 = file
   local arm pc
   : > "$1"
-  for arm in 1 2 5 6 8 9 10 11; do
+  for arm in 1 2 5 6 8 9 10 11 13 14; do
     pc="$(_plug_case "$arm")"
     printf '%s\n' "${pc#*|}" >> "$1"
   done
@@ -2234,8 +2240,10 @@ _rgrep_scan "$(printf '%s\n' \
 [ "$rg_n" -eq 3 ] && [ -z "$rg_bad" ] && ok \
   || fail "the recursive-grep self-scan: the gate's own shapes must count 3 recursive greps and flag none, got $rg_n: $rg_bad"
 _rgrep_scan "$cp_code"
-[ "$rg_n" -ge 8 ] && [ -z "$rg_bad" ] && ok \
-  || fail "bin/check-patterns: every recursive grep must pass -a and no grep may pass -I ($rg_n recursive greps found, need >= 8): $rg_bad"
+# EXACT, not a floor: a recursive grep added or dropped changes this count,
+# so the change is reviewed here (arms 1, 2, 5, 6, 8, 9, 10, 11, 13, 14).
+[ "$rg_n" -eq 10 ] && [ -z "$rg_bad" ] && ok \
+  || fail "bin/check-patterns: every recursive grep must pass -a and no grep may pass -I ($rg_n recursive greps found, want exactly 10): $rg_bad"
 # No here-string or here-doc in the gate's code: bash 3.2 backs both with a
 # temp file, and one that cannot be created fails the command with status 1,
 # which the gate would read as grep's "no match" (see _code_hits). Static
@@ -2738,8 +2746,8 @@ split_err_msg="check-patterns: the code/comment split (sed) errored"
 split_arm=0
 while IFS='|' read -r split_file split_msg split_line; do
   split_arm=$((split_arm + 1))
-  r="$work/split-fail-$split_arm"; seed "$r"
-  printf '%s\n' "$split_line" > "$r/lib/$split_file"
+  r="$work/split-fail-$split_arm"; seed "$r"; mkdir -p "$r/$(dirname "$split_file")"
+  printf '%s\n' "$split_line" > "$r/$split_file"
   _gate_rc "$cp" "$r"
   [ "$gate_rc" = "1" ] || fail "split fixture $split_file: the real gate must exit 1, got $gate_rc: $gate_out"
   case "$gate_out" in
@@ -2750,18 +2758,20 @@ while IFS='|' read -r split_file split_msg split_line; do
   [ "$gate_rc" = "2" ] && ok \
     || fail "a failing code/comment split on $split_file must exit 2, got $gate_rc: $gate_out"
   case "$gate_out" in
-    *"$split_err_msg"*"$r/lib/$split_file:1:"* | *"$r/lib/$split_file:1:"*"$split_err_msg"*) ok ;;
+    *"$split_err_msg"*"$r/$split_file:1:"* | *"$r/$split_file:1:"*"$split_err_msg"*) ok ;;
     *) fail "a failing code/comment split on $split_file must report itself AND the hit: $gate_out" ;;
   esac
 done <<SPLIT
-p.sh|check-patterns: hardcoded Homebrew prefix|P=/opt/homebrew
-b.sh|check-patterns: a 'brew shellenv' / 'brew --prefix' fork|eval "\$(brew shellenv)"
-m.sh|check-patterns: bash 4 syntax in the bash-3.2 surface|declare -A m
-g.sh|check-patterns: a GNU-only regex escape|sed -e 's/\\s//' f
-e.sh|check-patterns: an early-exit reader|x $P grep -q y
-d.sh|check-patterns: a '--' after the first operand|chmod -R go-w $D "\$d"
+lib/p.sh|check-patterns: hardcoded Homebrew prefix|P=/opt/homebrew
+lib/b.sh|check-patterns: a 'brew shellenv' / 'brew --prefix' fork|eval "\$(brew shellenv)"
+lib/m.sh|check-patterns: bash 4 syntax in the bash-3.2 surface|declare -A m
+lib/g.sh|check-patterns: a GNU-only regex escape|sed -e 's/\\s//' f
+lib/e.sh|check-patterns: an early-exit reader|x $P grep -q y
+lib/d.sh|check-patterns: a '--' after the first operand|chmod -R go-w $D "\$d"
+lib/r.sh|$rl_msg|t=\$(readlink f)
+zsh/t.zsh|$tied_msg|  local path=/x
 SPLIT
-[ "$split_arm" -eq 6 ] || fail "the code/comment split cases: expected 6 arms, ran $split_arm"
+[ "$split_arm" -eq 8 ] || fail "the code/comment split cases: expected 8 arms, ran $split_arm"
 # _retest trusts a re-test only as a count grep printed that agrees with its
 # status. A grep shim answers every `-cE` call (the match and the exemption
 # re-tests) with a status and a count that do not fit: each is an error,
@@ -2910,6 +2920,383 @@ chmod u+x "$go_shim/grep"
 PATH="$go_shim:$PATH" GREP_OPTIONS=-I \
   fails_with_rc 1 "$work/split-fail-1" "check-patterns: hardcoded Homebrew prefix" "an inherited GREP_OPTIONS must not reach the gate's greps" only
 
+# === arm (13): a raw readlink in install.sh/lib/ outside _link_readlink ======
+# $(readlink) strips a target's trailing newline, and BSD readlink's own
+# terminator differs from GNU's, so install.sh and lib/ read a link target
+# only through lib/link.sh's _link_readlink. The exemption is the helper's
+# exact call line inside that function's body in that exact file, found at
+# scan time: never a line number, a file, or a name defined elsewhere.
+_rl_helper() {  # $1 = file: the helper, and a caller of it
+  printf '%s\n' \
+    '# _link_readlink DEST - a comment that names readlink and $(readlink)' \
+    '_link_readlink() {' \
+    '  local t' \
+    '  t="$(readlink -n "$1" && printf x)" || return 1' \
+    "  printf '%s' \"\${t%x}\"" \
+    '}' \
+    '' \
+    '_link_target_is() {' \
+    '  local t' \
+    '  t="$(_link_readlink "$1" && printf x)" || return 1' \
+    '  [ "${t%x}" = "$2" ]' \
+    '}' > "$1"
+}
+# _fails_at ROOT MESSAGE HIT LABEL - exit exactly 1 with MESSAGE as the only
+# check-patterns line, and HIT (PATH:NN:) among the reported lines: the arm
+# fired on the planted line, not on some other one.
+_fails_at() {
+  fails_with_rc 1 "$1" "$2" "$4" only
+  _gate_rc "$cp" "$1"
+  case "$gate_out" in
+    *"$3"*) ok ;;
+    *) fail "$4: expected the hit '$3', got: $gate_out" ;;
+  esac
+}
+r="$work/rl-helper-ok"; seed "$r"; _rl_helper "$r/lib/link.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "the raw readlink inside _link_readlink's body must pass"
+# today's real lib/ passes as is (the helper's raw call is its only one)
+r="$work/rl-real-lib"; mkdir -p "$r/lib"
+for f in "$repo_root"/lib/*.sh; do cat "$f" > "$r/lib/${f##*/}"; done
+[ "$(run "$r")" = "0" ] && ok || fail "today's lib/*.sh must pass the raw-readlink arm"
+# an inner brace group's indented `}` does not end the body: only a `}` at
+# column 0 closes it
+r="$work/rl-inner-brace"; seed "$r"
+printf '%s\n' '_link_readlink() {' '  {' '    local t' '  }' \
+  '  t="$(readlink -n "$1" && printf x)" || return 1' "  printf '%s' \"\${t%x}\"" '}' > "$r/lib/link.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a raw readlink after an inner brace group of _link_readlink must pass"
+# the helper's raw call is live: renamed away, the same file fails
+r="$work/rl-helper-renamed"; seed "$r"; _rl_helper "$r/lib/link.sh"
+sed 's/^_link_readlink() {$/_link_readlink_old() {/' "$r/lib/link.sh" > "$r/lib/link.tmp"
+cat "$r/lib/link.tmp" > "$r/lib/link.sh"; rm -f "$r/lib/link.tmp"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:4:" "a helper renamed away from _link_readlink exempts nothing"
+
+# every raw shape is caught in any lib/ file, at any depth
+i=0
+while IFS= read -r line; do
+  i=$((i + 1)); r="$work/rl-shape-$i"; seed "$r"; _rl_helper "$r/lib/link.sh"
+  mkdir -p "$r/lib/sub"
+  printf '%s\n' "$line" > "$r/lib/sub/x.sh"
+  fails_with_rc 1 "$r" "$rl_msg" "a raw readlink in lib/sub/x.sh must fail: $line" only
+done <<'SHAPES'
+t=$(readlink "$1")
+readlink -n "$1"
+t=`readlink "$1"`
+t="$(command readlink -n "$1" && printf x)"
+t=$(/usr/bin/readlink "$1")
+t=$(greadlink -f "$1")
+[ "$(readlink "$d")" = "$want" ] && return 0
+x=1; readlink "$d"  # not through _link_readlink
+SHAPES
+
+# NOT raw: a comment that names it, a call of the helper, a longer word
+r="$work/rl-negatives"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf '%s\n' '# $(readlink) alone would strip a trailing newline' \
+  't="$(_link_readlink "$d" && printf x)"; t="${t%x}"  # not $(readlink)' \
+  'readlink_out=1; my-readlink-note=2' 'x=1;# readlink here is prose' > "$r/lib/u.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a comment naming readlink, a _link_readlink call and a longer word must pass"
+# KNOWN FALSE POSITIVES, pinned so a change is noticed: text matching, so
+# the word in a string or as a name is flagged too (the header says so)
+for rl_fp in 'echo "readlink"' 'readlink=x'; do
+  r="$work/rl-fp-$(printf '%s' "$rl_fp" | tr -c 'a-z' '-')"; seed "$r"
+  printf '%s\n' "$rl_fp" > "$r/lib/x.sh"
+  _fails_at "$r" "$rl_msg" "$r/lib/x.sh:1:" "the known false positive '$rl_fp' is flagged"
+done
+# a standalone `command greadlink` is a raw call too
+r="$work/rl-command-greadlink"; seed "$r"
+printf 'command greadlink -f "$1"\n' > "$r/lib/x.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/x.sh:1:" "a standalone command greadlink must fail"
+# the surface is install.sh and lib/: install.sh sources lib/link.sh, so it
+# is held to the same rule; bin/ and zsh/ are not scanned
+r="$work/rl-install"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf '#!/bin/sh\nt=$(readlink "$1")\n' > "$r/install.sh"
+_fails_at "$r" "$rl_msg" "$r/install.sh:2:" "a raw readlink in install.sh must fail"
+r="$work/rl-surface"; seed "$r"; mkdir -p "$r/bin" "$r/zsh"
+printf '#!/bin/sh\nt=$(readlink "$1")\n' > "$r/bin/tool"
+printf 't=$(readlink "$1")\n' > "$r/zsh/x.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "a raw readlink in bin/ or zsh/ is off the arm's surface"
+
+# The exemption is ONE line: the helper's exact call inside the body of the
+# one `_link_readlink() {` in exactly lib/link.sh. Each fixture below widens
+# it one way and must fail at the planted line (exit 1), or, where which body
+# is the helper is ambiguous, fail closed (exit 2).
+rl_x='  t="$(readlink -n "$1" && printf x)" || return 1'
+rl_refuse="check-patterns: the _link_readlink exemption lookup (awk) cannot trust lib/link.sh"
+# _refuses ROOT WHY LABEL - exit exactly 2 with the refusal naming WHY, and
+# the helper's own call reported: exempting nothing.
+_refuses() {
+  fails_with_rc 2 "$1" "$rl_refuse ($2" "$3"
+  _gate_rc "$cp" "$1"
+  case "$gate_out" in
+    *"$1/lib/link.sh:"*"$rl_msg"*) ok ;;
+    *) fail "$3: a refused lookup must exempt nothing: $gate_out" ;;
+  esac
+}
+# a comment line naming the definition shape is not a definition
+r="$work/rl-comment-def"; seed "$r"
+printf '%s\n' '# _link_readlink() { is the one helper' '_link_readlink() {' "$rl_x" '}' > "$r/lib/link.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a comment naming '_link_readlink() {' must not count as a definition"
+# (a) another function of lib/link.sh, after the helper
+r="$work/rl-other-fn"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf '%s\n' '_link_other() {' '  t=$(readlink "$1")' '}' >> "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:14:" "a raw readlink in another function of lib/link.sh must fail"
+# (b) the line right after the helper's closing brace
+r="$work/rl-after-close"; seed "$r"
+printf '%s\n' '_link_readlink() {' "$rl_x" '}' 't=$(readlink "$1")' > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:4:" "a raw readlink right after the helper's closing brace must fail"
+# (c) before the helper
+r="$work/rl-before"; seed "$r"
+printf '%s\n' 't=$(readlink "$1")' '_link_readlink() {' "$rl_x" '}' > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:1:" "a raw readlink before the helper must fail"
+# (d) the same function name defined in another lib/ file
+r="$work/rl-other-file"; seed "$r"; _rl_helper "$r/lib/link.sh"
+_rl_helper "$r/lib/other.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/other.sh:4:" "_link_readlink defined outside lib/link.sh is not exempt"
+# (e) a decoy lib/sub/link.sh: the exemption is the EXACT scanned path
+r="$work/rl-decoy"; seed "$r"; _rl_helper "$r/lib/link.sh"
+mkdir -p "$r/lib/sub"; _rl_helper "$r/lib/sub/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/sub/link.sh:4:" "a decoy lib/sub/link.sh must not share the exemption"
+# (f) the same LINE NUMBER as the helper's call, in another file
+r="$work/rl-same-lineno"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf '%s\n' ':' ':' ':' 't=$(readlink "$1")' > "$r/lib/x.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/x.sh:4:" "a raw readlink at the helper's line number in another file must fail"
+# (g) a body with no closing brace exempts nothing
+r="$work/rl-open-body"; seed "$r"
+printf '%s\n' '_link_readlink() {' "$rl_x" > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:2:" "a helper body with no closing brace must exempt nothing"
+# (h) the body closes ONLY on an exact `}` at column 0: any other column-0
+# line voids it, so the next function's readlink is not swallowed
+for rl_close in '} # end' '} 2>/dev/null'; do
+  r="$work/rl-close-$(printf '%s' "$rl_close" | tr -c 'a-z0-9' '-')"; seed "$r"
+  printf '%s\n' '_link_readlink() {' "$rl_x" "$rl_close" '_link_other() {' '  readlink "$1"' '}' > "$r/lib/link.sh"
+  _fails_at "$r" "$rl_msg" "$r/lib/link.sh:5:" "a helper closed by '$rl_close' must not extend into the next function"
+  _fails_at "$r" "$rl_msg" "$r/lib/link.sh:2:" "a helper closed by '$rl_close' is void: its own call is not exempt"
+done
+r="$work/rl-close-indented"; seed "$r"
+printf '%s\n' '_link_readlink() {' "$rl_x" '  }' '_link_other() {' '  readlink "$1"' '}' > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:5:" "an indented close must not extend the helper into the next function"
+# (i) only the helper's EXACT call is exempt, never another shape in its body
+r="$work/rl-body-shape"; seed "$r"
+printf '%s\n' '_link_readlink() {' "$rl_x" '  readlink -f "$1"' '}' > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:3:" "another readlink shape inside the helper's body must fail"
+r="$work/rl-body-shape-first"; seed "$r"
+printf '%s\n' '_link_readlink() {' '  readlink -f "$1"' "$rl_x" '}' > "$r/lib/link.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/link.sh:2:" "another readlink shape BEFORE the helper's call must fail"
+# (j) an EMPTY helper body exempts nothing; a raw call elsewhere fails
+r="$work/rl-empty-body"; seed "$r"
+printf '%s\n' '_link_readlink() {' '}' > "$r/lib/link.sh"
+printf 'readlink "$1"\n' > "$r/lib/x.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/x.sh:1:" "with an empty helper body a raw call elsewhere must fail"
+# (k) no lib/link.sh at all: nothing to exempt, not ambiguous (exit 1)
+r="$work/rl-no-linksh"; seed "$r"
+printf 'readlink "$1"\n' > "$r/lib/x.sh"
+_fails_at "$r" "$rl_msg" "$r/lib/x.sh:1:" "with no lib/link.sh a raw call must fail"
+# AMBIGUOUS, fail closed (exit 2): more than one definition-shaped line
+# (a duplicate, one inside a heredoc), or the one not in the exact form (a
+# trailing comment, one line, indented)
+r="$work/rl-dup"; seed "$r"; _rl_helper "$r/lib/link.sh"; _rl_helper "$r/lib/link.tmp"
+cat "$r/lib/link.tmp" >> "$r/lib/link.sh"; rm -f "$r/lib/link.tmp"
+_refuses "$r" "2 definition-shaped" "a duplicate _link_readlink definition must fail closed"
+r="$work/rl-heredoc"; seed "$r"
+printf '%s\n' 'cat <<EOF' '_link_readlink() {' 'EOF' '_link_readlink() {' "$rl_x" '}' > "$r/lib/link.sh"
+_refuses "$r" "2 definition-shaped" "a definition line inside a heredoc must fail closed"
+r="$work/rl-def-comment"; seed "$r"
+printf '%s\n' '_link_readlink() { # the helper' "$rl_x" '}' > "$r/lib/link.sh"
+_refuses "$r" "line 1 is not the exact" "a definition line with a trailing comment must fail closed"
+r="$work/rl-oneline"; seed "$r"
+printf '%s\n' '_link_readlink() { readlink -n "$1"; }' > "$r/lib/link.sh"
+_refuses "$r" "line 1 is not the exact" "a one-line _link_readlink must fail closed"
+r="$work/rl-indented"; seed "$r"
+printf '%s\n' 'outer() {' '  _link_readlink() {' "  $rl_x" '  }' '}' > "$r/lib/link.sh"
+_refuses "$r" "line 2 is not the exact" "an indented _link_readlink must fail closed"
+# (l) a FILE NAMED lib/link.sh:4:x prints its hits as `.../lib/link.sh:4:x:1:`,
+# which the exact-path, line-4 exemption ERE also matches, dropping the hit.
+# It is safe only because the file-name pass refuses any name holding `:`
+# (exit 2): pinned here, so neither half is loosened alone.
+r="$work/rl-colon-name"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf 'readlink "$1"\n' > "$r/lib/link.sh:4:x"
+fails_with_rc 2 "$r" "$names_msg" "a lib/link.sh:4:x file name must fail closed through the name pass"
+
+# FAIL CLOSED: the scan's grep, the body lookup's awk and the exemption
+# filter each failing exits 2, and a lookup that cannot run exempts nothing.
+rl_scan_err="check-patterns: raw-readlink scan errored"
+rl_awk_err="check-patterns: the _link_readlink exemption lookup (awk) cannot trust lib/link.sh"
+# _patfail_shim DIR - a grep that fails (exit 2) on the RECURSIVE call whose
+# arguments hold $PAT_FAIL_ON, and runs the real grep otherwise: the re-tests
+# (-cE) and every other arm's calls are untouched.
+_patfail_shim() {
+  mkdir -p "$1"
+  {
+    printf '#!/bin/sh\n'
+    printf 'if [ "$1" = -rHnaE ]; then for a in "$@"; do case "$a" in *"$PAT_FAIL_ON"*) echo "grep: simulated failure" >&2; exit 2 ;; esac; done; fi\n'
+    printf 'exec "%s" "$@"\n' "$(command -v grep)"
+  } > "$1/grep"
+  chmod u+x "$1/grep"
+  [ "$(PATH="$1:$PATH" bash -c 'command -v grep')" = "$1/grep" ] \
+    || fail "the pattern-failing grep shim is not the grep a fresh process resolves"
+}
+patfail="$work/patfail-grep"; _patfail_shim "$patfail"
+r="$work/rl-grep-fail"; seed "$r"; _rl_helper "$r/lib/link.sh"
+[ "$(run "$r")" = "0" ] || fail "the raw-readlink grep-fault fixture must pass the real gate"
+PATH="$patfail:$PATH" PAT_FAIL_ON=readlink \
+  fails_with_rc 2 "$r" "$rl_scan_err" "a failing raw-readlink scan must exit 2" only
+# awk: a stand-in that answers $AWK_OUT with status $AWK_RC
+awk_shim="$work/awk-shim"; mkdir -p "$awk_shim"
+printf '#!/bin/sh\necho "awk: simulated failure" >&2\nprintf "%%s\\n" "$AWK_OUT"\nexit "$AWK_RC"\n' > "$awk_shim/awk"
+chmod u+x "$awk_shim/awk"
+[ "$(PATH="$awk_shim:$PATH" bash -c 'command -v awk')" = "$awk_shim/awk" ] \
+  || fail "the awk shim is not the awk a fresh process resolves"
+r="$work/rl-awk-fail"; seed "$r"; _rl_helper "$r/lib/link.sh"
+printf 't=$(readlink "$1")\n' > "$r/lib/x.sh"
+fails_with_rc 1 "$r" "$rl_msg" "the awk-fault fixture must fail the real gate with its violation"
+for aw in '2|4' '0|4|x' '0||4' '0|4|' '0|4||5' '0|x' '0|04' '0|4 5'; do
+  _gate_rc "$cp" "$r" PATH="$awk_shim:$PATH" AWK_RC="${aw%%|*}" AWK_OUT="${aw#*|}"
+  [ "$gate_rc" = "2" ] && ok \
+    || fail "an awk exiting ${aw%%|*} with '${aw#*|}' must exit 2, got $gate_rc: $gate_out"
+  case "$gate_out" in
+    *"$rl_awk_err"*) ok ;;
+    *) fail "an awk exiting ${aw%%|*} with '${aw#*|}' must report the lookup error: $gate_out" ;;
+  esac
+  # exempting nothing: the helper's own raw call prints with the violation
+  for rl_want in "$r/lib/link.sh:4:" "$r/lib/x.sh:1:" "$rl_msg"; do
+    case "$gate_out" in
+      *"$rl_want"*) ok ;;
+      *) fail "an awk exiting ${aw%%|*} with '${aw#*|}' must exempt nothing (no '$rl_want'): $gate_out" ;;
+    esac
+  done
+done
+# the exemption filter (_drop_hits' grep -v): its own failure, and grep never
+# running because its stderr file cannot be opened
+for rl_how in grep drop.err; do
+  if [ "$rl_how" = grep ]; then
+    _gate_rc "$cp" "$r" PATH="$grep_fail:$PATH" ARG_FAIL_ON=-vE
+  else
+    _gate_rc "$cp" "$r" PATH="$drop_shim:$PATH"
+  fi
+  [ "$gate_rc" = "2" ] && ok \
+    || fail "a failing _link_readlink exemption filter ($rl_how) must exit 2, got $gate_rc: $gate_out"
+  for rl_want in "check-patterns: the _link_readlink line $filter_err_msg" \
+      "$r/lib/link.sh:4:" "$r/lib/x.sh:1:" "$rl_msg"; do
+    case "$gate_out" in
+      *"$rl_want"*) ok ;;
+      *) fail "a failing _link_readlink exemption filter ($rl_how) must report itself and exempt nothing (no '$rl_want'): $gate_out" ;;
+    esac
+  done
+done
+
+# === arm (14): a localizing declaration of zsh's path specials ===============
+# `local path` in a function keeps the special tie, so assigning it rewrites
+# $PATH for the whole call. A line scanner cannot tell a function body from
+# the top level, so every declaration of the ten names without -g fails.
+i=0
+while IFS= read -r line; do
+  i=$((i + 1)); r="$work/tied-shape-$i"; seed "$r"; mkdir -p "$r/zsh/sub"
+  printf '%s\n' "$line" > "$r/zsh/sub/x.zsh"
+  fails_with_rc 1 "$r" "$tied_msg" "a localizing declaration must fail: $line" only
+done <<'SHAPES'
+f() { local path=/x; }
+  local -a path
+  local path
+  local cdpath
+  local FPATH=/x
+  local x path y
+  local x=${y} path
+  local -- path
+  typeset -U path
+  typeset -x PATH=/x
+  typeset +g path
+  typeset -g x; local path
+  typeset -gU path; local path
+  declare fpath
+  integer manpath
+  float MANPATH
+  readonly CDPATH
+  private path
+  (( 1 )) && local path=/x
+  local -g path
+  local module_path=/x
+  typeset MODULE_PATH
+  for path in /a /b; do :; done
+  for x path (/a /b) :
+  foreach path (/a /b)
+  select PATH in a b; do :; done
+  for fpath in /x; do :; done
+  for module_path in /x; do :; done
+  x=1; for i path in a b; do :; done
+  if true; then local path; fi
+SHAPES
+# the dot entries of zsh/ are on the surface too
+r="$work/tied-dot"; seed "$r"; mkdir -p "$r/zsh"
+printf '  local path=/x\n' > "$r/zsh/.zshrc.local.example"
+fails_with_rc 1 "$r" "$tied_msg" "a localizing declaration in a zsh/ dot file must fail" only
+# NOT a localizing declaration: -g in any option word, a plain assignment,
+# export, a comment, a longer name, a zstyle value
+r="$work/tied-negatives"; seed "$r"; mkdir -p "$r/zsh"
+printf '%s\n' 'typeset -gU path' 'typeset -Ug path' 'typeset -U -g path fpath' \
+  'typeset -gx PATH' 'path=("$HOME/.local/bin" $path)' \
+  'if [[ -d /usr/local/go/bin ]]; then path=(/usr/local/go/bin $path); fi' \
+  'export PATH=/x' '# `target`, not `path`: a `local path` corrupts PATH' \
+  'x=1  # never local path here' 'local pathx mypath path_list target' \
+  "zstyle ':completion:*' tag-order local-directories path-directories" \
+  'print "use local path"' 'print -r -- nolocal path; mytypeset path' \
+  'typeset -xg path' 'for d in path fpath; do :; done' 'for p in $path; do :; done' \
+  'for p ($path) :' 'for inx in path; do :; done' 'for i in path; do :; done' \
+  'before path' > "$r/zsh/ok.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "-g declarations, assignments, export, comments and longer names must pass"
+# NOT COVERED, pinned as uncaught (the arm's comment lists them): a name word
+# holding `(`, `)`, `;`, `&` or `|` ends the scan of the line, quoting or
+# escaping hides a name, and mailpath is not one of the names. If a change
+# starts catching one, move it to the shapes above and out of the comment.
+while IFS= read -r line; do
+  r="$work/tied-uncaught-$(printf '%s' "$line" | cksum | sed 's/ .*//')"; seed "$r"; mkdir -p "$r/zsh"
+  printf '%s\n' "$line" > "$r/zsh/x.zsh"
+  [ "$(run "$r")" = "0" ] && ok || fail "documented as NOT covered, now caught - update the arm's comment and this pin: $line"
+done <<'UNCAUGHT'
+  local foo=$(pwd) path
+  local -a arr=() path
+  local x='a;b' path
+  local "path"
+  local p\ath
+  \local path
+  local {path,x}
+  local mailpath
+UNCAUGHT
+# KNOWN FALSE POSITIVE, pinned: the shape in quoted prose followed by a space
+# fires; the same prose ending at the name does not (the `"` ends the name)
+r="$work/tied-fp-prose"; seed "$r"; mkdir -p "$r/zsh"
+printf '%s\n' 'print "a local path here"' > "$r/zsh/x.zsh"
+_fails_at "$r" "$tied_msg" "$r/zsh/x.zsh:1:" "the known false positive in quoted prose is flagged"
+r="$work/tied-fp-prose-end"; seed "$r"; mkdir -p "$r/zsh"
+printf '%s\n' 'print "a local path"' > "$r/zsh/x.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "quoted prose ending at the name must pass"
+# the pinned-plugins exclusion is the EXACT path zsh/plugins: a sibling whose
+# name only starts with `plugins` is first-party and scanned
+for tied_f in zsh/plugins-x/a.zsh zsh/pluginsx.zsh; do
+  r="$work/tied-anchor-$(printf '%s' "$tied_f" | tr '/.' '--')"; seed "$r"
+  mkdir -p "$r/$(dirname "$tied_f")"
+  printf '  local path=/x\n' > "$r/$tied_f"
+  _fails_at "$r" "$tied_msg" "$r/$tied_f:1:" "$tied_f is first-party, not the pinned zsh/plugins"
+done
+r="$work/tied-anchor-pinned"; seed "$r"; mkdir -p "$r/zsh/plugins/p"
+printf '  local path=/x\n' > "$r/zsh/plugins/p/a.zsh"
+[ "$(run "$r")" = "0" ] && ok || fail "the same line inside the pinned zsh/plugins/p/ must pass"
+# the surface is zsh/ alone: a bash `local path` in lib/ or bin/ is bash's
+r="$work/tied-surface"; seed "$r"; mkdir -p "$r/bin"
+printf 'f() { local path="$1"; }\n' > "$r/lib/x.sh"
+printf '#!/usr/bin/env bash\nf() { local section="$1" path="$2"; }\n' > "$r/bin/tool"
+[ "$(run "$r")" = "0" ] && ok || fail "a bash local path in lib/ or bin/ is off the arm's surface"
+# today's real zsh/ sources pass (the pinned plugins are not copied)
+r="$work/tied-real-zsh"; seed "$r"; mkdir -p "$r/zsh"
+for f in "$repo_root"/zsh/* "$repo_root"/zsh/.[!.]*; do
+  [ -f "$f" ] && cat "$f" > "$r/zsh/${f##*/}"
+done
+[ "$(run "$r")" = "0" ] && ok || fail "today's zsh/ sources must pass the tied-path arm"
+# FAIL CLOSED: the scan's grep failing exits 2
+r="$work/tied-grep-fail"; seed "$r"; mkdir -p "$r/zsh"
+printf 'path=(/x $path)\n' > "$r/zsh/ok.zsh"
+[ "$(run "$r")" = "0" ] || fail "the tied-path grep-fault fixture must pass the real gate"
+PATH="$patfail:$PATH" PAT_FAIL_ON=cdpath \
+  fails_with_rc 2 "$r" "check-patterns: tied-path declaration scan errored" "a failing tied-path scan must exit 2" only
+
 # === a relative ROOT starting with `-` is a path, not an option =============
 # find reads a leading-dash operand as an expression, and arm 3's grep (GNU
 # permutes argv) as an option: the gate prefixes `./`.
@@ -2992,6 +3379,7 @@ PATH="$cls_shim:$PATH" CLS_LOG="$cls_log" CLS_GREP="$cls_grep" STRICT= \
 # _cls_flush - classify the call collected in cls_args, add its operands.
 cls_arm8=""; cls_arm11=""; cls_n11=0
 cls_arm1=""; cls_arm1_self=""; cls_arm2=""; cls_arm2_self=""
+cls_arm13=""; cls_arm14=""
 # Arm 1's call is told by its fetcher alternation, arm 2's by its one fixed
 # pattern: a rewrite of either spelling in bin/check-patterns must update
 # these two patterns in the same commit (the non-empty asserts below fail
@@ -3008,6 +3396,8 @@ _cls_flush() {
       "$em_dash") [ "$rec" -eq 1 ] && kind=11 ;;
       *'(curl|wget)'*) kind=1 ;;
       'uname[ ]-m') kind=2 ;;
+      *'g?readlink'*) [ "$rec" -eq 1 ] && kind=13 ;;
+      *'|cdpath|'*) [ "$rec" -eq 1 ] && kind=14 ;;
       *) continue ;;
     esac
     [ -n "$kind" ] && break
@@ -3030,6 +3420,8 @@ _cls_flush() {
       1:0) cls_arm1_self="$cls_arm1_self$rel"$'\n' ;;
       2:1) cls_arm2="$cls_arm2$rel"$'\n' ;;
       2:0) cls_arm2_self="$cls_arm2_self$rel"$'\n' ;;
+      13:*) cls_arm13="$cls_arm13$rel"$'\n' ;;
+      14:*) cls_arm14="$cls_arm14$rel"$'\n' ;;
     esac
   done
 }
@@ -3117,6 +3509,15 @@ while IFS= read -r p; do
   fi
 done <<<"$cls_paths"
 [ "$cls_n1" -gt 0 ] && ok || fail "surface coverage: no code path was checked against arm 1's roots"
+# arms 13 and 14 read a fixed surface each, derived from the same log: arm 13
+# exactly install.sh and lib/, arm 14 exactly the tracked entries of zsh/ but the pinned
+# zsh/plugins (a narrower or wider root is a surface change to review).
+[ "$cls_arm13" = "install.sh"$'\n'"lib"$'\n' ] && ok \
+  || fail "surface coverage: arm 13 (raw readlink) must read exactly install.sh and lib/, got: $cls_arm13"
+cls_zsh_want="$(printf '%s' "$cls_paths" | sed -n -e '/^zsh\/plugins\//d' -e 's|^\(zsh/[^/]*\).*|\1|p' | LC_ALL=C sort -u)"
+cls_zsh_got="$(printf '%s' "$cls_arm14" | LC_ALL=C sort -u)"
+[ -n "$cls_zsh_want" ] && [ "$cls_zsh_got" = "$cls_zsh_want" ] && ok \
+  || fail "surface coverage: arm 14 (tied path) must read exactly zsh/'s tracked entries but zsh/plugins; want: $cls_zsh_want; got: $cls_zsh_got"
 
 # --- no two paths anywhere under $work may differ only in case: macOS's
 # default filesystem folds case, so they would be ONE path there and the
