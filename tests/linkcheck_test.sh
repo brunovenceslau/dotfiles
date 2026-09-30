@@ -69,14 +69,37 @@ A link whose text wraps: [the guide's
 tail](docs/guide.md#tail). [Self](#top) and [explicit](docs/guide.md#pinned).
 An external [site](https://example.com/nope) is never fetched.
 Absolute: https://github.com/brunovenceslau/dotfiles/blob/main/docs/guide.md#tail
+and with a query: https://github.com/brunovenceslau/dotfiles/blob/main/README.md?plain=1#top
+
+A [full reference][Ref], a [collapsed one][] and a [third setup](docs/guide.md#setup-2).
+Slugs: [code span](docs/guide.md#the-_link_bin_tree-helper),
+[escape](docs/guide.md#a_b-escaped), [taken](docs/guide.md#foo-1-1).
+HTML: <img src="docs/guide.md" alt="x"> and <a href="docs/guide.md#tail">tail</a>.
 
 [ref]: docs/guide.md#tail
+[collapsed one]: docs/guide.md
 
 Ignored in code: `[x](missing.md)` and:
 
 ```sh
 [y](also-missing.md#nope)
 ```
+
+~~~
+[z](tilde-missing.md)
+~~~
+
+<!-- [c](comment-missing.md) and [d][undefined] -->
+
+    [indented](indented-code-missing.md)
+
+- a list item
+
+  ```
+  [w](list-fence-missing.md)
+  ```
+
+      [v](docs/guide.md#tail) is list content, so it is still checked.
 EOF
   cat >"$work/r/docs/guide.md" <<'EOF'
 # Guide
@@ -85,7 +108,19 @@ EOF
 
 ## Setup
 
+## Setup
+
 ## What `make x` does, really?
+
+## The `_link_bin_tree` helper
+
+## a\_b *escaped*
+
+## Foo
+
+## Foo
+
+## Foo-1
 
 <a id="pinned"></a>
 
@@ -129,9 +164,32 @@ expect_broken README.md 'See [gone](docs/gone.md).' \
 expect_broken README.md 'See [nope](docs/guide.md#no-such-heading).' \
   'no such anchor in docs/guide\.md: docs/guide\.md#no-such-heading' \
   "a broken anchor fails"
-expect_broken README.md 'See [third](docs/guide.md#setup-2).' \
-  'no such anchor in docs/guide\.md: docs/guide\.md#setup-2' \
-  "a duplicate heading numbers -1 only as far as it repeats (-2 fails)"
+expect_broken README.md 'See [third](docs/guide.md#setup-3).' \
+  'no such anchor in docs/guide\.md: docs/guide\.md#setup-3' \
+  "a heading repeated three times numbers -1 and -2, never -3"
+expect_broken README.md 'See [taken](docs/guide.md#foo-2).' \
+  'no such anchor in docs/guide\.md: docs/guide\.md#foo-2' \
+  "a heading reading Foo-1 after two Foo headings is numbered foo-1-1, as github-slugger does"
+expect_broken README.md 'See [case](docs/GUIDE.md).' \
+  'no such tracked file or directory: docs/GUIDE\.md' \
+  "a path that differs from the tracked one only in case fails"
+expect_broken README.md 'See [nothing][missing label].' \
+  'no such reference definition in this file: \[missing label\]' \
+  "a reference link with no definition fails"
+expect_broken README.md 'An <img src="docs/missing.png" alt="x">.' \
+  'no such tracked file or directory: docs/missing\.png' \
+  "an HTML src is checked"
+expect_broken README.md "- item
+
+      [u](list-content-missing.md)" \
+  'list-content-missing\.md' \
+  "an indented line inside a list is content, not code, and is checked"
+expect_broken README.md '<!--
+## Hidden
+-->
+See [hidden](#hidden).' \
+  'no such anchor in README\.md: #hidden' \
+  "a heading inside an HTML comment is not a heading"
 expect_broken README.md 'See [self](#Top).' \
   'no such anchor in README\.md: #Top' \
   "an anchor is compared exactly: GitHub's ids are lowercase"
@@ -160,11 +218,51 @@ ok "a link to an untracked file fails: GitHub renders the tracked tree"
 new_tree
 printf '%s\n' '```' '[a](missing.md)' '```' '[b](missing-too.md)' >>"$work/r/README.md"
 git -C "$work/r" add -A
+want_line="$(wc -l <"$work/r/README.md" | tr -d ' ')"
 run
 [ "$rc" = 1 ] || fail "a link after a closed fence must be checked (exit $rc): $out"
-grep -q 'missing-too\.md' <<<"$out" || fail "the link after the fence was not reported: $out"
+grep -qx "README.md:$want_line: no such tracked file or directory: missing-too.md" <<<"$out" \
+  || fail "the link after the fence must be reported at README.md:$want_line: $out"
 if grep -q ': missing\.md$' <<<"$out"; then fail "a link inside a fence was reported: $out"; fi
 ok "a fence hides its links and a closed fence stops hiding"
+
+# Front matter is blanked, never dropped: a line number after it is exact.
+new_tree
+printf -- '---\ndescription: x\n---\n\n[gone](gone.md)\n' >"$work/r/docs/front.md"
+git -C "$work/r" add -A
+run
+grep -qx 'docs/front.md:5: no such tracked file or directory: gone.md' <<<"$out" \
+  || fail "a link after front matter must be reported at its own line (5): $out"
+ok "front matter keeps line numbers exact"
+
+# An unclosed fence hides the rest of the file, as GitHub renders it.
+new_tree
+printf '%s\n' '```' '[a](missing.md)' >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a link after an unclosed fence is code and must be ignored (exit $rc): $out"
+ok "an unclosed fence runs to the end of the file"
+
+# A report echoes names and text from the tree: control bytes print escaped.
+new_tree
+printf 'See [x](a\033]52;c;aGk=\007b.md).\n' >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] || fail "a link holding control bytes must still be reported (exit $rc)"
+case "$out" in
+  *$'\033'* | *$'\007'*) fail "a raw control byte reached the report" ;;
+esac
+grep -qF 'a\x1b]52;c;aGk=\x07b.md' <<<"$out" || fail "the control bytes were not printed escaped: $out"
+ok "control bytes in a report print as \\xHH"
+
+# A tracked .md symlink is not read: it could point anywhere.
+new_tree
+printf '[broken](nowhere.md)\n' >"$work/outside.md"
+ln -s "$work/outside.md" "$work/r/docs/linked.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a tracked symlink must be skipped, not followed (exit $rc): $out"
+ok "a tracked Markdown symlink is skipped, not followed out of the repository"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
