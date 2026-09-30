@@ -93,7 +93,8 @@ are permitted provided the copyright notice and this notice are preserved.
 
 - Upstream: <https://github.com/folke/lazy.nvim>
 - Commit: `306a05526ada86a7b30af95c5cc81ffba93fef97`
-- Licence: Apache-2.0 (full text in [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt))
+- Licence: Apache-2.0 (full text in
+  [LICENSES/Apache-2.0.txt](LICENSES/Apache-2.0.txt))
 - Used in: `config/nvim/lua/config/lazy.lua`, the bootstrap. All 33 non-blank
   lines of the snippet are the installation recipe from `doc/lazy.nvim.txt`
   lines 156 to 192, unmodified. The file adds this repository's own options
@@ -197,8 +198,8 @@ shell degrades silently when one is absent, and nothing from them is copied
 into this repository. The table lists the tools whose output the startup path
 caches or sources, or that the shell binds keys to. Other optional tools that
 a helper calls on demand (kubectl, restic, pass-cli, op, python3, go, dig, gls,
-uuidgen, osascript, lesspipe) are described, with the helpers that use them, in the
-[shell reference](docs/shell-reference.md).
+uuidgen, osascript, lesspipe) are described, with the helpers that use them, in
+the [shell reference](docs/shell-reference.md).
 
 | Tool | Licence | What it does here |
 | --- | --- | --- |

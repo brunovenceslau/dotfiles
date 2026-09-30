@@ -83,8 +83,8 @@ did not run. See "`STRICT=1`" below for the full rule.
 
 ## The gates
 
-Every gate is a `make` target. CI only ever calls `make`, so local and CI stay in
-parity by construction. Run `make local-ci` before every push.
+Every gate is a `make` target. CI only ever calls `make`, so local and CI stay
+in parity by construction. Run `make local-ci` before every push.
 
 | Target | What it runs | What it proves |
 | --- | --- | --- |
@@ -307,12 +307,13 @@ moment before it becomes history. The pinned plugin submodules are in that scope
 as well.
 
 Both honour one waiver, the literal `secret-scan:allow` on the offending line -
-`bin/secret-scan` natively, `gitleaks` through the allowlist in `.gitleaks.toml`.
-Reach for it last. Neither scanner speaks for GitHub's own push protection,
-which reads the same bytes on the server and honours no marker of ours, and a
-literal that gets that far costs a history rewrite to remove. A test fixture
-that needs a real secret shape builds it from fragments at run time instead; see
-`tests/secret_scan_test.sh`. No tracked file needs the waiver today.
+`bin/secret-scan` natively, `gitleaks` through the allowlist in
+`.gitleaks.toml`. Reach for it last. Neither scanner speaks for GitHub's own
+push protection, which reads the same bytes on the server and honours no marker
+of ours, and a literal that gets that far costs a history rewrite to remove. A
+test fixture that needs a real secret shape builds it from fragments at run time
+instead; see `tests/secret_scan_test.sh`. No tracked file needs the waiver
+today.
 
 ### `STRICT=1`
 
@@ -328,8 +329,8 @@ make local-ci STRICT=1
 
 A local green can be vacuous. Platform and privilege skips (a case only a given
 OS, architecture or root can stage) exit 0 even under `STRICT=1`; a missing
-tool fails it. A pass proves what ran, not what was covered. When a particular suite
-matters to your change, check that it did not skip.
+tool fails it. A pass proves what ran, not what was covered. When a particular
+suite matters to your change, check that it did not skip.
 
 Where `make` is unavailable, run the same commands it drives:
 
@@ -380,8 +381,8 @@ python3 -I tests/linkcheck.py .
 
 ### What `make smoke` does
 
-The whole run happens under `.smoke/` inside the repository, which is gitignored.
-Nothing is written outside `~/.config/dotfiles`.
+The whole run happens under `.smoke/` inside the repository, which is
+gitignored. Nothing is written outside `~/.config/dotfiles`.
 
 When the repository root is the top level of a git checkout, which is the
 default, the installer runs against a disposable copy of the working tree under
@@ -414,8 +415,8 @@ files among them, so delete `.smoke/run` once you are done debugging.
 Every binary reachable on `PATH` is replaced by a logging shim placed first on
 `PATH`. A hermetic `zsh -i -c exit` runs against this repository's zshenv and
 zshrc, and the log must be empty. The gate proves its own instrumentation first:
-a canary invocation must reach the log, and the measured shell must have actually
-loaded the repository zshrc.
+a canary invocation must reach the log, and the measured shell must have
+actually loaded the repository zshrc.
 
 Out of scope, explicitly: the `precmd` window. `precmd` never fires under
 `zsh -i -c exit`, so first-prompt activity is not measured.
@@ -462,8 +463,8 @@ Both legs are real hardware of their own architecture. There is no emulation,
 because what these legs exercise is exactly the part that emulation would hide:
 Homebrew prefix detection, `on_arm` and `on_intel` Brewfile blocks, bash 3.2 and
 the BSD toolchain. Intel has no rolling image alias, so that leg names
-`macos-15-intel` explicitly. If the image is retired, the leg fails loudly rather
-than dropping the coverage.
+`macos-15-intel` explicitly. If the image is retired, the leg fails loudly
+rather than dropping the coverage.
 
 The workflow checks out submodules recursively, so smoke exercises the real
 plugin path. It does not persist credentials on the runner.
@@ -556,16 +557,16 @@ coverage is a decision someone takes, never something that happens quietly.
 
 These are not style preferences. Breaking one of them breaks a host.
 
-**Bash 3.2 compatibility** for `install.sh` and `lib/`. No associative arrays, no
-`mapfile`, no `${var,,}`. macOS ships bash 3.2 as `/bin/bash`, and the smoke test
-invokes the installer through it. Files under `bin/` may use a modern bash,
+**Bash 3.2 compatibility** for `install.sh` and `lib/`. No associative arrays,
+no `mapfile`, no `${var,,}`. macOS ships bash 3.2 as `/bin/bash`, and the smoke
+test invokes the installer through it. Files under `bin/` may use a modern bash,
 because they run only on provisioned hosts and CI. `zsh/` targets zsh only.
 `make check-patterns` flags all three constructs, on any host, and is their only
 gate. The `/bin/bash -n` pass in `make lint` is not a backstop for them:
-`declare -A` and `mapfile` are ordinary command invocations, and `${var,,}` fails
-when it is expanded, so no bash reports a parse error for any of the three. That
-pass covers the syntax bash 3.2 genuinely cannot parse, and only on the macOS
-legs where `/bin/bash` is the real 3.2.
+`declare -A` and `mapfile` are ordinary command invocations, and `${var,,}`
+fails when it is expanded, so no bash reports a parse error for any of the
+three. That pass covers the syntax bash 3.2 genuinely cannot parse, and only on
+the macOS legs where `/bin/bash` is the real 3.2.
 
 **POSIX regex in every `sed`, `grep` and `awk` call.** macOS runs BSD `sed` and
 `grep`. GNU's `\s`, `\w`, `\b`, `\<`, `\>` and the BRE operators `\|`, `\+`,
@@ -617,7 +618,8 @@ absolute pinentry path.
 Back up any user file to `*.bak` before overwriting it.
 
 **Never commit secrets.** `config/rclone` and `config/restic` are gitignored
-except for their README and `*.example` files. `make secret-scan` is the backstop.
+except for their README and `*.example` files. `make secret-scan` is the
+backstop.
 
 **`make lint` must be green before every commit, and commits are signed.**
 
@@ -649,17 +651,17 @@ naming the config directory it belongs to.
 If the program refuses XDG paths, use `home/<file>`, which links to `~/.<file>`.
 That directory does not exist yet, and the walker skips it when absent.
 
-If the program writes to its own config file, or keeps secrets there, it needs an
-entry in the exceptions table in `lib/link.sh`. That is a link-convention change,
-so ask first.
+If the program writes to its own config file, or keeps secrets there, it needs
+an entry in the exceptions table in `lib/link.sh`. That is a link-convention
+change, so ask first.
 
 ### Add a `.local` layer to a surface
 
 Follow the existing shape: load the tracked file first, then the untracked
-companion, guarded on readability and silent when absent. Use an `if` rather than
-a bare `[[ ... ]] &&` when the load is the last statement in a file, so the file's
-exit status stays 0. Add a `.local.example` template, and list the pair in the
-[shell reference](shell-reference.md#local-files).
+companion, guarded on readability and silent when absent. Use an `if` rather
+than a bare `[[ ... ]] &&` when the load is the last statement in a file, so the
+file's exit status stays 0. Add a `.local.example` template, and list the pair
+in the [shell reference](shell-reference.md#local-files).
 
 ### Bump a plugin pin
 
@@ -671,16 +673,17 @@ exit status stays 0. Add a `.local.example` template, and list the pair in the
    [architecture](architecture.md#plugins-and-the-supply-chain) in the same
    commit. If the table disagrees with `git submodule status`, it is stale and
    must not be trusted.
-4. Run `make local-ci STRICT=1`. `bin/check-patterns` verifies the shim premises,
-   and `tests/fsyh_fetch_test.sh` covers the download branch.
+4. Run `make local-ci STRICT=1`. `bin/check-patterns` verifies the shim
+   premises, and `tests/fsyh_fetch_test.sh` covers the download branch.
 
 ### Add a gh extension
 
-Add one `owner/repo <pin>` line to `packages/gh-extensions.txt`, where the pin is
-a reviewed `vX.Y.Z` release tag. A bare commit SHA is accepted by the validator
-but does not resolve for a binary extension, so a tag is the usual form. Every
-line is validated before it reaches `gh extension install`: the `owner/repo` may
-not start with a dash, dot or slash, and an unpinned line is dropped.
+Add one `owner/repo <pin>` line to `packages/gh-extensions.txt`, where the pin
+is a reviewed `vX.Y.Z` release tag. A bare commit SHA is accepted by the
+validator but does not resolve for a binary extension, so a tag is the usual
+form. Every line is validated before it reaches `gh extension install`: the
+`owner/repo` may not start with a dash, dot or slash, and an unpinned line is
+dropped.
 
 Pinning to a release tag stops a floating `latest`. It is not the
 content-addressed immutability of a submodule, because `gh` downloads a mutable

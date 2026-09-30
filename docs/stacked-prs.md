@@ -39,10 +39,10 @@ commits" note in the body mitigates the second, because GitHub's per-commit view
 honors it. That cost is worth paying to make the unrecoverable close impossible.
 
 There is one documented alternative: keep base-chaining and its native stack
-rendering by turning `delete_branch_on_merge` **off**, so a child's base survives
-its parent's merge. The price is stale parent branches to prune after the whole
-stack lands. Adopt it only as a deliberate repository-setting change. Until then,
-base is `main`.
+rendering by turning `delete_branch_on_merge` **off**, so a child's base
+survives its parent's merge. The price is stale parent branches to prune after
+the whole stack lands. Adopt it only as a deliberate repository-setting change.
+Until then, base is `main`.
 
 ## The workflow
 
@@ -101,8 +101,8 @@ always pass `-c commit.gpgsign=true` explicitly.
 
 ## Retargeting a non-compliant PR
 
-If an open PR is still based on a branch that just landed, retarget it **first**,
-while it is still open, and only then rebase:
+If an open PR is still based on a branch that just landed, retarget it
+**first**, while it is still open, and only then rebase:
 
 ```sh
 gh pr edit <n> --base main

@@ -60,14 +60,15 @@ it by directory existence. Do not shell out to `brew shellenv`.
 `make check-patterns` gates both halves. It flags a `/opt/homebrew` unless
 `/usr/local` is the ADJACENT word, because two prefixes side by side is what a
 detection loop or a candidate list looks like, and anything looser exempts by
-coincidence: `PATH="/opt/homebrew/bin:/usr/local/bin"` names both inside one word,
-and `[ -d /usr/local/go ] && P=/opt/homebrew` names both on one line while the
-`/usr/local` is about Go. Keep the pair on one line. It also flags `brew shellenv`
-and a bare `brew --prefix`; `brew --prefix <formula>` asks a different question,
-and every other `brew` call, such as `brew bundle`, is untouched. A lone
-`/usr/local` is never flagged: it is a generic FHS path with non-Homebrew uses.
-`config/gnupg/gpg-agent.conf` is the one allowlisted file, because gpg-agent.conf
-has no variable expansion and its pinentry path must be absolute.
+coincidence: `PATH="/opt/homebrew/bin:/usr/local/bin"` names both inside one
+word, and `[ -d /usr/local/go ] && P=/opt/homebrew` names both on one line while
+the `/usr/local` is about Go. Keep the pair on one line. It also flags
+`brew shellenv` and a bare `brew --prefix`; `brew --prefix <formula>` asks a
+different question, and every other `brew` call, such as `brew bundle`, is
+untouched. A lone `/usr/local` is never flagged: it is a generic FHS path with
+non-Homebrew uses. `config/gnupg/gpg-agent.conf` is the one allowlisted file,
+because gpg-agent.conf has no variable expansion and its pinentry path must be
+absolute.
 
 Route every architecture check through the `is-arm64` and `is-amd64` helpers in
 `lib/os.sh`. An ad-hoc `uname -m` outside `lib/os.sh` fails
