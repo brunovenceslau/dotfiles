@@ -51,7 +51,7 @@ Four constraints shape every decision here.
 ```
 ~/.config/dotfiles
 ├── install.sh          bootstrap: install | link | packages | upgrade | uninstall
-├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci, repo-settings-check
+├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, linkcheck, local-ci, repo-settings-check
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
@@ -71,7 +71,8 @@ Four constraints shape every decision here.
 │   └── plugins/        three SHA-pinned git submodules
 ├── config/             linked to ~/.config/<prog>, with three exceptions
 ├── packages/           Brewfile and gh-extensions.txt
-├── tests/              hermetic unit tests, never touch the real $HOME
+├── tests/              hermetic unit tests, never touch the real $HOME, and
+│                       linkcheck.py, the docs link gate (run by make)
 └── docs/               this documentation
 ```
 
