@@ -3392,6 +3392,67 @@ bounded_run 20 "$work/mdw-brackets.out" env STRICT= "$cp" "$r" \
   || fail "arm 15: a line of 60000 unclosed brackets outlived 20 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 1 ] && ok || fail "arm 15: the unclosed-bracket line must still fail as too long, got $br_rc"
 
+# nested brackets that DO close: every `[` used to scan to its partner, so
+# 30000 of them before 30000 `]` was quadratic too (measured: 59 s). One
+# pairing pass per line makes it linear.
+r="$work/mdw-nested-brackets"; seed "$r"; mkdir -p "$r/docs"
+printf 'a %s%s\n' "$(printf '[%.0s' $(seq 1 30000))" "$(printf ']%.0s' $(seq 1 30000))" > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-nested-brackets.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 nested brackets: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: 30000 nested bracket pairs outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 1 ] && ok || fail "arm 15: the nested-bracket line must still fail as too long, got $br_rc"
+
+# front matter that never closes is not front matter: GitHub renders the
+# `---` as a rule and the rest as prose, so its lines are held to the limit
+# at their own line numbers.
+r="$work/mdw-fm-unclosed"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n%s\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: an unclosed front matter must be read as prose" only
+fails_with "$r" "/docs/x.md:3:" "arm 15: an unclosed front matter keeps its line numbers"
+r="$work/mdw-fm-unclosed-ok"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n' > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a short unclosed front matter must pass"
+
+# the character-count path. The awk here counts bytes, so an awk shim
+# rewrites the program to take the path a UTF-8-aware awk takes (length()
+# as is). Under that shim the probe self-test must fail the gate closed; with
+# the self-test also removed, a 71-character line of 60 two-byte characters
+# (131 bytes) fails, which proves the probe really selects the path.
+real_awk="$(command -v awk)"
+awk_shim="$work/awk-shim"; mkdir -p "$awk_shim"
+cat > "$awk_shim/awk" <<'SHIM'
+#!/usr/bin/env python3
+import os, sys
+args, hits = [], 0
+for a in sys.argv[1:]:
+    b = a.replace('u8 = (length("\\303\\251") == 1)', "u8 = 1")
+    if os.environ.get("CPT_NO_SELFTEST"):
+        b = b.replace('if (cols("\\303\\251\\302\\265\\302\\260") != 3)', "if (0)")
+    hits += b != a
+    args.append(b)
+if not hits:
+    print("awk shim: the width probe was not found in the program", file=sys.stderr)
+    sys.exit(3)
+os.execv(os.environ["CPT_REAL_AWK"], [os.environ["CPT_REAL_AWK"]] + args)
+SHIM
+chmod u+x "$awk_shim/awk"
+r="$work/mdw-charpath"; seed "$r"; mkdir -p "$r/docs"
+printf '%s aaaaaaaaaa\n' "$(printf '\303\251%.0s' $(seq 1 60))" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: 71 characters of two-byte UTF-8 must pass on the byte path"
+rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" STRICT= "$cp" "$r" 2>&1)" || rc=$?
+[ "$rc" = 2 ] || fail "arm 15: a miscounting probe must fail closed (exit 2), got $rc: $out"
+case "$out" in
+  *"miscounts UTF-8 characters"*"$md_err_msg"*) ok ;;
+  *) fail "arm 15: a miscounting probe must report the self-test and this arm's error: $out" ;;
+esac
+rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" CPT_NO_SELFTEST=1 STRICT= "$cp" "$r" 2>&1)" || rc=$?
+[ "$rc" = 1 ] || fail "arm 15: the character path on a byte awk must count bytes (exit 1), got $rc: $out"
+case "$out" in
+  *"/docs/x.md:1:"*"$md_msg"*) ok ;;
+  *) fail "arm 15: the forced character path must flag the 131-byte line: $out" ;;
+esac
+
 # every exempt shape passes, each over the limit and holding spaces.
 i=0
 while IFS= read -r shape; do
