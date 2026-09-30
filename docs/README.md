@@ -16,7 +16,7 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, platform differences. |
+| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, each security property and where it is enforced, platform differences. |
 
 ## Look something up
 

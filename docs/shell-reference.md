@@ -23,7 +23,7 @@ given.
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink, recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
-| `help`, `-h`, `--help` | none | Prints the usage line. |
+| `help`, `-h`, `--help` | none | Prints the usage. |
 
 `install` is the only subcommand other than `packages` and `upgrade` that can
 reach the network, and only when `git submodule status` shows an uninitialized
