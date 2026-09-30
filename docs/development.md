@@ -226,8 +226,9 @@ paths, which ones. The rules:
   therefore fixable by rewrapping the paragraph without changing a word. No
   Markdown file is generated today; a generated one would leave the rule by
   its exact path. A Setext heading's text line, a line inside a multi-line
-  HTML block and an indented code block are read as prose and held to the
-  limit.
+  HTML block, an indented code block and front matter that never closes are
+  read as prose and held to the limit. A TAB is one column, a CR before the LF
+  is none, and an awk that miscounts UTF-8 characters fails the gate closed.
 - No symlink where a recursive scan reads (`find`, always, over the em-dash
   rule's surface; a recursive scan never follows one it meets while walking a
   directory), plus, when the root has its own `.git`, no tracked symlink and no
@@ -463,9 +464,11 @@ link-convention change.
   line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
-- Front matter, fenced code blocks (running to the end of the file when never
-  closed, as GitHub renders them), indented code blocks, inline code spans and
-  HTML comments are not prose, so a link inside one is ignored. A link whose
+- Front matter, fenced code blocks and HTML comments (both running to the end
+  of the file when never closed, as GitHub renders them), indented code blocks
+  and inline code spans are not prose, so a link inside one is ignored. Front
+  matter that never closes is prose, since GitHub renders its `---` as a rule.
+  An HTML `href` or `src` may be double- or single-quoted. A link whose
   text wraps across lines is still found. Every other URL scheme is out of
   scope, since the gate never touches the network.
 

@@ -1761,8 +1761,12 @@ fi
 # not a column: it is stripped before anything else reads the line, so a
 # `---` CRLF front-matter line is still recognized.
 # AN UNCLOSED FENCE runs to the end of its file, as GitHub renders it, so the
-# rest of that file is code. Every per-file state resets on its first line
+# rest of that file is code. UNCLOSED FRONT MATTER is not front matter: GitHub
+# renders the `---` as a rule and the rest as prose, so the held lines are
+# checked when the file ends. Every per-file state resets on its first line
 # (FNR == 1), so it never leaks into the next file of the same awk run.
+# BEGIN also self-tests the width probe on three two-byte characters and
+# exits 2 (fail closed) on an awk and locale that count them wrong.
 # EXEMPT, because a reflow cannot fix them or would change what renders:
 #   - YAML front matter (a first line `---`, up to the next `---`);
 #   - a fenced code block, fences included, at any indent (a fence inside a
@@ -1786,7 +1790,15 @@ fi
 md_width=80
 # shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
 md_width_awk='
-BEGIN { u8 = (length("\303\251") == 1) }
+BEGIN {
+  u8 = (length("\303\251") == 1)
+  # Self-test of the probe: an e acute, a micro and a degree sign are three
+  # characters. Any awk and locale that the probe misreads fails closed.
+  if (cols("\303\251\302\265\302\260") != 3) {
+    print "awk: miscounts UTF-8 characters (the width probe self-test failed)"
+    exit 2
+  }
+}
 function cols(s,   t) {
   if (u8) return length(s)
   t = s; gsub(/[\200-\277]/, "", t); return length(t)
@@ -1804,70 +1816,94 @@ function skipcode(s, i, n,   run, j, r) {
   }
   return i
 }
-# skiplink returns the index after a whole link, 0 when the brackets close
-# but no `(` follows (not a link), or -1 when a bracket or parenthesis never
-# closes before the end of the line. After a -1 the caller stops trying
-# links on that line: every later `[` would scan to the end again, which is
-# quadratic on a line of many unclosed brackets.
-function skiplink(s, i, n,   d, c) {
-  if (substr(s, i, 1) == "!") i++
-  d = 0
+# pairs: ONE pass over the line, pairing each `[` with its `]` (pb) and each
+# `(` with its `)` (pp) on two stacks, outside code spans and past a
+# backslash escape. skiplink then looks a partner up instead of scanning,
+# so a line of many brackets, nested or never closed, stays linear.
+function pairs(s, n,   i, c, nb, np) {
+  split("", pb); split("", pp); split("", sb); split("", sp)
+  nb = 0; np = 0; i = 1
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == "`") { i = skipcode(s, i, n); continue }
     if (c == "\\") { i += 2; continue }
-    if (c == "[") d++
-    else if (c == "]") { d--; if (d == 0) { i++; break } }
+    if (c == "[") sb[++nb] = i
+    else if (c == "]") { if (nb) pb[sb[nb--]] = i }
+    else if (c == "(") sp[++np] = i
+    else if (c == ")") { if (np) pp[sp[np--]] = i }
     i++
   }
-  if (d != 0) return -1
-  if (substr(s, i, 1) != "(") return 0
-  d = 0
-  while (i <= n) {
-    c = substr(s, i, 1)
-    if (c == "(") d++
-    else if (c == ")") { d--; if (d == 0) return i + 1 }
-    i++
-  }
-  return -1
 }
-function tokens(s,   i, n, c, a, intok, j, nolink) {
+# skiplink: the index after a whole link or image `[text](dest)` opening at
+# i, or 0 when it is not one.
+function skiplink(s, i,   j) {
+  if (substr(s, i, 1) == "!") i++
+  if (!(i in pb)) return 0
+  j = pb[i] + 1
+  if (substr(s, j, 1) != "(" || !(j in pp)) return 0
+  return pp[j] + 1
+}
+function tokens(s,   i, n, c, a, intok, j) {
   sub(/^[ \t]+/, "", s)
   while (match(s, /^>[ \t]*/)) s = substr(s, RLENGTH + 1)
   if (match(s, /^([-*+]|[0-9]+[.)])[ \t]+/)) s = substr(s, RLENGTH + 1)
-  n = length(s); a = 0; intok = 0; i = 1; nolink = 0
+  n = length(s); a = 0; intok = 0; i = 1
+  pairs(s, n)
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == " " || c == "\t") { intok = 0; i++; continue }
     if (!intok) { a++; intok = 1 }
     if (c == "`") { i = skipcode(s, i, n); continue }
-    if (!nolink && (c == "[" || (c == "!" && substr(s, i + 1, 1) == "["))) {
-      j = skiplink(s, i, n)
-      if (j > 0) { i = j; continue }
-      if (j < 0) nolink = 1
+    if (c == "[" || (c == "!" && substr(s, i + 1, 1) == "[")) {
+      j = skiplink(s, i)
+      if (j) { i = j; continue }
     }
     i++
   }
   return a
 }
-{ sub(/\r$/, "") }
-FNR == 1 { fm = 0; fence = ""; cmt = 0; if ($0 == "---") { fm = 1; next } }
-fm { if ($0 == "---") fm = 0; next }
-fence != "" {
-  if (match($0, /^[ \t]*(```+|~~~+)[ \t]*$/)) {
-    f = $0; gsub(/[ \t]/, "", f)
-    if (substr(f, 1, 1) == substr(fence, 1, 1) && length(f) >= length(fence)) fence = ""
+# check: one line of one file, after front matter is settled.
+function check(line, file, nr,   f) {
+  if (fence != "") {
+    if (match(line, /^[ \t]*(```+|~~~+)[ \t]*$/)) {
+      f = line; gsub(/[ \t]/, "", f)
+      if (substr(f, 1, 1) == substr(fence, 1, 1) && length(f) >= length(fence)) fence = ""
+    }
+    return
   }
+  if (match(line, /^[ \t]*(```+|~~~+)/)) {
+    f = substr(line, RSTART, RLENGTH); gsub(/[ \t]/, "", f); fence = f; return
+  }
+  if (cmt) { if (index(line, "-->")) cmt = 0; return }
+  if (line ~ /^[ \t]*<!--/) { if (!index(line, "-->")) cmt = 1; return }
+  if (line ~ /^[ \t]*<\/?[A-Za-z][A-Za-z0-9-]*([ \t>\/]|$)/) return
+  if (line ~ /^[ \t]*[|]/) return
+  if (line ~ /^ {0,3}#{1,6}([ \t]|$)/) return
+  if (line ~ /^ {0,3}\[[^]]+\]:/) return
+  if (cols(line) > W && tokens(line) > 1) print file ":" nr ":" line
+}
+# flush: a front matter that never closed is not front matter (GitHub
+# renders the `---` as a rule and the rest as prose), so its held lines are
+# checked as prose after all.
+function flush(   k) {
+  if (!fm) return
+  fm = 0
+  check("---", fmfile, 1)
+  for (k = 1; k <= nheld; k++) check(held[k], fmfile, k + 1)
+}
+{ sub(/\r$/, "") }
+FNR == 1 {
+  flush()
+  fence = ""; cmt = 0; nheld = 0
+  if ($0 == "---") { fm = 1; fmfile = FILENAME; next }
+}
+fm {
+  if ($0 == "---") fm = 0
+  else held[++nheld] = $0
   next
 }
-match($0, /^[ \t]*(```+|~~~+)/) { f = substr($0, RSTART, RLENGTH); gsub(/[ \t]/, "", f); fence = f; next }
-cmt { if (index($0, "-->")) cmt = 0; next }
-/^[ \t]*<!--/ { if (!index($0, "-->")) cmt = 1; next }
-/^[ \t]*<\/?[A-Za-z][A-Za-z0-9-]*([ \t>\/]|$)/ { next }
-/^[ \t]*[|]/ { next }
-/^ {0,3}#{1,6}([ \t]|$)/ { next }
-/^ {0,3}\[[^]]+\]:/ { next }
-cols($0) > W && tokens($0) > 1 { print FILENAME ":" FNR ":" $0 }
+{ check($0, FILENAME, FNR) }
+END { flush() }
 '
 if out=$(find "${prose[@]}" -type f -name '*.md' \
     -exec awk -v W="$md_width" "$md_width_awk" {} + 2>&1); then
