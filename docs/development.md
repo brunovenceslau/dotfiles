@@ -98,7 +98,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make gitleaks` | `gitleaks dir .` | The same question asked again, with [gitleaks](https://gitleaks.io/)' maintained rule set, over the working directory as it is on disk. |
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
-| `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference definition and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
+| `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference link and definition, HTML `href` and `src`, and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
 | `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck | Everything CI runs. |
 | `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
@@ -438,31 +438,41 @@ Out of scope, explicitly: the `precmd` window. `precmd` never fires under
 ### What `make linkcheck` checks
 
 `tests/linkcheck.py` reads what git tracks, never a directory walk: every
-`*.md` file, plus the issue-form YAML under `.github/ISSUE_TEMPLATE/`. It lives
-under `tests/` rather than `bin/` because the installer links every `bin/` tool
-onto the user's `PATH` except a fixed list of gates, and growing that list is a
+`*.md` file, plus the issue-form YAML under `.github/ISSUE_TEMPLATE/`. A
+tracked symlink is skipped, never followed. The script lives under `tests/`
+rather than `bin/` because the installer links every `bin/` tool onto the
+user's `PATH` except a fixed list of gates, and growing that list is a
 link-convention change.
 
-- A relative link, image or reference definition must name a tracked file, or
+- The target of an inline link, an image, a reference definition, and the
+  `href` or `src` of an HTML `<a>` or `<img>` tag must name a tracked file, or
   a directory holding one, inside the repository. A file that exists only on
   your machine (a gitignored `.local` file) fails, because GitHub renders the
   tracked tree, and so does a path that differs from the tracked one only in
-  case. A root-absolute path (`/docs/x.md`) fails too.
+  case. A root-absolute path (`/docs/x.md`) fails too. A `?query` is dropped
+  before resolving.
+- A full or collapsed reference link (`[text][ref]`, `[text][]`) must have a
+  definition in the same file. A shortcut `[ref]` is not checked, since it
+  cannot be told apart from bracketed prose.
 - An `#anchor` into a Markdown file must match a heading under GitHub's slug
-  rule: the rendered text, lowercased, with punctuation and backticks dropped
-  and each space turned into `-`, a repeated heading numbered `-1`, `-2` in
-  order. An explicit `<a id="...">` counts too. An anchor into any other file,
-  such as a `#L10` line anchor, is not checked.
+  rule: the rendered text, lowercased, with punctuation dropped and each space
+  turned into `-`. Text inside a code span is kept as written, so
+  `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
+  `-1`, `-2` in order, the way github-slugger numbers it. An explicit
+  `<a id="...">` counts too. An anchor into any other file, such as a `#L10`
+  line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
-- A link inside a fenced code block or an inline code span is not a link and
-  is ignored. A link whose text wraps across lines is still found. Every other
-  URL scheme is out of scope, since the gate never touches the network.
+- Front matter, fenced code blocks (running to the end of the file when never
+  closed, as GitHub renders them), indented code blocks, inline code spans and
+  HTML comments are not prose, so a link inside one is ignored. A link whose
+  text wraps across lines is still found. Every other URL scheme is out of
+  scope, since the gate never touches the network.
 
-It exits 1 on a broken link, printing `FILE:LINE: reason: target`, and 2 when it
-cannot run: the root is not a checkout's toplevel, git fails or warns, or a
-file is unreadable or not UTF-8. `tests/linkcheck_test.sh` proves each rule
-against a fixture.
+It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
+bytes escaped, and 2 when it cannot run: the root is not a checkout's
+toplevel, git fails or warns, or a file is unreadable or not UTF-8.
+`tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ## CI
 
