@@ -15,7 +15,7 @@ same tracked set:
 
   - the target of an inline link `[text](path#anchor)`, an image, a
     reference definition `[ref]: path`, and the `href` or `src` of an HTML
-    `<a>` or `<img>` tag must name a tracked file, or a directory holding one,
+    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked file, or a directory holding one,
     inside ROOT. An untracked file on this machine does not count: GitHub
     renders the tracked tree, so a link to a gitignored `.local` file is broken
     there even though it resolves here. Case is compared exactly for the same
@@ -36,7 +36,10 @@ same tracked set:
 Not links, so ignored: anything in YAML front matter, a fenced code block
 (backticks or tildes, at any indent, running to the end of the file when never
 closed, as GitHub renders it), an indented code block, an inline code span and
-an HTML comment. A link whose text wraps across lines is still found. External
+an HTML comment (also running to the end of the file when never closed).
+Front matter that never closes is not front matter: GitHub renders its `---`
+as a rule and the rest as prose, so its links are checked. A CR before a LF
+is not part of a line. A link whose text wraps across lines is still found. External
 URLs (any other scheme, `mailto:` included) are out of scope: this gate never
 touches the network, so its answer depends only on the tree.
 
@@ -76,14 +79,15 @@ TEXT = r"((?:[^\[\]\n]|\n(?![ \t]*\n)|\[[^\[\]]*\])*)"
 LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
 REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[([^\[\]]*)\]")
 REFDEF = re.compile(r"^ {0,3}\[([^\]]+)\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.M)
-HTML_TARGET = re.compile(r"<(?:a|img)\b[^>]*?\s(?:href|src)\s*=\s*\"([^\"]*)\"", re.I)
+# An `<a` or `<img` tag opener; its attributes are read up to the tag's own
+# `>` (found with str.find, so an unclosed tag costs one scan, not one per
+# opener), and a value may be double- or single-quoted.
+HTML_TAG = re.compile(r"<(?:a|img)(?=[\s>/])", re.I)
+# A value is capped at 2048 characters, so an unclosed quote scans a bounded
+# stretch rather than the rest of the tag once per attribute.
+HTML_ATTR = re.compile(r"\s(?:href|src)\s*=\s*(?:\"([^\"]{0,2048})\"|'([^']{0,2048})')", re.I)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-# A code span (a run of N backticks to the next run of exactly N, within one
-# paragraph) or an HTML comment. One alternation, so whichever opens first
-# wins: a `<!--` inside a code span is text, and a backtick inside a comment
-# opens nothing.
-CODE_OR_COMMENT = re.compile(
-    r"(?P<code>(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n).)*?[^`]\2(?!`))|(?P<cmt><!--.*?-->)", re.S)
+BLANK_LINE = re.compile(r"\n[ \t\r]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
 
 
@@ -190,13 +194,62 @@ def strip_code(text, spans=True):
             in_list = False
         out.append(ln)
         prev_blank, in_icode = False, False
-    text = "\n".join(out)
+    return blank_spans(("\n".join(out)), spans)
 
-    def sub(m):
-        if m.group("cmt") is not None or spans:
-            return blank(m.group(0))
-        return m.group(0)
-    return CODE_OR_COMMENT.sub(sub, text)
+
+def blank_spans(text, spans):
+    """Blank HTML comments, and with spans code spans, in one left-to-right
+    pass: whichever opens first wins, so a `<!--` inside a code span is text
+    and a backtick inside a comment opens nothing. A code span is a run of N
+    backticks up to the next run of exactly N in the same paragraph; a run
+    with no partner is literal text. A comment never closed runs to the end
+    of the file, as an HTML block does. Every search is a str.find from the
+    current position, and a paragraph's end is found once per paragraph, so
+    hostile input (many openers, none closed) stays near-linear."""
+    n = len(text)
+    ends = [m.start() for m in BLANK_LINE.finditer(text)] + [n]
+    pieces, i, e = [], 0, 0
+    while i < n:
+        a = text.find("`", i)
+        c = text.find("<!--", i)
+        if a < 0 and c < 0:
+            break
+        if c >= 0 and (a < 0 or c < a):
+            close = text.find("-->", c + 4)
+            end = n if close < 0 else close + 3
+            pieces.append(text[i:c])
+            pieces.append(blank(text[c:end]))
+            i = end
+            continue
+        k = a
+        while k < n and text[k] == "`":
+            k += 1
+        run = k - a
+        while ends[e] < a:
+            e += 1
+        limit = ends[e]
+        j, close = k, -1
+        while True:
+            j = text.find("`" * run, j, limit)
+            if j < 0:
+                break
+            r = j + run
+            while r < n and text[r] == "`":
+                r += 1
+            if r - j == run:
+                close = j
+                break
+            j = r   # a longer run: skip all of it
+        if close < 0:
+            pieces.append(text[i:k])   # an unmatched run is literal backticks
+            i = k
+            continue
+        pieces.append(text[i:a])
+        span = text[a:close + run]
+        pieces.append(blank(span) if spans else span)
+        i = close + run
+    pieces.append(text[i:])
+    return "".join(pieces)
 
 
 def _render_inline(s):
@@ -355,8 +408,16 @@ def check_file(tree, rel):
     for m in REFDEF.finditer(code_free):
         labels.add(ref_label(m.group(1)))
         targets.append((m.start(2), m.group(2)))
-    for m in HTML_TARGET.finditer(code_free):
-        targets.append((m.start(1), m.group(1)))
+    gt = -1
+    for m in HTML_TAG.finditer(code_free):
+        if m.start() < gt:
+            continue   # inside the previous tag, so an attribute, not a tag
+        gt = code_free.find(">", m.end())
+        if gt < 0:
+            break   # no later tag can close either
+        for a in HTML_ATTR.finditer(code_free, m.end() - 1, gt):
+            g = 1 if a.group(1) is not None else 2
+            targets.append((a.start(g), a.group(g)))
     for m in REFLINK.finditer(code_free):
         label = m.group(2) if m.group(2).strip() else m.group(1)
         if ref_label(label) not in labels:

@@ -264,6 +264,87 @@ run
 [ "$rc" = 0 ] || fail "a tracked symlink must be skipped, not followed (exit $rc): $out"
 ok "a tracked Markdown symlink is skipped, not followed out of the repository"
 
+# CRLF files: a CRLF heading is an anchor, a CR inside wrapped link text is
+# harmless, and a link after CRLF front matter is reported at its own line.
+new_tree
+printf '## Crlf Head\r\n\r\nSetext Head\r\n===\r\n\r\nSee [wrapped\r\ntext](#crlf-head) and [s](#setext-head).\r\n' >"$work/r/docs/crlf.md"
+printf -- '---\r\nx: [fm](fm-gone.md)\r\n---\r\n\r\n[gone](gone.md)\r\n' >"$work/r/docs/crlf-fm.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] || fail "CRLF: expected exactly the front-matter case to fail (exit $rc): $out"
+grep -qx 'docs/crlf-fm.md:5: no such tracked file or directory: gone.md' <<<"$out" \
+  || fail "CRLF: a link after CRLF front matter must be reported at line 5: $out"
+if grep -Eq 'docs/crlf\.md|fm-gone' <<<"$out"; then
+  fail "CRLF: a heading anchor, the wrapped link or a link in the front matter failed: $out"
+fi
+ok "CRLF headings, wrapped link text and front matter behave like LF ones"
+
+# An HTML comment that never closes runs to the end of the file.
+new_tree
+printf '<!-- open
+[a](cmt-missing.md)
+
+[b](cmt-missing-2.md)
+' >"$work/r/docs/open-cmt.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an unclosed HTML comment must hide the rest of the file (exit $rc): $out"
+ok "an unclosed HTML comment runs to the end of the file"
+
+# Front matter that never closes is prose, so its links are checked.
+new_tree
+printf -- '---\nx: y\n[gone](gone.md)\n' >"$work/r/docs/open-fm.md"
+git -C "$work/r" add -A
+run
+grep -qx 'docs/open-fm.md:3: no such tracked file or directory: gone.md' <<<"$out" \
+  || fail "an unclosed front matter must be read as prose (exit $rc): $out"
+ok "front matter that never closes is prose"
+
+# A Unicode heading slugs to its letters; a tab-indented fence hides its
+# links; a mailto: link is external and ignored; a single-quoted src is read.
+new_tree
+printf '## Caf\303\251 \303\234bersicht\n\n[u](#caf\303\251-\303\274bersicht) [m](mailto:nobody@example.com)\n\n\t```\n[x](tab-fence-missing.md)\n\t```\n' >"$work/r/docs/uni.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a Unicode anchor, a mailto: link and a tab-indented fence must pass (exit $rc): $out"
+ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
+expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
+  'no such tracked file or directory: docs/missing\.png' \
+  "a single-quoted HTML src is checked"
+
+# Hostile input stays near-linear: many unclosed comment openers, tag
+# openers with no `>`, unclosed quotes, backtick runs of every length and
+# unclosed brackets, 100 to 200 KB each. The previous regexes were quadratic
+# here (measured: 24.6 s over the same shapes at half these sizes, so about
+# 100 s at these), while the str.find scanners take well under a second, so
+# the 30 s bound separates the two with room for a slow runner.
+# shellcheck source=tests/lib/bounded_run.sh
+. "$repo_root/tests/lib/bounded_run.sh"
+new_tree
+python3 -I - "$work/r/docs" <<'PY'
+import os, sys
+d = sys.argv[1]
+shapes = {
+    "h1.md": "<!-- x " * 30000,
+    "h2.md": '<a title="x ' * 18000,
+    "h3.md": "<img href='" * 18000,
+    "h4.md": "".join("`" * k + " x " for k in range(1, 450)),
+    "h5.md": "[" * 100000,
+    "h6.md": "<a " * 60000 + ">",
+}
+for name, body in shapes.items():
+    with open(os.path.join(d, name), "w") as f:
+        f.write(body + "\n")
+PY
+git -C "$work/r" add -A
+bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
+  || fail "hostile input: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
+  || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
+  || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
+ok "hostile input (unclosed comments, tags, quotes, backtick runs, brackets) finishes in bounded time"
+
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
 rc=0; out="$(python3 -I "$gate" "$work/plain" 2>&1)" || rc=$?
