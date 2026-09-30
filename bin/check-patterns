@@ -8,7 +8,7 @@
 # check-patterns - static-pattern lint gate over the dotfiles' own surface.
 #
 # The static-pattern component that `make check-patterns` runs and
-#   `make lint` includes. Fourteen checks across our OWN runtime surface
+#   `make lint` includes. Fifteen checks across our OWN runtime surface
 #   (the SHA-pinned zsh plugin submodules are third-party and excluded by their
 #   one exact path, zsh/plugins - we police our code, not upstream's):
 #     (1) a curl or wget download piped into sh or bash (or otherwise executed
@@ -85,6 +85,9 @@
 #         cdpath, fpath, manpath, module_path or their scalars in zsh/ -
 #         a local copy keeps its tie and rewrites the command search path
 #         for the whole call; a loop variable overwrites the global.
+#    (15) a Markdown prose line over 80 columns, outside code, tables,
+#         headings and HTML, and unless one unbreakable token (a URL, a
+#         code span, a whole link) alone makes it long.
 #
 # FAILS CLOSED. The earlier inline Makefile recipe passed `$(PATTERN_SCAN)`
 #   verbatim to grep, including the optional (and usually absent) `home/`. A
@@ -1736,6 +1739,124 @@ if [ "${#tied_scan[@]}" -gt 0 ]; then
       bad=1; fatal=1
     fi
   fi
+fi
+
+# (15) hold the prose of every Markdown file to 80 columns. A long line is
+# unreadable in a terminal, a side-by-side diff and a review comment, and a
+# paragraph rewrapped by hand drifts past the limit one edit at a time.
+# SURFACE: every `*.md` file under `prose`, arm (11)'s surface, so
+# CODE_OF_CONDUCT.md (verbatim upstream text) is out, and the pinned
+# zsh/plugins with it. No Markdown file is generated today (release notes
+# exist only on the GitHub release, see cliff.toml); a generated one must
+# leave by its exact path, the way arm (11) drops lazy-lock.json.
+# WIDTH is characters, not bytes: under LC_ALL=C awk's length() counts
+# bytes, so the UTF-8 continuation bytes (0x80-0xBF) are deleted first.
+# EXEMPT, because a reflow cannot fix them or would change what renders:
+#   - YAML front matter (a first line `---`, up to the next `---`);
+#   - a fenced code block, fences included, at any indent (a fence inside a
+#     list item sits past column 3); it closes on the same character, at
+#     least as long, alone on its line;
+#   - a table row (first non-blank character `|`), a heading (`#` to
+#     `######`), a link reference definition (`[ref]: target`), an HTML
+#     comment (the SPDX header), and a line opening with an HTML tag;
+#   - a line that holds ONE unbreakable token once its indent, `>` quote
+#     markers and list marker are set aside. A token runs from one space to
+#     the next, except that a code span and a whole link or image
+#     (`[text](dest)`) never break: wrapping one spills a command or a URL
+#     across lines. So a long URL, code span or link alone on its line
+#     passes, and one sharing its line with other words fails, since moving
+#     it to its own line fixes the overflow.
+# A line with two or more tokens over the limit can always be rewrapped, so
+# every hit is fixable by a pure reflow with no word changed.
+# Read as prose, so held to the limit: a Setext heading's text line, a line
+# inside a multi-line HTML block that does not itself open with a tag, and an
+# indented (4-space) code block.
+md_width=80
+# shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
+md_width_awk='
+function cols(s,   t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+function skipcode(s, i, n,   run, j, r) {
+  run = 0
+  while (i <= n && substr(s, i, 1) == "`") { run++; i++ }
+  j = i
+  while (j <= n) {
+    if (substr(s, j, 1) == "`") {
+      r = 0
+      while (j <= n && substr(s, j, 1) == "`") { r++; j++ }
+      if (r == run) return j
+    } else j++
+  }
+  return i
+}
+function skiplink(s, i, n,   d, c) {
+  if (substr(s, i, 1) == "!") i++
+  d = 0
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c == "`") { i = skipcode(s, i, n); continue }
+    if (c == "\\") { i += 2; continue }
+    if (c == "[") d++
+    else if (c == "]") { d--; if (d == 0) { i++; break } }
+    i++
+  }
+  if (d != 0 || substr(s, i, 1) != "(") return 0
+  d = 0
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c == "(") d++
+    else if (c == ")") { d--; if (d == 0) return i + 1 }
+    i++
+  }
+  return 0
+}
+function tokens(s,   i, n, c, a, intok, j) {
+  sub(/^[ \t]+/, "", s)
+  while (match(s, /^>[ \t]*/)) s = substr(s, RLENGTH + 1)
+  if (match(s, /^([-*+]|[0-9]+[.)])[ \t]+/)) s = substr(s, RLENGTH + 1)
+  n = length(s); a = 0; intok = 0; i = 1
+  while (i <= n) {
+    c = substr(s, i, 1)
+    if (c == " " || c == "\t") { intok = 0; i++; continue }
+    if (!intok) { a++; intok = 1 }
+    if (c == "`") { i = skipcode(s, i, n); continue }
+    if (c == "[" || (c == "!" && substr(s, i + 1, 1) == "[")) {
+      j = skiplink(s, i, n)
+      if (j) { i = j; continue }
+    }
+    i++
+  }
+  return a
+}
+FNR == 1 { fm = 0; fence = ""; cmt = 0; if ($0 == "---") { fm = 1; next } }
+fm { if ($0 == "---") fm = 0; next }
+fence != "" {
+  if (match($0, /^[ \t]*(```+|~~~+)[ \t]*$/)) {
+    f = $0; gsub(/[ \t]/, "", f)
+    if (substr(f, 1, 1) == substr(fence, 1, 1) && length(f) >= length(fence)) fence = ""
+  }
+  next
+}
+match($0, /^[ \t]*(```+|~~~+)/) { f = substr($0, RSTART, RLENGTH); gsub(/[ \t]/, "", f); fence = f; next }
+cmt { if (index($0, "-->")) cmt = 0; next }
+/^[ \t]*<!--/ { if (!index($0, "-->")) cmt = 1; next }
+/^[ \t]*<\/?[A-Za-z][A-Za-z0-9-]*([ \t>\/]|$)/ { next }
+/^[ \t]*[|]/ { next }
+/^ {0,3}#{1,6}([ \t]|$)/ { next }
+/^ {0,3}\[[^]]+\]:/ { next }
+cols($0) > W && tokens($0) > 1 { print FILENAME ":" FNR ":" $0 }
+'
+if out=$(find "${prose[@]}" -type f -name '*.md' \
+    -exec awk -v W="$md_width" "$md_width_awk" {} + 2>&1); then
+  if [ -n "$out" ]; then
+    _err "$out" \
+      "check-patterns: a Markdown prose line over $md_width columns - rewrap the paragraph (a table row, heading, fenced block, HTML line, or a line holding one unbreakable URL, code span or link is exempt)"
+    bad=1
+  fi
+else
+  rc=$?
+  _err "$out" \
+    "check-patterns: Markdown line-width scan errored (exit $rc) - failing closed"
+  bad=1; fatal=1
 fi
 
 # The fatal mark: a sanitizer failure or a re-test error inside a `$(...)`

@@ -42,6 +42,9 @@ table, ends up serving neither well.
   failed link and leaves the target untouched" does.
 - **No em dash.** Break the sentence into two, or use a comma, a colon, a
   parenthesis, or a plain "-" instead.
+- **Wrap prose at 80 columns.** `make check-patterns` fails a longer prose
+  line. A table row, a heading, a code block, or a line holding one URL, code
+  span or link too long to break is exempt.
 
 This standard governs documentation only. Code comments follow the opposite
 economy: a comment explains the CONSTRAINT, never the obvious.
