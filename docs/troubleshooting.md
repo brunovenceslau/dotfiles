@@ -34,6 +34,7 @@ this page no longer exists in the code.
 | `backed up <path> -> <path>.bak` for links another checkout made, or `link: not recording the target of` | [Links from another checkout were backed up](#links-from-another-checkout-were-backed-up) |
 | `packages: Homebrew is not installed` | [Packages will not install](#packages-will-not-install) |
 | Uninstall left files behind | [Uninstall left something behind](#uninstall-left-something-behind) |
+| `install: refusing to run as root`, or `install: cannot tell who is running this` | [Install refuses to run as root](#install-refuses-to-run-as-root) |
 | tmux says `missing or unsuitable terminal`, or typed input echoes twice | [Terminal type is not recognized](#terminal-type-is-not-recognized) |
 | `make lint` fails with `check-patterns: an entry under zsh/plugins/ that is not a pinned plugin` | [check-patterns rejects a file under zsh/plugins](#check-patterns-rejects-a-file-under-zshplugins) |
 
@@ -538,12 +539,15 @@ Two things are left on purpose, with no message:
 - `~/.config/git/config`, the machine-local git config the installer wrote. It
   is where `git config --global` writes, so it can hold your own settings.
   Delete it by hand if you no longer want it.
-- An empty directory the uninstall did not empty itself. Directories are pruned
-  only when a removed link leaves them empty.
+- A directory the uninstall did not empty itself. Directories are pruned only
+  when a removed link leaves them empty, so one still holding a `.local` file
+  stays. That is intended: `.local` files are never removed.
 
 `--purge` does **not** leave your shell history: it deletes
 `$XDG_STATE_HOME/zsh`, which holds it. See
 [Uninstalling](../README.md#uninstalling).
+
+## Install refuses to run as root
 
 ```
 install: refusing to run as root - run it as the owning user; sudo is never needed here
@@ -559,9 +563,6 @@ other two messages mean the check could not read the uid from `/usr/bin/id` (the
 installer does not run there.
 
 **Fix.** Run the command as the owning user. Sudo is never needed.
-
-Directories are pruned only while they are empty, so a directory holding a
-`.local` file stays. That is intended: `.local` files are never removed.
 
 ## Manifest keeps an entry the framework may not act on
 

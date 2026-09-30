@@ -40,6 +40,10 @@ unicode="$work/dir-世界"; mkdir -p "$unicode"
 missing="$work/does-not-exist"
 dangling="$work/dangling-symlink"; ln -s "$work/nowhere" "$dangling"
 symlink_to_dir="$work/symlink-to-dir"; ln -s "$dir" "$symlink_to_dir"
+# An option-like name: a directory that really exists at the RELATIVE path -foo
+# (the rc_in cases below run from $work), so a rejection is the argument
+# contract, not a missing path.
+mkdir -p "$work/-foo"
 
 # rc ARG... - the exit code _path_exists gives when called with exactly these
 # arguments (zero or more), evaluated in a fresh, empty-PATH zsh so nothing on
@@ -50,6 +54,8 @@ rc() {
     _path_exists \"\$@\"
     exit \$?" _ "$@"
 }
+# rc_in DIR ARG... - rc, run from DIR, for the cases that need a relative path.
+rc_in() { local d="$1"; shift; (cd "$d" && rc "$@"); }
 
 # --- table: DESCRIPTION | EXPECT_RC | ARG... ----------------------------------
 t() { # DESC EXPECT ARG...
@@ -70,8 +76,8 @@ t "empty argument, default (-e)"       1 ""
 t "empty argument, -d"                 1 -d ""
 t "path with spaces, default (-e)"     0 "$spaced"
 t "path with spaces, -d"               0 -d "$spaced"
-t "path with unicode name, default (-e)" 0 "$unicode"
-t "path with unicode name, -d"         0 -d "$unicode"
+t "directory with a unicode name, default (-e)" 0 "$unicode"
+t "directory with a unicode name, -d"  0 -d "$unicode"
 t "dangling symlink, default (-e)"     1 "$dangling"
 t "dangling symlink, -d"               1 -d "$dangling"
 t "symlink to a directory, default"    0 "$symlink_to_dir"
@@ -80,29 +86,44 @@ t "symlink to a directory, -d"         0 -d "$symlink_to_dir"
 # -- rejected calls: rc 2, no output -------------------------------------------
 t "no arguments at all"                2
 t "-d given but PATH missing"          2 -d
-t "lone operand starting with -, not a known flag" 2 -foo
+t "lone argument starting with - (read as a flag)" 2 -foo
 t "unknown flag -f"                    2 -f "$file"
 t "flag in trailing (wrong) position"  2 "$file" -d
 t "two non-flag arguments"             2 "$file" "$spaced"
 t "too many arguments"                 2 -d "$file" extra
 
+# -- an option-like path: the relative directory -foo exists -------------------
+t_in() { # DESC EXPECT ARG... - t, run from $work
+  local desc="$1" expect="$2" got=0
+  shift 2
+  rc_in "$work" "$@" && got=0 || got=$?
+  ck "$desc" "$got" "$expect"
+}
+t_in "existing -foo, lone: still a flag, rc 2" 2 -foo
+t_in "existing -foo after -d: a path"  0 -d -foo
+t_in "existing -foo spelled ./-foo"    0 ./-foo
+
 # --- no output on stdout or stderr, valid AND rejected calls alike -----------
-check_silent() { # LABEL ARG...
-  local label="$1"; shift
+check_silent_in() { # DIR LABEL ARG... - check_silent, run from DIR
+  local dir="$1" label="$2"; shift 2
   outfile="$work/out"; errfile="$work/err"
-  env -i HOME="$fakehome" PATH="$empty" "$zsh_bin" -f -c "
+  (cd "$dir" && env -i HOME="$fakehome" PATH="$empty" "$zsh_bin" -f -c "
     source '$repo_root/zsh/zshenv'
-    _path_exists \"\$@\"" _ "$@" \
+    _path_exists \"\$@\"" _ "$@") \
     >"$outfile" 2>"$errfile" || true
   ck "no stdout for $label" "$(wc -c <"$outfile" | tr -d ' ')" "0"
   ck "no stderr for $label" "$(wc -c <"$errfile" | tr -d ' ')" "0"
 }
+check_silent() { check_silent_in . "$@"; } # LABEL ARG...
 check_silent "directory"                "$dir"
 check_silent "-d directory"             -d "$dir"
 check_silent "regular file"             "$file"
 check_silent "missing path"             "$missing"
 check_silent "empty argument"           ""
 check_silent "path with spaces"         "$spaced"
+check_silent "unicode directory"        "$unicode"
+check_silent_in "$work" "lone -foo"     -foo
+check_silent_in "$work" "-d -foo"       -d -foo
 check_silent "dangling symlink"         "$dangling"
 check_silent "symlink to a directory"   -d "$symlink_to_dir"
 check_silent "no arguments"

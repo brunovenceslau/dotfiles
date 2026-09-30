@@ -39,8 +39,8 @@ awk '/^```/ { inblock = !inblock; next }
      inblock && /^(install|dotfiles): / { sub(/^install: /, ""); print }' "$doc" > "$work/msgs"
 # 2. Backtick spans with a message prefix (one span per line of output).
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
-  | grep -E '^(upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
-  >> "$work/msgs" || true
+  | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
+  | sed 's/^install: //' >> "$work/msgs" || true
 
 count="$(grep -c . "$work/msgs" || true)"
 [ "$count" -ge 15 ] || fail "extracted only $count messages from the page (extraction rot?)"

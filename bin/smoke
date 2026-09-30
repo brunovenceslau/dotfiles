@@ -18,14 +18,15 @@
 #   tree lives under .smoke/ (gitignored, in-repo), so this driver never writes
 #   outside ~/.config/dotfiles and never needs a real $HOME.
 #
-# Kept bash 3.2 compatible (no associative arrays, no mapfile, no
-#   ${var,,}) so it behaves identically on the macOS CI legs. But note the
-#   enforcement mechanism does NOT cover this file: `make smoke` execs it via its
-#   own shebang (`#!/usr/bin/env bash`) - the first bash on PATH, a Homebrew bash 5
-#   on the macOS runners, not /bin/bash - and the `/bin/bash -n` gate
-#   scopes to install.sh, lib/ and tests/, never bin/. So staying 3.2-clean here is a discipline,
-#   not a CI-caught property. The installer UNDER TEST is separately invoked via an
-#   explicit /bin/bash, which on the macOS legs IS the real 3.2 - so the smoke does
+# Which bash runs this: `make smoke` execs it through its own shebang
+#   (`#!/usr/bin/env bash`), so it is the first bash on PATH - a Homebrew bash 5
+#   on the macOS runners, not /bin/bash (CI prints both versions in its log).
+#   bin/ is exempt from the bash 3.2 rule, and the `/bin/bash -n` gate scopes
+#   to install.sh, lib/ and tests/, never bin/. It is still kept 3.2-clean (no
+#   associative arrays, no mapfile, no ${var,,}) so it behaves the same under
+#   any bash a leg puts first on PATH; that is a discipline, not a CI-caught
+#   property. The installer UNDER TEST is invoked separately via an explicit
+#   /bin/bash, which on the macOS legs IS the real 3.2, so the smoke does
 #   exercise the 3.2 interpreter at install time.
 #
 # This PRE-SEEDS the compinit 24h stamp so the zshrc takes its warm
@@ -179,9 +180,16 @@ _local_modules_gitdir() {
 # tar and bsdtar accept different sets and an unknown flag is an error.
 _tar_copy() {
   local src="$1" dst="$2" errc="$2.tar-create.err" errx="$2.tar-extract.err" f
-  local -a skip
+  local -a skip ents
   shift 2
   skip=()
+  # Every NAME goes to tar as ./NAME: a working-tree entry whose name starts
+  # with `-`, or with `@` on bsdtar (`@x.tar` reads as "add this archive's
+  # entries"), is otherwise read as a tar OPTION, silently changing what is
+  # copied (or failing it, or running a GNU --checkpoint-action command)
+  # instead of naming a file.
+  ents=()
+  for f in "$@"; do ents[${#ents[@]}]="./$f"; done
   # The probe archives an empty directory: a real, portable create that every
   # tar accepts, so only an unknown flag can fail it.
   mkdir -p "$dst.tar-probe" || return 1
@@ -190,7 +198,7 @@ _tar_copy() {
   done
   rmdir "$dst.tar-probe" || return 1
   # ${skip[@]+...}: bash 3.2 under `set -u` treats an empty array as unbound.
-  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - "$@") 2>"$errc" \
+  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - ${ents[@]+"${ents[@]}"}) 2>"$errc" \
       | (cd "$dst" && tar ${skip[@]+"${skip[@]}"} -xpf -) 2>"$errx" \
       && [ ! -s "$errc" ] && [ ! -s "$errx" ]; then
     rm -f "$errc" "$errx"
