@@ -340,10 +340,11 @@ are in [development](docs/development.md). Participation is covered by the
 
 ## Credits
 
-The framework began as a port of a [prezto](https://github.com/sorin-ionescu/prezto)
-setup, and two blocks of prezto's code are still in it: the `ls` listing aliases
-in `zsh/aliases.zsh` and the compsys styling in `zsh/zshrc`. The `$LS_COLORS`
-palette is the GNU coreutils `dircolors` database, and the Neovim bootstrap is
+The framework began as a port of a
+[prezto](https://github.com/sorin-ionescu/prezto) setup, and two blocks of
+prezto's code are still in it: the `ls` listing aliases in `zsh/aliases.zsh` and
+the compsys styling in `zsh/zshrc`. The `$LS_COLORS` palette is the GNU
+coreutils `dircolors` database, and the Neovim bootstrap is
 [lazy.nvim](https://github.com/folke/lazy.nvim)'s own installation recipe.
 
 Each of those blocks is bracketed in place by `SPDX-SnippetBegin` and
