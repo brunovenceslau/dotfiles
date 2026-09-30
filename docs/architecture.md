@@ -51,7 +51,7 @@ Four constraints shape every decision here.
 ```
 ~/.config/dotfiles
 ├── install.sh          bootstrap: install | link | packages | upgrade | uninstall
-├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci, repo-settings-check
+├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, linkcheck, local-ci, repo-settings-check
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
@@ -71,7 +71,8 @@ Four constraints shape every decision here.
 │   └── plugins/        three SHA-pinned git submodules
 ├── config/             linked to ~/.config/<prog>, with three exceptions
 ├── packages/           Brewfile and gh-extensions.txt
-├── tests/              hermetic unit tests, never touch the real $HOME
+├── tests/              hermetic unit tests, never touch the real $HOME, and
+│                       linkcheck.py, the docs link gate (run by make)
 └── docs/               this documentation
 ```
 
@@ -246,8 +247,8 @@ as it does the manifest, and `--purge` removes both with
   1), or one that could not be removed or restored stays in the manifest and
   keeps its pair, so a later uninstall still sees it.
 - A **partial run** (a refused link, or an interrupt) merges instead of
-  replacing. The result is a superset, which can never orphan a link. It does not
-  prune, because on a partial run "not produced" does not imply "no longer
+  replacing. The result is a superset, which can never orphan a link. It does
+  not prune, because on a partial run "not produced" does not imply "no longer
   wanted".
 
 `dotfiles-uninstall` reads the manifest and, for each entry:
@@ -282,8 +283,8 @@ The ordering rule is the same everywhere: the tracked file loads first, the
 
 ## The interactive startup path
 
-`~/.zshenv` runs for every zsh, including scripts and git hooks, so it holds only
-exports: the XDG variables, `ZDOTDIR`, `EDITOR`, `PAGER`, `LESS`,
+`~/.zshenv` runs for every zsh, including scripts and git hooks, so it holds
+only exports: the XDG variables, `ZDOTDIR`, `EDITOR`, `PAGER`, `LESS`,
 `STARSHIP_CONFIG`, `STARSHIP_CACHE`, a self-resolving `$DOTFILES`, and Go paths
 when present. It uses zsh parameter expansion, `$commands` lookups and `-d`
 tests only, so it forks nothing. `EDITOR`, `VISUAL` and `LESSOPEN` depend on
@@ -314,11 +315,11 @@ load-bearing, and the reasons are noted where they are not obvious.
 7. Run `compinit` against a cached, byte-compiled dump. A full rebuild with the
    insecure-directory audit runs at most once every 24 hours, gated on a
    dedicated stamp file rather than the dump's own mtime. During this block the
-   `zsh/files` builtin `mv` shadows the external one, because the compdump helper
-   calls `mv` and that was the last fork on the path. The audit itself forks
-   `getent` when an fpath directory is group- or world-writable, so `install.sh`
-   (the `install` and `link` subcommands) removes those permissions from
-   `zsh/plugins`, the only framework-owned directories on `fpath`.
+   `zsh/files` builtin `mv` shadows the external one, because the compdump
+   helper calls `mv` and that was the last fork on the path. The audit itself
+   forks `getent` when an fpath directory is group- or world-writable, so
+   `install.sh` (the `install` and `link` subcommands) removes those permissions
+   from `zsh/plugins`, the only framework-owned directories on `fpath`.
 8. Apply completion styling: menu selection, four matchers, `_approximate`
    correction on Tab, grouped and colored listings. The `list-colors` style uses
    the evaluated form because `$LS_COLORS` is exported later, by `aliases.zsh`.
@@ -329,13 +330,13 @@ load-bearing, and the reasons are noted where they are not obvious.
     `compinit`, because each registers a completion through `compdef`.
 11. Pin `FAST_WORK_DIR` under `$XDG_CACHE_HOME/zsh`, pre-seed its
     `secondary_theme.zsh` guard file, then source `zsh-autosuggestions` and
-    `fast-syntax-highlighting`, in that order. Highlighting loads last because it
-    wraps every widget defined before it.
+    `fast-syntax-highlighting`, in that order. Highlighting loads last because
+    it wraps every widget defined before it.
 12. Restore prezto's "this path exists" cue by setting
     `FAST_HIGHLIGHT_STYLES[path]` and `[path-to-dir]` to `underline`, after the
     loader, because the plugin assigns its defaults with `: ${...:=}`.
-13. Source `fzf.zsh`, which is a no-op without the `fzf` binary and skips the key
-    bindings when there is no controlling terminal.
+13. Source `fzf.zsh`, which is a no-op without the `fzf` binary and skips the
+    key bindings when there is no controlling terminal.
 14. Source Ghostty's shell integration manually. Automatic injection works by
     driving `ZDOTDIR`, which this framework already owns.
 15. Source `$ZDOTDIR/.zshrc.local`, the machine's last word.
@@ -351,17 +352,18 @@ load-bearing, and the reasons are noted where they are not obvious.
 `starship` and `zoxide` both ship their zsh wiring as a command to `eval`, which
 is a subprocess. `install.sh` runs `<tool> init zsh` once, on install and on
 every upgrade, and writes the output to `$XDG_CACHE_HOME/zsh/<tool>-init.zsh`.
-The zshrc only sources that file, guarded on the file existing rather than on the
-binary. A host without the binary gets no cache, and degrades silently to zsh's
-default prompt or to no `z`.
+The zshrc only sources that file, guarded on the file existing rather than on
+the binary. A host without the binary gets no cache, and degrades silently to
+zsh's default prompt or to no `z`.
 
 starship also writes a cache of its own: it creates its session-log directory on
-every call, `init` included. Its default is `~/.cache/starship`, outside the tree
-`--purge` removes. `zsh/zshenv` exports `STARSHIP_CACHE=$XDG_CACHE_HOME/zsh/starship`
-for the shell, and `install.sh` sets the same value on its own `starship init`
-call, because the installer runs in bash and never reads `zshenv`. The smoke
-test runs with a stub `starship` that writes to that directory, so a Linux run
-catches a cache that escapes the purge.
+every call, `init` included. Its default is `~/.cache/starship`, outside the
+tree `--purge` removes. `zsh/zshenv` exports
+`STARSHIP_CACHE=$XDG_CACHE_HOME/zsh/starship` for the shell, and `install.sh`
+sets the same value on its own `starship init` call, because the installer runs
+in bash and never reads `zshenv`. The smoke test runs with a stub `starship`
+that writes to that directory, so a Linux run catches a cache that escapes the
+purge.
 
 Both halves have to be wired as well as generated. The zoxide cache was produced
 for a long time while nothing sourced it, so `z` silently did not exist.
@@ -378,8 +380,9 @@ the cadence it spawns a fully detached `git fetch` that never blocks the prompt,
 and records the result in `$XDG_STATE_HOME/dotfiles`. A `precmd` hook then
 notifies on one prompt per shell and stays quiet afterwards. It has two notices,
 and a host can hit both on that prompt: updates are available, and no fetch has
-succeeded within the staleness window. Defaults are 3 days and 30 days, and both are
-configurable. See [troubleshooting](troubleshooting.md#update-notices-do-not-go-away).
+succeeded within the staleness window. Defaults are 3 days and 30 days, and both
+are configurable. See
+[troubleshooting](troubleshooting.md#update-notices-do-not-go-away).
 
 This is the only network access a shell start can cause. The fetch contacts the
 `origin` remote of your clone and nothing else: like the upgrade (below), it
@@ -407,10 +410,11 @@ static loader in the zshrc. There is no plugin manager and no runtime download.
 | `zsh-autosuggestions` | `e52ee8c` (v0.7.1) | History-based inline suggestions. No network at source time. |
 | `fast-syntax-highlighting` | `5ecd353` | Syntax colors. Sourced last so it wraps every widget. Needs the neutralization below. |
 
-Verify the pins with `git submodule status`. If they differ from this table, this
-section is stale. Any pin bump must re-audit the new source for source-time
+Verify the pins with `git submodule status`. If they differ from this table,
+this section is stale. Any pin bump must re-audit the new source for source-time
 `curl`, `wget`, `git fetch` or `/dev/tcp` use, and update this table in the same
-commit. A commit pin does not protect against code a plugin downloads at runtime.
+commit. A commit pin does not protect against code a plugin downloads at
+runtime.
 
 ### Neutralizing the fast-syntax-highlighting theme fetch
 
@@ -425,8 +429,9 @@ The zshrc closes this in three ways:
    `secondary_theme.zsh`, so the download branch is never entered. An empty file
    sources as a no-op.
 2. It shims `curl` and `wget` as failing shell functions for the duration of the
-   loader. This covers the case where `$XDG_CACHE_HOME` is not writable, the seed
-   write fails, and the plugin relocates its work directory to an unseeded path.
+   loader. This covers the case where `$XDG_CACHE_HOME` is not writable, the
+   seed write fails, and the plugin relocates its work directory to an unseeded
+   path.
 3. It shims `uname` as a function answering from `$OSTYPE`, because the plugin
    runs `$(uname -a)` at top level to probe for Darwin.
 
@@ -444,15 +449,15 @@ is the static half of the same rule.
 2. Refuses to continue when tracked files are modified. Untracked files are
    invisible to the check.
 3. Fetches through a wrapper that neutralizes ambient git configuration. The
-   global and system config files and the `GIT_CONFIG_*` environment families are
-   scrubbed, so a hostile `url.insteadOf` cannot redirect the fetch. Object fsck
-   is re-asserted on the command line, because scrubbing also drops the tracked
-   config that sets it.
+   global and system config files and the `GIT_CONFIG_*` environment families
+   are scrubbed, so a hostile `url.insteadOf` cannot redirect the fetch. Object
+   fsck is re-asserted on the command line, because scrubbing also drops the
+   tracked config that sets it.
 4. Re-injects only the credential helper, resolved for this remote from the XDG
    config, and runs with `GIT_TERMINAL_PROMPT=0` so a missing credential fails
    loudly instead of hanging on a prompt.
-5. Merges with `--ff-only`. A diverged or rewound history is refused, never reset
-   to. This is the anti-rollback property.
+5. Merges with `--ff-only`. A diverged or rewound history is refused, never
+   reset to. This is the anti-rollback property.
 6. Converges: updates submodules, runs `install.sh link` in a **fresh child
    process**, and byte-compiles stale plugin files.
 

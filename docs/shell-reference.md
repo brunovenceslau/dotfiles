@@ -119,8 +119,8 @@ Defined only when `kubectl` is present. The pickers also need `fzf`.
 | `kc [alias\|context]` | Switch context. With no argument, pick with fzf. An argument is resolved through `KUBE_CONTEXT_ALIASES` first. |
 | `kcn [context] [namespace]` | Both at once. |
 
-`KUBE_CONTEXT_ALIASES` is declared empty on purpose. Contexts are per-machine, so
-fill it in `$ZDOTDIR/functions.zsh.local`.
+`KUBE_CONTEXT_ALIASES` is declared empty on purpose. Contexts are per-machine,
+so fill it in `$ZDOTDIR/functions.zsh.local`.
 
 ## Aliases
 
@@ -198,8 +198,8 @@ The repository's own git config also defines `git pushf` as
 
 ### Tool fallbacks
 
-Each of these is defined only when the real tool is absent, so a Homebrew install
-always wins.
+Each of these is defined only when the real tool is absent, so a Homebrew
+install always wins.
 
 | Alias | Falls back to |
 | --- | --- |
@@ -356,13 +356,14 @@ tracked counterpart and overrides it.
 | `packages/Brewfile` | `packages/Brewfile.local` | Bundled after the tracked Brewfile. |
 | `packages/gh-extensions.txt` | `packages/gh-extensions.local.txt` | Read alongside the tracked manifest, under the same validation. |
 
-`~/.config/alacritty`, `~/.config/ghostty` and `~/.config/tmux` are symlinks into
-the repository, so a relative companion path resolves to the repository
+`~/.config/alacritty`, `~/.config/ghostty` and `~/.config/tmux` are symlinks
+into the repository, so a relative companion path resolves to the repository
 directory. `.gitignore` keeps `*.local` and `*.local.*` untracked while allowing
 the `*.example` templates.
 
 Templates: `zsh/.zshrc.local.example` (also linked next to `.zshrc`),
-`config/git/config.local.example`, `config/alacritty/alacritty.local.toml.example`,
+`config/git/config.local.example`,
+`config/alacritty/alacritty.local.toml.example`,
 `config/ghostty/config.local.example`, `config/tmux/tmux.local.conf.example`,
 `packages/Brewfile.local.example`.
 

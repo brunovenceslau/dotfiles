@@ -10,7 +10,7 @@
 # lib/os.sh, a hardcoded Homebrew prefix, a `brew shellenv` fork, bash 4 syntax
 # in the bash-3.2 surface, a `--` after a tool's first operand, a raw readlink
 # in lib/ outside _link_readlink's body, a -g-less local/typeset of zsh's
-# path specials, a symlink
+# path specials, a Markdown prose line over 80 columns, a symlink
 # where a recursive scan reads (on disk, always; tracked or an unpinned
 # submodule, repo-wide, in a real checkout), and its own fixtures'
 # git calls surviving a leaked GIT_DIR, and a report line carrying terminal
@@ -1192,19 +1192,20 @@ chmod u+x "$find_shim/find"
 # A FRESH shell: the shim must be the find a new process resolves.
 [ "$(PATH="$find_shim:$PATH" bash -c 'command -v find')" = "$find_shim/find" ] \
   || fail "the find shim is not the find a fresh process resolves"
-# Arm 12's file-name passes and the NUL-byte pass run find too, so each
+# Arm 12's file-name passes, the NUL-byte pass and arm 15 run find too, so each
 # reports its own error; no other message may fire. A scan error exits 2
 # (fail closed), never 1, which reads as "a violation was found".
 r="$work/sym-find-shim"; seed "$r"
 find_rc=0
 out="$(PATH="$find_shim:$PATH" STRICT= "$cp" "$r" 2>&1)" || find_rc=$?
 [ "$find_rc" = "2" ] && ok || fail "a failing find must exit 2 (a scan error), got $find_rc: $out"
-n_name_err=0; n_nul_err=0
+n_name_err=0; n_nul_err=0; n_md_err=0
 while IFS= read -r line; do
   case "$line" in
     "$sym_find_err_msg"* | "check-patterns: SKIP "*) ;;
     "check-patterns: file-name scan (find) errored"*) n_name_err=$((n_name_err + 1)) ;;
     "check-patterns: NUL-byte scan (find) errored"*) n_nul_err=$((n_nul_err + 1)) ;;
+    "check-patterns: Markdown line-width scan errored"*) n_md_err=$((n_md_err + 1)) ;;
     check-patterns:*) fail "a failing find: another message fired too: $line" ;;
   esac
 done <<<"$out"
@@ -1216,6 +1217,8 @@ esac
   || fail "a find that exits non-zero must fail closed both file-name passes (got $n_name_err): $out"
 [ "$n_nul_err" -eq 1 ] && ok \
   || fail "a find that exits non-zero must fail closed the NUL-byte pass (got $n_nul_err): $out"
+[ "$n_md_err" -eq 1 ] && ok \
+  || fail "a find that exits non-zero must fail closed arm 15's Markdown pass (got $n_md_err): $out"
 # ... and EACH find pass alone: a shim that fails only the call holding one
 # argument pair, so no other pass's exit 2 can stand in for this one's. Its
 # error names a path with OSC 52 in it, and that name must print ESCAPED on
@@ -1249,7 +1252,8 @@ for fo in '-type l|check-patterns: symlink scan (find) errored' \
     '-type f|check-patterns: NUL-byte scan (find) errored' \
     '-name *:*|check-patterns: file-name scan (find) errored' \
     '-name check-patterns|check-patterns: file-name scan (find) errored' \
-    '-maxdepth 1|check-patterns: zsh/plugins scan (find) errored'; do
+    '-maxdepth 1|check-patterns: zsh/plugins scan (find) errored' \
+    '-name *.md|check-patterns: Markdown line-width scan errored'; do
   fo_n=$((fo_n + 1))
   fo_rc=0
   out="$(PATH="$find_one:$PATH" FIND_FAIL_ON="${fo%%|*}" STRICT= "$cp" "$r" 2>&1)" || fo_rc=$?
@@ -1262,7 +1266,7 @@ for fo in '-type l|check-patterns: symlink scan (find) errored' \
     *) fail "a failing find ('${fo%%|*}' pass alone): expected its escaped error line right before '${fo#*|}', got: $out" ;;
   esac
 done
-[ "$fo_n" -eq 5 ] || fail "the per-find cases: expected 5 passes, ran $fo_n"
+[ "$fo_n" -eq 6 ] || fail "the per-find cases: expected 6 passes, ran $fo_n"
 
 # --- FAIL CLOSED: a corrupted git index fails the repo-wide git pass, not a
 # silent pass ("no symlinks") -------------------------------------------------
@@ -3296,6 +3300,236 @@ printf 'path=(/x $path)\n' > "$r/zsh/ok.zsh"
 [ "$(run "$r")" = "0" ] || fail "the tied-path grep-fault fixture must pass the real gate"
 PATH="$patfail:$PATH" PAT_FAIL_ON=cdpath \
   fails_with_rc 2 "$r" "check-patterns: tied-path declaration scan errored" "a failing tied-path scan must exit 2" only
+
+# === arm (15): Markdown prose held to 80 columns ===============================
+# Every hit must be fixable by a pure reflow, so each exemption is a line a
+# reflow cannot shorten (one unbreakable token) or must not touch (code,
+# tables, headings, HTML, front matter). Lines are built to an exact width,
+# so an off-by-one in the limit fails here.
+md_msg="check-patterns: a Markdown prose line over 80 columns"
+md_err_msg="check-patterns: Markdown line-width scan errored"
+# _md_words N - N columns of words: "aaaa aaaa ... a", exactly N characters.
+_md_words() {
+  local s=""
+  while [ "${#s}" -lt "$1" ]; do s="${s}aaaa "; done
+  s="${s:0:$1}"
+  [ "${s: -1}" != " " ] || s="${s%?}b"
+  printf '%s' "$s"
+}
+md80="$(_md_words 80)"; md81="$(_md_words 81)"
+[ "${#md80}" = 80 ] && [ "${#md81}" = 81 ] || fail "arm 15 fixture: _md_words built the wrong widths"
+_md_long_token="https://example.com/$(printf 'x%.0s' $(seq 1 90))"
+
+# exactly 80 columns passes; 81 fails and names the file and line.
+r="$work/mdw-80"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\n' "$md80" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "an 80-column prose line must pass arm 15"
+r="$work/mdw-81"; seed "$r"; mkdir -p "$r/docs"
+printf '# Title\n\n%s\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "an 81-column prose line must fail arm 15" only
+fails_with "$r" "/docs/x.md:3:" "arm 15 names the file and line of the long line"
+
+# width is characters, not bytes: 80 characters holding two-byte UTF-8 pass.
+r="$work/mdw-utf8"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\n' "$(_md_words 76) $(printf '\303\251\303\251\303\251')" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15 must count UTF-8 characters, not bytes"
+
+# ... and 81 of them fail. The micro, degree and section signs sit at the
+# edges of the continuation-byte range (their second bytes are 0xB5, 0xB0 and
+# 0xA7), so each is one column at 80 and a violation at 81.
+r="$work/mdw-utf8-81"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\n' "$(_md_words 77) $(printf '\303\251\303\251\303\251')" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "81 characters holding two-byte UTF-8 must fail arm 15" only
+for mb in '\302\265' '\302\260' '\302\247'; do
+  r="$work/mdw-mb-80"; rm -rf "$r"; seed "$r"; mkdir -p "$r/docs"
+  printf '%s\n' "$(_md_words 78) $(printf "$mb")" > "$r/docs/x.md"
+  [ "$(run "$r")" = "0" ] && ok || fail "arm 15: 80 characters ending in $mb must pass"
+  r="$work/mdw-mb-81"; rm -rf "$r"; seed "$r"; mkdir -p "$r/docs"
+  printf '%s\n' "$(_md_words 79) $(printf "$mb")" > "$r/docs/x.md"
+  fails_with_rc 1 "$r" "$md_msg" "arm 15: 81 characters ending in $mb must fail" only
+done
+
+# a CRLF file: the CR is not a column, and `---` CRLF front matter is still
+# front matter.
+r="$work/mdw-crlf"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\r\ndescription: %s\r\n---\r\n\r\n%s\r\n' "$md81" "$md80" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a CRLF file must pass at 80 columns, its front matter exempt"
+r="$work/mdw-crlf-81"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\r\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: an 81-column CRLF line must fail" only
+
+# a TAB counts as one column (documented in the arm).
+r="$work/mdw-tab"; seed "$r"; mkdir -p "$r/docs"
+printf '\t%s\n' "$(_md_words 79)" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a TAB must count as one column"
+
+# a nested list: the indent and the marker are set aside before counting
+# tokens, so a lone link there is exempt and prose there is not.
+r="$work/mdw-nested-link"; seed "$r"; mkdir -p "$r/docs"
+printf -- '- a\n    - [%s](%s)\n' "$md81" "$_md_long_token" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a lone link in a nested list item must be exempt"
+r="$work/mdw-nested-prose"; seed "$r"; mkdir -p "$r/docs"
+printf -- '- a\n    - %s\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: prose in a nested list item must fail" only
+
+# an unclosed fence runs to the end of ITS file, as GitHub renders it, and
+# never into the next file of the same awk run: docs/ is scanned before the
+# top-level README.md, so the fence state must reset on README.md's first line.
+r="$work/mdw-unclosed"; seed "$r"; mkdir -p "$r/docs"
+printf '```\n%s\n' "$md81" > "$r/docs/a.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: the rest of a file after an unclosed fence is code"
+printf '%s\n' "$md81" > "$r/README.md"
+fails_with "$r" "/README.md:1:" "arm 15: an unclosed fence in one file must not exempt the next file"
+
+# a long line of unclosed brackets stays linear: every `[` used to rescan to
+# the end of the line (measured: 107 s at 60000 brackets, 11 s at 8000).
+# bounded_run is sourced above, for the long-line sanitizer cases.
+r="$work/mdw-brackets"; seed "$r"; mkdir -p "$r/docs"
+printf 'a %s\n' "$(printf '[%.0s' $(seq 1 60000))" > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-brackets.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 brackets: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: a line of 60000 unclosed brackets outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 1 ] && ok || fail "arm 15: the unclosed-bracket line must still fail as too long, got $br_rc"
+
+# nested brackets that DO close: every `[` used to scan to its partner, so
+# 30000 of them before 30000 `]` was quadratic too (measured: 59 s). One
+# pairing pass per line makes it linear.
+r="$work/mdw-nested-brackets"; seed "$r"; mkdir -p "$r/docs"
+printf 'a %s%s\n' "$(printf '[%.0s' $(seq 1 30000))" "$(printf ']%.0s' $(seq 1 30000))" > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-nested-brackets.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 nested brackets: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: 30000 nested bracket pairs outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 1 ] && ok || fail "arm 15: the nested-bracket line must still fail as too long, got $br_rc"
+
+# front matter that never closes is not front matter: GitHub renders the
+# `---` as a rule and the rest as prose, so its lines are held to the limit
+# at their own line numbers.
+r="$work/mdw-fm-unclosed"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n%s\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: an unclosed front matter must be read as prose" only
+fails_with "$r" "/docs/x.md:3:" "arm 15: an unclosed front matter keeps its line numbers"
+r="$work/mdw-fm-unclosed-ok"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n' > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a short unclosed front matter must pass"
+
+# the character-count path. The awk here counts bytes, so an awk shim
+# rewrites the program to take the path a UTF-8-aware awk takes (length()
+# as is). Under that shim the probe self-test must fail the gate closed; with
+# the self-test also removed, a 71-character line of 60 two-byte characters
+# (131 bytes) fails, which proves the probe really selects the path.
+real_awk="$(command -v awk)"
+awk_shim="$work/awk-shim"; mkdir -p "$awk_shim"
+cat > "$awk_shim/awk" <<'SHIM'
+#!/usr/bin/env python3
+import os, sys
+args, hits = [], 0
+for a in sys.argv[1:]:
+    b = a.replace('u8 = (length("\\303\\251") == 1)', "u8 = 1")
+    if os.environ.get("CPT_NO_SELFTEST"):
+        b = b.replace('if (cols("\\303\\251\\302\\265\\302\\260") != 3)', "if (0)")
+    hits += b != a
+    args.append(b)
+if not hits:
+    print("awk shim: the width probe was not found in the program", file=sys.stderr)
+    sys.exit(3)
+os.execv(os.environ["CPT_REAL_AWK"], [os.environ["CPT_REAL_AWK"]] + args)
+SHIM
+chmod u+x "$awk_shim/awk"
+r="$work/mdw-charpath"; seed "$r"; mkdir -p "$r/docs"
+printf '%s aaaaaaaaaa\n' "$(printf '\303\251%.0s' $(seq 1 60))" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: 71 characters of two-byte UTF-8 must pass on the byte path"
+rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" STRICT= "$cp" "$r" 2>&1)" || rc=$?
+[ "$rc" = 2 ] || fail "arm 15: a miscounting probe must fail closed (exit 2), got $rc: $out"
+case "$out" in
+  *"miscounts UTF-8 characters"*"$md_err_msg"*) ok ;;
+  *) fail "arm 15: a miscounting probe must report the self-test and this arm's error: $out" ;;
+esac
+rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" CPT_NO_SELFTEST=1 STRICT= "$cp" "$r" 2>&1)" || rc=$?
+[ "$rc" = 1 ] || fail "arm 15: the character path on a byte awk must count bytes (exit 1), got $rc: $out"
+case "$out" in
+  *"/docs/x.md:1:"*"$md_msg"*) ok ;;
+  *) fail "arm 15: the forced character path must flag the 131-byte line: $out" ;;
+esac
+
+# every exempt shape passes, each over the limit and holding spaces.
+i=0
+while IFS= read -r shape; do
+  i=$((i + 1)); r="$work/mdw-exempt-$i"; seed "$r"; mkdir -p "$r/docs"
+  case "$shape" in
+    fence) printf '```sh\n%s\n```\n' "$md81" > "$r/docs/x.md" ;;
+    tilde-fence-in-list) printf -- '- item\n\n  ~~~~\n  %s\n  ~~~~\n' "$md81" > "$r/docs/x.md" ;;
+    table) printf '| a | b |\n| --- | --- |\n| %s | x |\n' "$md81" > "$r/docs/x.md" ;;
+    heading) printf '## %s\n' "$md81" > "$r/docs/x.md" ;;
+    html-comment) printf '<!--\n%s\n-->\n' "$md81" > "$r/docs/x.md" ;;
+    html-tag) printf '<a id="x" title="%s"></a>\n' "$md81" > "$r/docs/x.md" ;;
+    front-matter) printf -- '---\ndescription: %s\n---\n\n# T\n' "$md81" > "$r/docs/x.md" ;;
+    ref-def) printf '[ref]: %s "a title with spaces"\n' "$_md_long_token" > "$r/docs/x.md" ;;
+    url) printf '  %s\n' "$_md_long_token" > "$r/docs/x.md" ;;
+    code-span) printf -- '- `%s`.\n' "$md81" > "$r/docs/x.md" ;;
+    link) printf '> [%s](%s).\n' "$md81" "$_md_long_token" > "$r/docs/x.md" ;;
+    not-md) printf '%s\n' "$md81" > "$r/docs/x.txt" ;;
+    code-of-conduct) printf '%s\n' "$md81" > "$r/CODE_OF_CONDUCT.md" ;;
+    *) fail "arm 15: unknown exempt shape $shape" ;;
+  esac
+  [ "$(run "$r")" = "0" ] && ok || fail "arm 15 must exempt: $shape"
+done <<'SHAPES'
+fence
+tilde-fence-in-list
+table
+heading
+html-comment
+html-tag
+front-matter
+ref-def
+url
+code-span
+link
+not-md
+code-of-conduct
+SHAPES
+
+# an unbreakable token SHARING its line with other words fails: moving it to
+# its own line fixes the overflow. So does prose after a CLOSED fence, and
+# prose in a list item, a quote, and a Markdown file anywhere on the surface.
+i=0
+while IFS= read -r shape; do
+  i=$((i + 1)); r="$work/mdw-fail-$i"; seed "$r"; mkdir -p "$r/docs" "$r/config/tool"
+  f="$r/docs/x.md"
+  case "$shape" in
+    token-with-words) printf 'See %s now.\n' "$_md_long_token" > "$f" ;;
+    code-with-words) printf 'Run `%s` first.\n' "$md81" > "$f" ;;
+    after-fence) printf '```\ncode\n```\n%s\n' "$md81" > "$f" ;;
+    list-item) printf -- '1. %s\n' "$md81" > "$f" ;;
+    quote) printf '> %s\n' "$md81" > "$f" ;;
+    config-readme) f="$r/config/tool/README.md"; printf '%s\n' "$md81" > "$f" ;;
+    top-level) f="$r/README.md"; printf '%s\n' "$md81" > "$f" ;;
+    *) fail "arm 15: unknown failing shape $shape" ;;
+  esac
+  fails_with_rc 1 "$r" "$md_msg" "arm 15 must fail: $shape" only
+done <<'SHAPES'
+token-with-words
+code-with-words
+after-fence
+list-item
+quote
+config-readme
+top-level
+SHAPES
+
+# an unreadable Markdown file fails closed (exit 2) with this arm's own
+# message: an awk that cannot open a file must not read as "no long line".
+# Same root skip as the general fail-closed case above.
+if [ "$(id -u)" -ne 0 ]; then
+  r="$work/mdw-unreadable"; seed "$r"; mkdir -p "$r/docs"
+  printf 'short\n' > "$r/docs/x.md"; chmod 000 "$r/docs/x.md"
+  fails_with_rc 2 "$r" "$md_err_msg" "an unreadable Markdown file must fail arm 15 closed"
+  chmod u+rw "$r/docs/x.md"
+else
+  # exempt: privilege (root) skip, not tool-availability
+  echo "  SKIP: running as root - cannot exercise arm 15's unreadable-file case"
+fi
 
 # === a relative ROOT starting with `-` is a path, not an option =============
 # find reads a leading-dash operand as an expression, and arm 3's grep (GNU

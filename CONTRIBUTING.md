@@ -13,8 +13,8 @@ that need a decision before you write the code.
 Before you start, read [Who this is for](README.md#who-this-is-for). This is one
 person's live configuration published as a framework. A change that fixes a
 defect, closes a gap in a gate, or makes the documentation match the code is
-welcome. A change that replaces the maintainer's own configuration choices is not,
-and will be closed regardless of how well it is written.
+welcome. A change that replaces the maintainer's own configuration choices is
+not, and will be closed regardless of how well it is written.
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
@@ -41,7 +41,8 @@ Even under `STRICT=1`, some suites skip on a tool they cannot find and still
 exit 0. A pass proves what ran, not what was covered. If a suite matters to your
 change, read its output and confirm it did not skip.
 
-What each target proves is in [development, The gates](docs/development.md#the-gates).
+What each target proves is in
+[development, The gates](docs/development.md#the-gates).
 
 ## Write the change
 
@@ -80,8 +81,8 @@ attribution lines.
 ## Signed commits are required
 
 Every commit on `main` must carry a valid signature. A branch ruleset on `main`
-enforces it on the server, with no bypass actors, so an unsigned commit cannot be
-merged and no maintainer can wave it through. The same ruleset blocks force
+enforces it on the server, with no bypass actors, so an unsigned commit cannot
+be merged and no maintainer can wave it through. The same ruleset blocks force
 pushes to `main` and blocks deleting it, so published history cannot be
 rewritten or removed. Sign your commits before you push, not after: re-signing
 means rewriting the branch.
@@ -98,10 +99,10 @@ git config --global commit.gpgsign true
 ```
 
 The key must be registered on GitHub with type `signing`. An authentication key
-with the same bytes does not count, and GitHub will show the commit as Unverified.
-Check the result with `git log --show-signature`, and note that `%G?` reports `N`
-for a good SSH signature unless git can see an allowed-signers file. See
-`config/git/config.local.example` for that entry.
+with the same bytes does not count, and GitHub will show the commit as
+Unverified. Check the result with `git log --show-signature`, and note that
+`%G?` reports `N` for a good SSH signature unless git can see an allowed-signers
+file. See `config/git/config.local.example` for that entry.
 
 ## Pull requests
 
@@ -135,12 +136,12 @@ stay queued until then. That is expected, not a fault in your branch.
 ### For the maintainer: changing a repository setting
 
 The ruleset, merge methods and Actions settings this page describes are recorded
-in `.github/repo-settings.json`. To change one, update `.github/repo-settings.json`
-first, together with every doc that describes the setting, in one pull request.
-`tests/repo_settings_test.sh` fails that pull request if a doc and the file
-disagree. Once it merges, change the live setting and run
-`make repo-settings-check`, which reads the live settings with your `gh` login
-and exits non-zero until they match the file. See
+in `.github/repo-settings.json`. To change one, update
+`.github/repo-settings.json` first, together with every doc that describes the
+setting, in one pull request. `tests/repo_settings_test.sh` fails that pull
+request if a doc and the file disagree. Once it merges, change the live setting
+and run `make repo-settings-check`, which reads the live settings with your `gh`
+login and exits non-zero until they match the file. See
 [development, Repository settings](docs/development.md#repository-settings).
 
 ## Ask before you build any of these

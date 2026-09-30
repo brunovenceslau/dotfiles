@@ -33,7 +33,7 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate local-ci repo-settings-check
+.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
@@ -45,6 +45,7 @@ help:
 	@echo "  make smoke                fresh-install smoke in a scratch HOME (install + zsh -i + idempotency)"
 	@echo "  make secret-scan          high-confidence secret scan over the tracked tree"
 	@echo "  make forkgate             prove 'zsh -i -c exit' invokes no external binary"
+	@echo "  make linkcheck            every relative link and #anchor in the tracked docs resolves (no network)"
 	@echo "  make local-ci             every locally-runnable CI gate; reports skipped legs"
 	@echo "  make repo-settings-check  maintainer-run: diff live GitHub settings vs .github/repo-settings.json"
 
@@ -420,15 +421,36 @@ secret-scan:
 forkgate:
 	@STRICT='$(STRICT)' bin/startup-fork-gate
 
+# Link check over the tracked docs - every relative link, image, reference
+#   definition and #anchor in a tracked *.md file (and every absolute link back
+#   into this repository, the issue-form YAML included) resolves against the
+#   TRACKED tree under GitHub's heading-slug rule. No network, so the answer
+#   depends only on the tree. The logic lives in tests/linkcheck.py, not bin/:
+#   lib/link.sh links every bin/* file onto the user's PATH except a hand-kept
+#   list of dev gates, and growing that list is a link-convention change. It
+#   runs under `python3 -I` (no current directory on sys.path) with git's local
+#   env vars unset first ($(GIT_ENV_SCRUB)), so a GIT_DIR leaked from a hook
+#   cannot point its `git ls-files` at another tree. The script exits 2 on any
+#   error of its own, never 0. STRICT semantics match the py-syntax block.
+linkcheck:
+	@$(GIT_ENV_SCRUB) \
+	if command -v python3 >/dev/null 2>&1; then \
+	  echo "python3 -I tests/linkcheck.py"; python3 -I tests/linkcheck.py .; \
+	elif [ -n "$(STRICT)" ]; then \
+	  echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
+	else \
+	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
+	fi
+
 # Run every locally-runnable CI gate and report which OS-specific
 #   or not-yet-implemented legs were skipped. `smoke` runs a full scratch-HOME
 #   install + interactive zsh, so it is locally runnable and gates here.
-local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate
+local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck
 	@echo "----------------------------------------------------------------"
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate"; \
+	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck"; \
 	else \
-	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate"; \
+	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck"; \
 	  echo "local-ci: SKIP shellcheck (not installed locally; enforced in CI)"; \
 	fi
 	@# reuse reports on its own line, for the reason shellcheck does: without

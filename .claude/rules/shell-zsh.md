@@ -42,11 +42,11 @@ it by directory existence, with no `brew shellenv` subprocess at startup.
 Architecture checks go through the `is-arm64` and `is-amd64` helpers in
 `lib/os.sh`.
 
-`make check-patterns` flags a `/opt/homebrew` unless `/usr/local` is the ADJACENT
-word, and flags `brew shellenv` and a bare `brew --prefix`. Keep both prefixes of
-a candidate list side by side on ONE line, the way `zsh/zshrc`'s prefix loop and
-`zsh/fzf.zsh`'s fzf-shell list do: the pair is what marks the site as detection
-rather than a hardcode.
+`make check-patterns` flags a `/opt/homebrew` unless `/usr/local` is the
+ADJACENT word, and flags `brew shellenv` and a bare `brew --prefix`. Keep both
+prefixes of a candidate list side by side on ONE line, the way `zsh/zshrc`'s
+prefix loop and `zsh/fzf.zsh`'s fzf-shell list do: the pair is what marks the
+site as detection rather than a hardcode.
 
 ## Style
 
