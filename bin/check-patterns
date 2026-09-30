@@ -1749,8 +1749,20 @@ fi
 # zsh/plugins with it. No Markdown file is generated today (release notes
 # exist only on the GitHub release, see cliff.toml); a generated one must
 # leave by its exact path, the way arm (11) drops lazy-lock.json.
-# WIDTH is characters, not bytes: under LC_ALL=C awk's length() counts
-# bytes, so the UTF-8 continuation bytes (0x80-0xBF) are deleted first.
+# WIDTH is characters, not bytes. Under LC_ALL=C gawk, mawk and the
+# classic onetrue awk (macOS) count bytes, so the UTF-8 continuation bytes
+# (0x80-0xBF) are deleted before length(). The second-edition onetrue awk
+# (2023 on) decodes UTF-8 whatever the locale: there length() already
+# counts characters, and `[\200-\277]` would name U+0080-U+00BF (the micro,
+# degree and section signs among them) instead of bytes. So BEGIN measures
+# which kind of awk runs, by the length of a two-byte "e acute", and picks.
+# A TAB counts as ONE column: the rule measures what a reflow can move, and
+# no house doc indents prose with tabs. A CR before the LF (a CRLF file) is
+# not a column: it is stripped before anything else reads the line, so a
+# `---` CRLF front-matter line is still recognized.
+# AN UNCLOSED FENCE runs to the end of its file, as GitHub renders it, so the
+# rest of that file is code. Every per-file state resets on its first line
+# (FNR == 1), so it never leaks into the next file of the same awk run.
 # EXEMPT, because a reflow cannot fix them or would change what renders:
 #   - YAML front matter (a first line `---`, up to the next `---`);
 #   - a fenced code block, fences included, at any indent (a fence inside a
@@ -1774,7 +1786,11 @@ fi
 md_width=80
 # shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
 md_width_awk='
-function cols(s,   t) { t = s; gsub(/[\200-\277]/, "", t); return length(t) }
+BEGIN { u8 = (length("\303\251") == 1) }
+function cols(s,   t) {
+  if (u8) return length(s)
+  t = s; gsub(/[\200-\277]/, "", t); return length(t)
+}
 function skipcode(s, i, n,   run, j, r) {
   run = 0
   while (i <= n && substr(s, i, 1) == "`") { run++; i++ }
@@ -1788,6 +1804,11 @@ function skipcode(s, i, n,   run, j, r) {
   }
   return i
 }
+# skiplink returns the index after a whole link, 0 when the brackets close
+# but no `(` follows (not a link), or -1 when a bracket or parenthesis never
+# closes before the end of the line. After a -1 the caller stops trying
+# links on that line: every later `[` would scan to the end again, which is
+# quadratic on a line of many unclosed brackets.
 function skiplink(s, i, n,   d, c) {
   if (substr(s, i, 1) == "!") i++
   d = 0
@@ -1799,7 +1820,8 @@ function skiplink(s, i, n,   d, c) {
     else if (c == "]") { d--; if (d == 0) { i++; break } }
     i++
   }
-  if (d != 0 || substr(s, i, 1) != "(") return 0
+  if (d != 0) return -1
+  if (substr(s, i, 1) != "(") return 0
   d = 0
   while (i <= n) {
     c = substr(s, i, 1)
@@ -1807,26 +1829,28 @@ function skiplink(s, i, n,   d, c) {
     else if (c == ")") { d--; if (d == 0) return i + 1 }
     i++
   }
-  return 0
+  return -1
 }
-function tokens(s,   i, n, c, a, intok, j) {
+function tokens(s,   i, n, c, a, intok, j, nolink) {
   sub(/^[ \t]+/, "", s)
   while (match(s, /^>[ \t]*/)) s = substr(s, RLENGTH + 1)
   if (match(s, /^([-*+]|[0-9]+[.)])[ \t]+/)) s = substr(s, RLENGTH + 1)
-  n = length(s); a = 0; intok = 0; i = 1
+  n = length(s); a = 0; intok = 0; i = 1; nolink = 0
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == " " || c == "\t") { intok = 0; i++; continue }
     if (!intok) { a++; intok = 1 }
     if (c == "`") { i = skipcode(s, i, n); continue }
-    if (c == "[" || (c == "!" && substr(s, i + 1, 1) == "[")) {
+    if (!nolink && (c == "[" || (c == "!" && substr(s, i + 1, 1) == "["))) {
       j = skiplink(s, i, n)
-      if (j) { i = j; continue }
+      if (j > 0) { i = j; continue }
+      if (j < 0) nolink = 1
     }
     i++
   }
   return a
 }
+{ sub(/\r$/, "") }
 FNR == 1 { fm = 0; fence = ""; cmt = 0; if ($0 == "---") { fm = 1; next } }
 fm { if ($0 == "---") fm = 0; next }
 fence != "" {
