@@ -214,6 +214,20 @@ paths, which ones. The rules:
   (its patterns are assembled from pieces, its prose says "a curl piped into
   sh"), so a line added to it that either rule would flag in another file,
   comment or code, fails there too.
+- No Markdown prose line over 80 columns, counted in characters, in any
+  `*.md` file on the em-dash rule's surface (so `CODE_OF_CONDUCT.md`, verbatim
+  upstream text, is out). Exempt: YAML front matter, fenced code blocks at any
+  indent, table rows, headings, link reference definitions, HTML comments,
+  lines that open with an HTML tag, and a line holding a single unbreakable
+  token once its indent, quote and list markers are set aside. A token runs
+  from one space to the next, except that a code span and a whole link or
+  image never break, so a long URL, command or link alone on its line passes,
+  and the same token sharing its line with other words fails. Every hit is
+  therefore fixable by rewrapping the paragraph without changing a word. No
+  Markdown file is generated today; a generated one would leave the rule by
+  its exact path. A Setext heading's text line, a line inside a multi-line
+  HTML block and an indented code block are read as prose and held to the
+  limit.
 - No symlink where a recursive scan reads (`find`, always, over the em-dash
   rule's surface; a recursive scan never follows one it meets while walking a
   directory), plus, when the root has its own `.git`, no tracked symlink and no
