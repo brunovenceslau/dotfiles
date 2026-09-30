@@ -25,10 +25,11 @@ the PR body ("stacked on #N, review only the last K commits"), never in
 
 A `--base <branch>` pull request is coupled to that branch's lifetime. With
 `delete_branch_on_merge` on, merging the parent deletes its head branch, and
-GitHub's automatic retarget of the child races that deletion. The child can lose that race and be **closed**, which is
-unrecoverable: a closed PR cannot be retargeted (`gh pr edit --base` silently
-does nothing) and cannot be reopened (`gh pr reopen` fails). The review thread is
-lost and the only way forward is a replacement PR.
+GitHub's automatic retarget of the child races that deletion. The child can lose
+that race and be **closed**, which is unrecoverable: a closed PR cannot be
+retargeted (`gh pr edit --base` silently does nothing) and cannot be reopened
+(`gh pr reopen` fails). The review thread is lost and the only way forward is a
+replacement PR.
 
 ### What targeting `main` costs
 

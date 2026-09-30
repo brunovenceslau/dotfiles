@@ -141,6 +141,19 @@ if grep -qE '\[NOTE:' CODE_OF_CONDUCT.md; then
 fi
 ok "the Code of Conduct keeps its attribution and has no unfilled placeholder"
 
+# --- SECURITY.md scope points at the one authoritative property list ----------
+# SECURITY.md keeps only a summary of what is in scope; the list itself is the
+# table under this heading in docs/architecture.md. A link check, not a row
+# count: the summary groups table rows, so counting would fail on an honest
+# regrouping, while a renamed heading or a dropped link strands the reporter.
+sec_heading="## Security properties and where they are enforced"
+sec_link="](docs/architecture.md#security-properties-and-where-they-are-enforced)"
+grep -qxF -- "$sec_heading" docs/architecture.md \
+  || fail "docs/architecture.md lost the heading '$sec_heading' that SECURITY.md cites"
+grep -qF -- "$sec_link" SECURITY.md \
+  || fail "SECURITY.md must link its scope to the authoritative list in docs/architecture.md"
+ok "SECURITY.md links its scope to the security property list in docs/architecture.md"
+
 # --- Structural half: the YAML parses and says what the greps assumed ---------
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   python3 - "$db" "$cfg" <<'PY' || fail "PyYAML structural checks failed (see above)"

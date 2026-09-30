@@ -10,7 +10,8 @@
 # CONTENT for GNU-only regex escapes (`\s \w \b`, BRE `\|`) and has exactly
 # one content-independent LANGUAGE exemption for that, scoped to tests/ ONLY:
 # a fixed `*.py` extension filter, never a marker comment or a parse of what a
-# file contains (see docs/development.md, arm 8 - the arm's other two
+# file contains (see docs/development.md, the GNU-only regex rule under
+# "What `make check-patterns` checks" - the arm's other two
 # exclusions, the pinned plugins dir and the script's own name, are unrelated
 # path exclusions, not language exemptions). Those escapes are perfectly
 # portable inside a Python `re` pattern; a shell heredoc puts Python source

@@ -147,6 +147,8 @@ CONTRIBUTING.md|Actions setting requires maintainer approval before any workflow
 SECURITY.md|Report privately through GitHub, never in a public issue or pull request|pvr
 SECURITY.md|<https://github.com/brunovenceslau/dotfiles/security/advisories/new>|pvr and .repository == "brunovenceslau/dotfiles"
 README.md|use the private advisory form linked from|pvr
+SECURITY.md|the branch ruleset that requires verified signatures|on_main and rule("required_signatures")
+docs/architecture.md|The live `main-protection` branch ruleset on GitHub (`required_signatures`, no bypass actors)|on_main and branch_ruleset.name == "main-protection" and rule("required_signatures") and branch_ruleset.bypass_actors == []
 .github/ISSUE_TEMPLATE/config.yml|url: https://github.com/brunovenceslau/dotfiles/security/advisories/new|pvr
 .github/ISSUE_TEMPLATE/bug_report.yml|Use the private advisory|pvr
 docs/stacked-prs.md|With `delete_branch_on_merge` on, merging the parent deletes its head branch|.repo.delete_branch_on_merge == true

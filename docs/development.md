@@ -16,10 +16,34 @@ The page runs from reference to procedure: prerequisites and the gates first
 (what each one proves), then CI, then the rules and the changes that need a
 maintainer decision, and last the step-by-step recipes for common changes.
 
+- [Prerequisites](#prerequisites)
+- [The gates](#the-gates)
+  - [What `make check-patterns` checks](#what-make-check-patterns-checks)
+  - [The two secret scanners](#the-two-secret-scanners)
+  - [`STRICT=1`](#strict1)
+  - [What `make smoke` does](#what-make-smoke-does)
+  - [What `make forkgate` does](#what-make-forkgate-does)
+- [CI](#ci)
+  - [Repository settings](#repository-settings)
+  - [When a runner image is retired](#when-a-runner-image-is-retired)
+- [Hard rules](#hard-rules)
+- [Ask before doing any of these](#ask-before-doing-any-of-these)
+- [Common changes](#common-changes)
+  - [Add a config for a new program](#add-a-config-for-a-new-program)
+  - [Add a `.local` layer to a surface](#add-a-local-layer-to-a-surface)
+  - [Bump a plugin pin](#bump-a-plugin-pin)
+  - [Add a gh extension](#add-a-gh-extension)
+  - [Change something on the upgrade path](#change-something-on-the-upgrade-path)
+- [Landing a change](#landing-a-change)
+- [Cutting a release](#cutting-a-release)
+  - [Which number to bump](#which-number-to-bump)
+
 ## Prerequisites
 
 - macOS, Apple Silicon or Intel. `install.sh` and `lib/` target bash 3.2, the
-  version macOS ships, and there is no Linux install path.
+  version macOS ships. Linux is not a supported platform: the installer still
+  creates the links there, but CI runs only on macOS (see
+  [Who this is for](../README.md#who-this-is-for)).
 - Xcode Command Line Tools, for git and the compiler toolchain:
   `xcode-select --install`.
 - The tools the gates need: `make`, `shellcheck`, `zsh`, `tmux`, `fzf`, `jq`,
@@ -64,7 +88,7 @@ parity by construction. Run `make local-ci` before every push.
 | Target | What it runs | What it proves |
 | --- | --- | --- |
 | `make lint` | shellcheck over `install.sh`, `lib/`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` and `py-syntax` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
-| `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download executed on the same line: piped into `sh`, `bash`, `zsh`, `ksh` or `dash` (also through `\|&`, `sudo` with options, `env`, `exec`, a quoted name or a path such as `/bin/bash`), passed as a command substitution to `eval` (also `eval --`) or to a shell with a `c` option (`bash -lc "$(curl ...)"`, `bash --norc -c "$(curl ...)"`), or fed as a process substitution to `source`, `.` or a shell (`bash < <(wget ...)`), also when the tool is written `command curl`, `env curl`, `sudo curl`, `\curl` or `/usr/bin/curl`. Not caught, among others (the list is illustrative, not exhaustive): a download saved and executed on a later line, one passed through another command first (`curl ... \| tee f \| bash`), one fed through a here-string or `/dev/stdin`, a fetch behind an assignment, `time` or a brace group inside the substitution, a substitution that does not start the `-c` string (`sh -c "set -e; $(curl ...)"`), a fetch through an alias or function, a shell reached through `xargs` or `nohup`, and fetch tools other than curl and wget. This rule reads `install.sh`, `lib/`, `bin/`, `zsh/`, `config/`, `packages/`, `security/`, `home/`, the `Makefile` and `.github/` (a recipe line, a workflow `run:` step and a composite action's step execute like any other code), never `tests/` (which plants real fetch shapes as fixtures), `docs/` or `.claude/`. Also no ad-hoc `uname -m` outside `lib/os.sh`, no unescaped `#` inside a Makefile `$(shell ...)`, no hardcoded Homebrew prefix and no `brew shellenv` or `brew --prefix` fork, no bash 4 syntax in `install.sh` or `lib/`, no GNU-only regex escape (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface, `tests/` and the workflows (this arm's only OTHER exclusions, the pinned plugins dir and the script's own name, are content-independent path exclusions, not language exemptions; inside `tests/` ONLY, `*.py` files are skipped by a fixed extension - the arm's only content-independent LANGUAGE exemption, never a marker comment or a parse of what a file contains, because Python's own `re` module is a different regex dialect where those escapes are portable; `bin/`, `lib/`, `zsh/`, `install.sh`, the Makefile and the workflows carry no such exemption, since `lib/link.sh`'s `_link_bin_tree` links every `bin/*` file onto the live PATH by basename; non-shell code that needs the exemption MUST live in its own `.py` file under `tests/`, never a `python3 - <<'PY'` heredoc embedded in a `.sh` script - a heredoc is still shell-surface text to this arm, which has no notion of an embedded language; see `tests/release_workflow_check.py` and its caller `tests/release_workflow_test.sh`), no early-exit reader (`grep -q`, `-m`, `-l`, `head`) on the right of a pipe in the pipefail surface (`install.sh`, `lib/`, `bin/`, `tests/`, the workflows), no `--` after the first operand of `chmod`, `chown`, `chgrp`, `cp`, `mv`, `ln`, `rm`, `rmdir`, `mkdir`, `touch`, `cat`, `grep`, `egrep`, `fgrep` or `sed` in the same surface as the regex rule (not caught: a command written `\rm`, behind `env` or `sudo` with options, `coproc`, a `$CMD` variable, `find -exec`, `xargs`, an alias or `sh -c '...'` string, or split across `\` lines; wrongly flagged: a long option with a separate argument such as `--regexp PAT`, a redirection before the `--`, and prose or an unquoted `$(...)` argument holding a separator or keyword before a tool name and a later ` -- `, such as `"x; rm it by hand -- see docs"`), and the pinned plugins still have the shapes the startup shims assume. Also no raw `readlink` (or `greadlink`) in `install.sh` or `lib/`: `$(readlink)` strips a target's trailing newline and BSD readlink's terminator differs from GNU's, so they read a link target only through `lib/link.sh`'s `_link_readlink`. The one exempt line is the helper's own `readlink -n` call, found at scan time inside the body of the one `_link_readlink() {` in that exact file (up to the next exact `}` at column 0; any other column-0 line first voids the body), never a line number, so a raw call in another function, another shape inside the helper, a same-named function in another file or a decoy `lib/sub/link.sh` still fails, and a second definition-shaped line or a definition not in that exact form fails the gate closed. The word in a string or as a name (`echo "readlink"`) is flagged too. And no `local`, `typeset`, `declare`, `integer`, `float`, `readonly` or `private` without `-g` in an option word (`local` in any form), and no `for`, `foreach` or `select` loop variable, of zsh's `path`, `cdpath`, `fpath`, `manpath` or `module_path`, or of their scalars `PATH`, `CDPATH`, `FPATH`, `MANPATH` and `MODULE_PATH`, under `zsh/`: inside a function the local copy keeps its special tie, so assigning it rewrites the command search path for the whole call, and a loop variable overwrites the global. A line scanner cannot tell a function body from the top level, so a top-level declaration needs the `-g` as well; a plain assignment such as `path=(... $path)` and `export` are not declarations and pass. Not caught: a name word holding `(`, `)`, `;`, `&` or `|` before the name (`local foo=$(pwd) path`), a quoted or escaped name, `mailpath`. Also no Unicode em dash (U+2014), the house style set by `CONTRIBUTING.md` and `.claude/rules/docs.md` (a plain hyphen instead), checked over `install.sh`, `lib/`, `bin/`, `zsh/`, `config/`, `packages/`, `security/`, `home/`, plus `docs/`, `tests/`, `.github/`, `.claude/`, the Makefile and the top-level docs and metadata files, comments included (unlike the bash-4 and Homebrew-prefix rules, a comment does not exempt an em dash, since a comment is prose too); `LICENSES/`, `COPYING` and `CODE_OF_CONDUCT.md` are left out of that surface entirely as verbatim upstream legal text, and `config/nvim/lazy-lock.json` is exempted by its exact scanned path (never a bare suffix, which a decoy file elsewhere ending in the same segments could also match), since lazy.nvim rewrites it wholesale on every plugin sync. A second, narrow pass separately checks `bin/check-patterns`'s own source for the same character, since the recursive pass above excludes it by name like every other recursive arm; the fetch rule and the `uname -m` rule run the same narrow self-scan, with no exemption list: the gate's own source is written so that neither matches it (its patterns are assembled from pieces, its prose says "a curl piped into sh"), so a line added to it that either rule would flag in another file, comment or code, fails there too. Also no symlink where a recursive scan reads (`find`, always, over the em-dash rule's surface; a recursive scan never follows one it meets while walking a directory), plus, when the root has its own `.git`, no tracked symlink and no gitlink other than a pinned plugin (`git ls-files -s -z`, repo-wide, no pathspec) anywhere in the repository. Every recursive rule leaves the pinned plugins out by their one exact path, `zsh/plugins` (unless it is itself a symlink, which is then reported), never by a directory name at any depth, so a first-party `plugins` directory elsewhere, such as `config/nvim/lua/plugins/`, is scanned. Since no rule reads `zsh/plugins/`, anything there but a pinned plugin fails: a direct child that is not a directory, tracked or not, and, with a `.git`, a tracked entry that is not a gitlink or a tracked path that lands in `zsh/plugins/` on disk under another spelling: `zsh/plugins` in another ASCII case, or first two segments that the filesystem itself resolves to the same directory as `zsh/plugins`, which is how a case-insensitive filesystem's non-ASCII folding is caught. A symlink directly under `zsh/` is reported by the symlink rule and never followed by another rule. A gitlink counts as a pinned plugin only when it is a direct child of `zsh/plugins/` declared as a `submodule.<name>.path` in `.gitmodules`, not a hand-kept list. The git pass fails closed when that `.git` exists but git is missing, cannot list its own local environment variables (`git rev-parse --local-env-vars` fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors, returns a malformed record, or resolves a toplevel other than the root (a repository git refuses as dubiously owned included). Of its stderr, only the `ls-files` listing's fails closed (a `GIT_TRACE*` variable or a `trace2.*` config key, say); the toplevel probe's is shown only when the probe itself fails. Git runs inside the root with `core.fsmonitor` forced off, but the root must still be a checkout you trust. A file holding a NUL byte anywhere these rules read (the em-dash rule's surface, `bin/check-patterns` included) fails the gate closed, exit 2: grep reads such a file as binary, and the rules' earlier `-I` skipped it whole, so one NUL hid every violation in it. The rules now read every file as text (`-a`), which also keeps GNU grep in a UTF-8 locale from skipping a file with an invalid byte. The gate runs in the C locale (`LC_ALL=C`) whatever the caller's: in a UTF-8 locale GNU grep's `[^|]*` does not match an invalid byte, so a fetch piped into a shell with a `0xFF` byte in its URL passed. Every scan error the gate detects (a `grep`, `sed`, `find` or `git` that fails, the code/comment split and the path-exemption filters included, an unreadable file, a pinned-plugin file that `STRICT=1` cannot verify) exits 2 as well, never the 1 of a violation; a filter that cannot run exempts nothing. So does a command that fails in the main shell where the gate does not check its status: an `ERR` trap turns what `set -e` would exit with, the failing command's own status (a `1` that reads as a violation, with no report), into 2. A known residual: inside a `$(...)`, which does not inherit `set -e`, a failing command that is not the last one is not seen at all (`v=$(false; echo after)` succeeds); the gate's own substitutions end in the command whose status matters or check the earlier ones by hand. The gate also unsets an inherited `GREP_OPTIONS`, which BSD grep would apply to every call. Every line the gate prints, on stdout (the fetch rule's hits) or stderr (everything else, the error text of `find` and `git` included), goes through one sanitizer, since a hit echoes a file name and a file line from the scanned tree: each C0 control byte except TAB and LF, DEL, and each UTF-8 encoded C1 control (U+0080 to U+009F) prints as a visible `\xHH`, and on a line that is not well-formed UTF-8 (a stray byte, an invalid lead, an overlong form) every byte 0x80 to 0xFF does, a valid character on that line included. A NUL byte in a tool's error text is dropped. So an OSC 52 clipboard write, a CSI sequence or a CR in a name or a line cannot reach the terminal. Two residuals: a well-formed line still sends its UTF-8 continuation bytes, which only an 8-bit, non-UTF-8 terminal would read as C1 controls; and printable characters that reorder or hide text, such as the bidi override U+202E, are not controls and print as they are. The sanitizer changes only what is printed, never a rule's outcome, and a sanitizer failure exits 2. |
+| `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
 | `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
@@ -83,13 +107,184 @@ each one is pinned to.
 
 Three files cannot carry a header: `config/nvim/lazy-lock.json`,
 `.claude/settings.json` and `.github/repo-settings.json`, because JSON has no
-comment syntax. `REUSE.toml` declares them, and `tests/reuse_gate_test.sh` fails if a new tracked `.json`
-file is not declared there. Everything else states its licence in its own
-comment syntax. A block copied from an upstream project is bracketed by
-`SPDX-SnippetBegin` and `SPDX-SnippetEnd` and repeats that upstream's licence
-in place. A whole file that is someone else's work carries that work's licence
-in its own header instead: `CODE_OF_CONDUCT.md` is the Contributor Covenant
-under `CC-BY-SA-4.0`, which is why `LICENSES/` holds a fifth licence text.
+comment syntax. `REUSE.toml` declares them, and `tests/reuse_gate_test.sh` fails
+if a new tracked `.json` file is not declared there. Everything else states its
+licence in its own comment syntax. A block copied from an upstream project is
+bracketed by `SPDX-SnippetBegin` and `SPDX-SnippetEnd` and repeats that
+upstream's licence in place. A whole file that is someone else's work carries
+that work's licence in its own header instead: `CODE_OF_CONDUCT.md` is the
+Contributor Covenant under `CC-BY-SA-4.0`, which is why `LICENSES/` holds a
+fifth licence text.
+
+### What `make check-patterns` checks
+
+Each rule below names what it rejects, and, where it applies to only some
+paths, which ones. The rules:
+
+- No `curl` or `wget` download executed on the same line: piped into `sh`,
+  `bash`, `zsh`, `ksh` or `dash` (also through `|&`, `sudo` with options, `env`,
+  `exec`, a quoted name or a path such as `/bin/bash`), passed as a command
+  substitution to `eval` (also `eval --`) or to a shell with a `c` option (`bash
+  -lc "$(curl ...)"`, `bash --norc -c "$(curl ...)"`), or fed as a process
+  substitution to `source`, `.` or a shell (`bash < <(wget ...)`), also when the
+  tool is written `command curl`, `env curl`, `sudo curl`, `\curl` or
+  `/usr/bin/curl`. Not caught, among others (the list is illustrative, not
+  exhaustive): a download saved and executed on a later line, one passed through
+  another command first (`curl ... | tee f | bash`), one fed through a
+  here-string or `/dev/stdin`, a fetch behind an assignment, `time` or a brace
+  group inside the substitution, a substitution that does not start the `-c`
+  string (`sh -c "set -e; $(curl ...)"`), a fetch through an alias or function,
+  a shell reached through `xargs` or `nohup`, and fetch tools other than curl
+  and wget. This rule reads `install.sh`, `lib/`, `bin/`, `zsh/`, `config/`,
+  `packages/`, `security/`, `home/`, the `Makefile` and `.github/` (a recipe
+  line, a workflow `run:` step and a composite action's step execute like any
+  other code), never `tests/` (which plants real fetch shapes as fixtures),
+  `docs/` or `.claude/`.
+- No ad-hoc `uname -m` outside `lib/os.sh`.
+- No unescaped `#` inside a Makefile `$(shell ...)`.
+- No hardcoded Homebrew prefix and no `brew shellenv` or `brew --prefix` fork.
+- No bash 4 syntax in `install.sh` or `lib/`.
+- No GNU-only regex escape (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface,
+  `tests/` and the workflows (this arm's only OTHER exclusions, the pinned
+  plugins dir and the script's own name, are content-independent path
+  exclusions, not language exemptions; inside `tests/` ONLY, `*.py` files are
+  skipped by a fixed extension - the arm's only content-independent LANGUAGE
+  exemption, never a marker comment or a parse of what a file contains, because
+  Python's own `re` module is a different regex dialect where those escapes are
+  portable; `bin/`, `lib/`, `zsh/`, `install.sh`, the Makefile and the workflows
+  carry no such exemption, since `lib/link.sh`'s `_link_bin_tree` links every
+  `bin/*` file onto the live PATH by basename; non-shell code that needs the
+  exemption MUST live in its own `.py` file under `tests/`, never a `python3 -
+  <<'PY'` heredoc embedded in a `.sh` script - a heredoc is still shell-surface
+  text to this arm, which has no notion of an embedded language; see
+  `tests/release_workflow_check.py` and its caller
+  `tests/release_workflow_test.sh`).
+- No early-exit reader (`grep -q`, `-m`, `-l`, `head`) on the right of a pipe in
+  the pipefail surface (`install.sh`, `lib/`, `bin/`, `tests/`, the workflows).
+- No `--` after the first operand of `chmod`, `chown`, `chgrp`, `cp`, `mv`,
+  `ln`, `rm`, `rmdir`, `mkdir`, `touch`, `cat`, `grep`, `egrep`, `fgrep` or
+  `sed` in the same surface as the regex rule (not caught: a command written
+  `\rm`, behind `env` or `sudo` with options, `coproc`, a `$CMD` variable, `find
+  -exec`, `xargs`, an alias or `sh -c '...'` string, or split across `\` lines;
+  wrongly flagged: a long option with a separate argument such as `--regexp
+  PAT`, a redirection before the `--`, and prose or an unquoted `$(...)`
+  argument holding a separator or keyword before a tool name and a later ` -- `,
+  such as `"x; rm it by hand -- see docs"`).
+- The pinned plugins still have the shapes the startup shims assume.
+- No raw `readlink` (or `greadlink`) in `install.sh` or `lib/`: `$(readlink)`
+  strips a target's trailing newline and BSD readlink's terminator differs from
+  GNU's, so they read a link target only through `lib/link.sh`'s
+  `_link_readlink`. The one exempt line is the helper's own `readlink -n` call,
+  found at scan time inside the body of the one `_link_readlink() {` in that
+  exact file (up to the next exact `}` at column 0; any other column-0 line
+  first voids the body), never a line number, so a raw call in another function,
+  another shape inside the helper, a same-named function in another file or a
+  decoy `lib/sub/link.sh` still fails, and a second definition-shaped line or a
+  definition not in that exact form fails the gate closed. The word in a string
+  or as a name (`echo "readlink"`) is flagged too.
+- No `local`, `typeset`, `declare`, `integer`, `float`, `readonly` or `private`
+  without `-g` in an option word (`local` in any form), and no `for`, `foreach`
+  or `select` loop variable, of zsh's `path`, `cdpath`, `fpath`, `manpath` or
+  `module_path`, or of their scalars `PATH`, `CDPATH`, `FPATH`, `MANPATH` and
+  `MODULE_PATH`, under `zsh/`: inside a function the local copy keeps its
+  special tie, so assigning it rewrites the command search path for the whole
+  call, and a loop variable overwrites the global. A line scanner cannot tell a
+  function body from the top level, so a top-level declaration needs the `-g` as
+  well; a plain assignment such as `path=(... $path)` and `export` are not
+  declarations and pass. Not caught: a name word holding `(`, `)`, `;`, `&` or
+  `|` before the name (`local foo=$(pwd) path`), a quoted or escaped name,
+  `mailpath`.
+- No Unicode em dash (U+2014), the house style set by `CONTRIBUTING.md` and
+  `.claude/rules/docs.md` (a plain hyphen instead), checked over `install.sh`,
+  `lib/`, `bin/`, `zsh/`, `config/`, `packages/`, `security/`, `home/`, plus
+  `docs/`, `tests/`, `.github/`, `.claude/`, the Makefile and the top-level docs
+  and metadata files, comments included (unlike the bash-4 and Homebrew-prefix
+  rules, a comment does not exempt an em dash, since a comment is prose too);
+  `LICENSES/`, `COPYING` and `CODE_OF_CONDUCT.md` are left out of that surface
+  entirely as verbatim upstream legal text, and `config/nvim/lazy-lock.json` is
+  exempted by its exact scanned path (never a bare suffix, which a decoy file
+  elsewhere ending in the same segments could also match), since lazy.nvim
+  rewrites it wholesale on every plugin sync. A second, narrow pass separately
+  checks `bin/check-patterns`'s own source for the same character, since the
+  recursive pass above excludes it by name like every other recursive arm; the
+  fetch rule and the `uname -m` rule run the same narrow self-scan, with no
+  exemption list: the gate's own source is written so that neither matches it
+  (its patterns are assembled from pieces, its prose says "a curl piped into
+  sh"), so a line added to it that either rule would flag in another file,
+  comment or code, fails there too.
+- No symlink where a recursive scan reads (`find`, always, over the em-dash
+  rule's surface; a recursive scan never follows one it meets while walking a
+  directory), plus, when the root has its own `.git`, no tracked symlink and no
+  gitlink other than a pinned plugin (`git ls-files -s -z`, repo-wide, no
+  pathspec) anywhere in the repository.
+
+#### The pinned plugins directory
+
+Every recursive rule leaves the pinned plugins out by their one exact path,
+`zsh/plugins` (unless it is itself a symlink, which is then reported), never by
+a directory name at any depth, so a first-party `plugins` directory elsewhere,
+such as `config/nvim/lua/plugins/`, is scanned. Since no rule reads
+`zsh/plugins/`, anything there but a pinned plugin fails: a direct child that is
+not a directory, tracked or not, and, with a `.git`, a tracked entry that is not
+a gitlink or a tracked path that lands in `zsh/plugins/` on disk under another
+spelling: `zsh/plugins` in another ASCII case, or first two segments that the
+filesystem itself resolves to the same directory as `zsh/plugins`, which is how
+a case-insensitive filesystem's non-ASCII folding is caught. A symlink directly
+under `zsh/` is reported by the symlink rule and never followed by another rule.
+A gitlink counts as a pinned plugin only when it is a direct child of
+`zsh/plugins/` declared as a `submodule.<name>.path` in `.gitmodules`, not a
+hand-kept list.
+
+#### How the gate fails closed
+
+The git pass fails closed when the root has its own `.git` but git is missing,
+cannot list its own local environment variables (`git rev-parse
+--local-env-vars` fails, or omits `GIT_DIR` or `GIT_INDEX_FILE`), errors,
+returns a malformed record, or resolves a toplevel other than the root (a
+repository git refuses as dubiously owned included). Of its stderr, only the
+`ls-files` listing's fails closed (a `GIT_TRACE*` variable or a `trace2.*`
+config key, say); the toplevel probe's is shown only when the probe itself
+fails. Git runs inside the root with `core.fsmonitor` forced off, but the root
+must still be a checkout you trust.
+
+A file holding a NUL byte anywhere these rules read (the em-dash rule's surface,
+`bin/check-patterns` included) fails the gate closed, exit 2: grep reads such a
+file as binary, and the rules' earlier `-I` skipped it whole, so one NUL hid
+every violation in it. The rules now read every file as text (`-a`), which also
+keeps GNU grep in a UTF-8 locale from skipping a file with an invalid byte. The
+gate runs in the C locale (`LC_ALL=C`) whatever the caller's: in a UTF-8 locale
+GNU grep's `[^|]*` does not match an invalid byte, so a fetch piped into a shell
+with a `0xFF` byte in its URL passed.
+
+Every scan error the gate detects (a `grep`, `sed`, `find` or `git` that fails,
+the code/comment split and the path-exemption filters included, an unreadable
+file, a pinned-plugin file that `STRICT=1` cannot verify) exits 2 as well, never
+the 1 of a violation; a filter that cannot run exempts nothing. So does a
+command that fails in the main shell where the gate does not check its status:
+an `ERR` trap turns what `set -e` would exit with, the failing command's own
+status (a `1` that reads as a violation, with no report), into 2. A known
+residual: inside a `$(...)`, which does not inherit `set -e`, a failing command
+that is not the last one is not seen at all (`v=$(false; echo after)` succeeds);
+the gate's own substitutions end in the command whose status matters or check
+the earlier ones by hand. The gate also unsets an inherited `GREP_OPTIONS`,
+which BSD grep would apply to every call.
+
+#### What the gate prints
+
+Every line the gate prints, on stdout (the fetch rule's hits) or stderr
+(everything else, the error text of `find` and `git` included), goes through one
+sanitizer, since a hit echoes a file name and a file line from the scanned tree:
+each C0 control byte except TAB and LF, DEL, and each UTF-8 encoded C1 control
+(U+0080 to U+009F) prints as a visible `\xHH`, and on a line that is not
+well-formed UTF-8 (a stray byte, an invalid lead, an overlong form) every byte
+0x80 to 0xFF does, a valid character on that line included. A NUL byte in a
+tool's error text is dropped. So an OSC 52 clipboard write, a CSI sequence or a
+CR in a name or a line cannot reach the terminal. Two residuals: a well-formed
+line still sends its UTF-8 continuation bytes, which only an 8-bit, non-UTF-8
+terminal would read as C1 controls; and printable characters that reorder or
+hide text, such as the bidi override U+202E, are not controls and print as they
+are. The sanitizer changes only what is printed, never a rule's outcome, and a
+sanitizer failure exits 2.
 
 ### The two secret scanners
 
@@ -279,11 +474,12 @@ Two checks hold the file to the rest of the world:
 expected value and the live one. Beyond the branch ruleset, it reads the rules
 that actually apply to `main` from every source and requires each one to come
 from that ruleset, and it requires classic branch protection to be absent, so a
-second ruleset or a classic rule cannot add enforcement the file does not state. A setting is `ok` only when its live value was
-read and matches. A failed call or a field the API left out, such as
-`bypass_actors` for a caller without admin rights, is `UNREADABLE` and fails the
-run, so a partial read never passes. It needs `gh` authenticated as a repository
-admin and `jq`, and it only issues `GET` requests.
+second ruleset or a classic rule cannot add enforcement the file does not state.
+A setting is `ok` only when its live value was read and matches. A failed call
+or a field the API left out, such as `bypass_actors` for a caller without admin
+rights, is `UNREADABLE` and fails the run, so a partial read never passes. It
+needs `gh` authenticated as a repository admin and `jq`, and it only issues
+`GET` requests.
 
 It is not a pull request gate on purpose. Reading these settings needs an
 authenticated token, and a workflow that runs on a pull request from a fork
@@ -395,6 +591,12 @@ except for their README and `*.example` files. `make secret-scan` is the backsto
 
 ## Ask before doing any of these
 
+The canonical list, with what to do instead, is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). The
+list below is the maintainer's working copy. An item on either list needs a
+maintainer decision; CONTRIBUTING's list is the fuller statement of the
+security model.
+
 - Adding a submodule or a binary dependency.
 - Any change to the security model: the plugin pinning scheme, the
   fast-syntax-highlighting neutralization, the git config scrubbing on the
@@ -477,8 +679,8 @@ A doc that quotes what a command prints is held to that output by a test:
 `tests/troubleshooting_messages_test.sh` for
 [troubleshooting.md](troubleshooting.md), and `tests/restic_wrappers_test.sh`
 for the `usage:` lines that `config/restic/README.md` and
-[shell-reference.md](shell-reference.md) quote. A new doc that quotes program output gets the same kind of
-test in the same pull request.
+[shell-reference.md](shell-reference.md) quote. A new doc that quotes program
+output gets the same kind of test in the same pull request.
 
 Check every API-facing value a doc or a command uses, such as an enum a GitHub
 setting accepts, against that API's own reference before it lands.

@@ -1086,7 +1086,8 @@ fi
 #   - LICENSES/, COPYING and CODE_OF_CONDUCT.md are left OUT of the surface:
 #     verbatim upstream legal text (GPL, the LICENSES/ texts, the Contributor
 #     Covenant) never edited for house style, with no first-party content to
-#     lose (see docs/development.md's REUSE section).
+#     lose (see docs/development.md, "The gates", the paragraphs after the
+#     gate table on files that cannot carry a header).
 #   - config/nvim/lazy-lock.json, inside the scanned config/, is dropped from
 #     the hit list: lazy.nvim rewrites it wholesale on every plugin update
 #     (REUSE.toml), so a fix would not survive the next sync. The grep -v is

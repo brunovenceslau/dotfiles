@@ -10,6 +10,26 @@ Exact facts about what this framework installs: subcommands, commands, aliases,
 variables and files. For the reasoning behind any of it, see
 [architecture](architecture.md).
 
+- [`install.sh` subcommands](#installsh-subcommands)
+- [Lifecycle commands](#lifecycle-commands)
+- [restic wrappers](#restic-wrappers)
+- [Helper functions](#helper-functions)
+  - [kubectl helpers](#kubectl-helpers)
+- [Aliases](#aliases)
+  - [Listing](#listing)
+  - [Navigation](#navigation)
+  - [Shell and meta](#shell-and-meta)
+  - [git](#git)
+  - [Tool fallbacks](#tool-fallbacks)
+  - [Network and macOS](#network-and-macos)
+- [Commands on `PATH`](#commands-on-path)
+- [Key bindings](#key-bindings)
+- [Shell options](#shell-options)
+- [Environment variables](#environment-variables)
+- [Generated files](#generated-files)
+- [`.local` files](#local-files)
+- [Config surfaces](#config-surfaces)
+
 ## `install.sh` subcommands
 
 Run from the repository root. `install` is the default when no subcommand is

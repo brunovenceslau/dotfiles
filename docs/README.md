@@ -16,7 +16,7 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, each security property and where it is enforced, platform differences. |
+| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, why the installer refuses root, the authoritative list of security properties (what is in scope for a report, and where each is enforced), platform differences. |
 
 ## Look something up
 
@@ -36,5 +36,5 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [development.md](development.md) | A maintainer | The quality gates and what each proves, `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config or bumping a plugin pin, cutting a release and which version number to bump, and lessons from past reviews. |
+| [development.md](development.md) | A maintainer | The quality gates and what each proves (every `check-patterns` rule included), `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config or bumping a plugin pin, cutting a release and which version number to bump, and lessons from past reviews. |
 | [stacked-prs.md](stacked-prs.md) | A maintainer landing a large change | Why every PR targets `main`, the workflow, re-syncing after a merge, keeping signatures through a rebase. |
