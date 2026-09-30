@@ -3334,6 +3334,64 @@ r="$work/mdw-utf8"; seed "$r"; mkdir -p "$r/docs"
 printf '%s\n' "$(_md_words 76) $(printf '\303\251\303\251\303\251')" > "$r/docs/x.md"
 [ "$(run "$r")" = "0" ] && ok || fail "arm 15 must count UTF-8 characters, not bytes"
 
+# ... and 81 of them fail. The micro, degree and section signs sit at the
+# edges of the continuation-byte range (their second bytes are 0xB5, 0xB0 and
+# 0xA7), so each is one column at 80 and a violation at 81.
+r="$work/mdw-utf8-81"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\n' "$(_md_words 77) $(printf '\303\251\303\251\303\251')" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "81 characters holding two-byte UTF-8 must fail arm 15" only
+for mb in '\302\265' '\302\260' '\302\247'; do
+  r="$work/mdw-mb-80"; rm -rf "$r"; seed "$r"; mkdir -p "$r/docs"
+  printf '%s\n' "$(_md_words 78) $(printf "$mb")" > "$r/docs/x.md"
+  [ "$(run "$r")" = "0" ] && ok || fail "arm 15: 80 characters ending in $mb must pass"
+  r="$work/mdw-mb-81"; rm -rf "$r"; seed "$r"; mkdir -p "$r/docs"
+  printf '%s\n' "$(_md_words 79) $(printf "$mb")" > "$r/docs/x.md"
+  fails_with_rc 1 "$r" "$md_msg" "arm 15: 81 characters ending in $mb must fail" only
+done
+
+# a CRLF file: the CR is not a column, and `---` CRLF front matter is still
+# front matter.
+r="$work/mdw-crlf"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\r\ndescription: %s\r\n---\r\n\r\n%s\r\n' "$md81" "$md80" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a CRLF file must pass at 80 columns, its front matter exempt"
+r="$work/mdw-crlf-81"; seed "$r"; mkdir -p "$r/docs"
+printf '%s\r\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: an 81-column CRLF line must fail" only
+
+# a TAB counts as one column (documented in the arm).
+r="$work/mdw-tab"; seed "$r"; mkdir -p "$r/docs"
+printf '\t%s\n' "$(_md_words 79)" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a TAB must count as one column"
+
+# a nested list: the indent and the marker are set aside before counting
+# tokens, so a lone link there is exempt and prose there is not.
+r="$work/mdw-nested-link"; seed "$r"; mkdir -p "$r/docs"
+printf -- '- a\n    - [%s](%s)\n' "$md81" "$_md_long_token" > "$r/docs/x.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: a lone link in a nested list item must be exempt"
+r="$work/mdw-nested-prose"; seed "$r"; mkdir -p "$r/docs"
+printf -- '- a\n    - %s\n' "$md81" > "$r/docs/x.md"
+fails_with_rc 1 "$r" "$md_msg" "arm 15: prose in a nested list item must fail" only
+
+# an unclosed fence runs to the end of ITS file, as GitHub renders it, and
+# never into the next file of the same awk run: docs/ is scanned before the
+# top-level README.md, so the fence state must reset on README.md's first line.
+r="$work/mdw-unclosed"; seed "$r"; mkdir -p "$r/docs"
+printf '```\n%s\n' "$md81" > "$r/docs/a.md"
+[ "$(run "$r")" = "0" ] && ok || fail "arm 15: the rest of a file after an unclosed fence is code"
+printf '%s\n' "$md81" > "$r/README.md"
+fails_with "$r" "/README.md:1:" "arm 15: an unclosed fence in one file must not exempt the next file"
+
+# a long line of unclosed brackets stays linear: every `[` used to rescan to
+# the end of the line (measured: 107 s at 60000 brackets, 11 s at 8000).
+# bounded_run is sourced above, for the long-line sanitizer cases.
+r="$work/mdw-brackets"; seed "$r"; mkdir -p "$r/docs"
+printf 'a %s\n' "$(printf '[%.0s' $(seq 1 60000))" > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-brackets.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 brackets: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: a line of 60000 unclosed brackets outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 1 ] && ok || fail "arm 15: the unclosed-bracket line must still fail as too long, got $br_rc"
+
 # every exempt shape passes, each over the limit and holding spaces.
 i=0
 while IFS= read -r shape; do
