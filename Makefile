@@ -15,9 +15,10 @@ SHELL := /bin/bash
 SELF := $(lastword $(MAKEFILE_LIST))
 
 # Wildcards so a target stays valid when its scanned directory is empty.
-# Every bin/ and lib/ tool is a shell script, so the whole set routes to
-# shellcheck; a .py file here would need excluding first (shellcheck errors
-# SC1071 on one). py-syntax below covers .py syntax separately, wherever it lives.
+# Every bin/ tool is a shell script, so the whole set routes to shellcheck; a
+# .py file there would need excluding first (shellcheck errors SC1071 on one).
+# lib/ is taken as lib/*.sh, which keeps lib/host_identity.py out. py-syntax
+# below covers .py syntax separately, wherever it lives.
 SH_FILES     := $(wildcard install.sh) $(wildcard lib/*.sh) $(wildcard bin/*)
 # Bash-3.2 compatibility is scoped to install.sh + lib/ only; bin/
 # tools run on provisioned hosts/CI under a modern bash. The /bin/bash -n 3.2

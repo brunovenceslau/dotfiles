@@ -8,7 +8,7 @@
 # Doc-sync test: docs/troubleshooting.md is keyed to the exact text the
 # framework prints, so a reworded message silently strands its section. Every
 # message the page quotes must still exist in the code that prints it
-# (install.sh, lib/, zsh/).
+# (install.sh, lib/*.sh and lib/*.py, zsh/).
 #
 # What counts as a quoted message:
 #   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
@@ -32,7 +32,7 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/troubleshooting_messages_test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 
 # The code that prints the messages, flattened into one searchable file.
-cat "$repo_root/install.sh" "$repo_root"/lib/*.sh "$repo_root"/zsh/zshrc "$repo_root"/zsh/*.zsh > "$work/code"
+cat "$repo_root/install.sh" "$repo_root"/lib/*.sh "$repo_root"/lib/*.py "$repo_root"/zsh/zshrc "$repo_root"/zsh/*.zsh > "$work/code"
 
 # 1. Fenced-block lines.
 awk '/^```/ { inblock = !inblock; next }

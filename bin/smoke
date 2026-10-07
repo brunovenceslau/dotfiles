@@ -339,6 +339,10 @@ fi
 
 export HOME="$scratch"
 unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_STATE_HOME XDG_DATA_HOME ZDOTDIR
+# The install's identity step (install.sh identity) reads the ssh-agent and an
+# allowed-signers file; a fresh machine has neither, and a smoke must not
+# depend on the developer's.
+unset SSH_AUTH_SOCK CANGA_HOST_ALLOWED_SIGNERS
 # macOS Terminal.app sources /etc/zshrc_Apple_Terminal, whose "Save/Restore Shell
 # State" hook writes "Saving session..." to stderr when an interactive shell exits
 # - which would dirty the `zsh -i -c exit` stderr this driver asserts is empty.

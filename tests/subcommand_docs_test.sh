@@ -66,15 +66,16 @@ case_arm_names() {
 }
 
 # header_usage_names FILE - the subcommand names install.sh's own header
-# "install.sh <name> ..." usage lines name. A bracketed flag ([--purge]) is
-# an argument, not a name, and is dropped; a bracketed bare word ([install])
+# "install.sh <name> ..." usage lines name. A bracketed flag ([--purge], or one
+# with a value such as [--name NAME]) is an argument, not a name, and is
+# dropped; a bracketed bare word ([install])
 # marks the default subcommand and is kept. Relies on the 2+ space gap
 # before each description, which install.sh's own header comment documents
 # as load-bearing for exactly this reason.
 header_usage_names() {
   grep -E '^#   install\.sh ' "$1" \
     | sed -E 's/^#   install\.sh //; s/  +.*$//' \
-    | sed -E 's/\[--[a-zA-Z0-9_-]+\]//g' \
+    | sed -E 's/\[--[^]]*\]//g' \
     | tr -d '[]' \
     | tr '|' '\n' \
     | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \

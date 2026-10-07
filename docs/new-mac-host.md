@@ -83,12 +83,65 @@ git -C ~/.config/dotfiles submodule update --init --recursive
 symlink pointing outside the repository, it would overwrite to `<file>.bak`,
 and records every link it creates in `$XDG_STATE_HOME/dotfiles/manifest`.
 
-The installer prints a warning if commit signing is not configured. That is
-expected on a fresh host. Step 4 fixes it.
+The installer tries to set your git identity and signing key from this host's
+allowed-signers file and ssh-agent, and prints a warning if commit signing is
+still not configured. That is expected on a fresh host. Step 4 fixes it.
 
 ## 4. Set identity and signing
 
-Identity lives in the untracked local config, never in the tracked one:
+Identity lives in the untracked local config, never in the tracked one.
+
+### If this host's signing key is already in your allowed-signers file
+
+When the ssh-agent holds this host's signing key and an allowed-signers file
+lists it with your email, the installer already set the identity in step 3.
+Every later `./install.sh link` and `dotfiles-upgrade` tries again while it is
+missing, so a key you add afterwards is picked up there too. The automatic
+step does nothing in an SSH session, where the agent is usually forwarded from
+another machine; run the command below there only when the agent holds this
+host's own key.
+
+1. Add your name once:
+
+   ```sh
+   cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
+   ```
+
+   It writes `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`
+   and `gpg.ssh.allowedSignersFile` to `~/.config/git/config.local`, and never
+   overwrites a value already set. If it says it is writing nothing, its
+   message names the missing piece. The fixes are in
+   [the installer did not set the git identity](troubleshooting.md#the-installer-did-not-set-the-git-identity).
+   Where it looks and how it matches is in
+   [`install.sh identity`](shell-reference.md#installsh-identity).
+
+2. Check what git now uses, from outside any repository. Do not use
+   `git config --global` here, because it skips the included files (see
+   [`git config --global` returns empty](troubleshooting.md#git-config---global-returns-empty)).
+
+   ```sh
+   git -C ~ config --show-origin --get user.email
+   git -C ~ config --show-origin --get user.signingkey
+   ```
+
+   Both lines name `~/.config/git/config.local`.
+
+3. Make one signed commit in any repository, and check who signed it and with
+   which key. A `G` alone is not enough: git does not tie the signer to the
+   committer email.
+
+   ```sh
+   git log -1 --format='%G? %GS %GF'
+   ssh-add -l
+   ```
+
+   Expect `G`, your email, and the fingerprint `ssh-add -l` shows for this
+   host's signing key.
+
+When this host's key changes later, see
+[rotating the signing key](architecture.md#rotating-the-signing-key).
+
+### Otherwise, set it by hand
 
 ```sh
 git config --file ~/.config/git/config.local user.name  "Your Name"
@@ -114,7 +167,8 @@ it. The refresh opens the same browser flow as the login.
 Nothing in the framework verifies signatures. `dotfiles-upgrade` is a fetch plus
 a fast-forward merge. Signing exists for GitHub's Verified badge and for your own
 `git log --show-signature`. To make local verification work, add an
-`allowedSignersFile` entry as shown in `config/git/config.local.example`.
+`allowedSignersFile` entry as shown in `config/git/config.local.example`. Once
+that file lists this host's key, `./install.sh identity` can set the rest.
 
 ## 5. Install the packages
 
