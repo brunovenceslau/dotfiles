@@ -182,6 +182,10 @@ def git_units(mod, scratch):
     xonly = os.path.join(scratch, "xonly")
     os.mkdir(xonly, 0o700)
     os.chdir(xonly)
+    # The checks below compare with getcwd(), so xonly takes its spelling:
+    # SCRATCH may sit behind a symlink (macOS's TMPDIR is /var/folders/...,
+    # which getcwd() names /private/var/folders/...).
+    xonly = os.getcwd()
     os.chmod(xonly, 0o311)
     try:
         if hasattr(os, "O_PATH"):
