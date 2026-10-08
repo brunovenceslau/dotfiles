@@ -29,7 +29,14 @@ cd ~/.config/dotfiles
 ./install.sh && exec zsh
 ```
 
-Then give this machine its own git identity:
+Then give this machine its own git identity. If your allowed-signers file
+lists the key in this machine's ssh-agent, the installer derives it:
+
+```sh
+./install.sh identity --name "Your Name"
+```
+
+Otherwise set it by hand:
 
 ```sh
 git config --file ~/.config/git/config.local user.name  "Your Name"
@@ -147,9 +154,9 @@ run the installer.
 ### Set your git identity
 
 The tracked git config carries no identity or signing key, so every machine sets
-its own in the untracked `~/.config/git/config.local` (the two `git config`
-lines in the [Quick start](#quick-start)), and nothing commits as the
-maintainer.
+its own in the untracked `~/.config/git/config.local` (the
+[Quick start](#quick-start) shows both ways: `./install.sh identity` or two
+`git config` lines), and nothing commits as the maintainer.
 
 Until commit signing is configured, the installer prints a warning that it is
 not enabled. Signing is optional: nothing on this machine refuses an unsigned

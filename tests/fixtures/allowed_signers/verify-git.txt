@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Conformance vectors for an allowed-signers matcher: what
+# `ssh-keygen -Y verify -n git -I a@x` decides for each line, alone in a file,
+# against a signature by the key that replaces @KEY@ (`<keytype> <base64>`).
+# Format: the verdict (OK or REJECT), one TAB, then the line verbatim (leading
+# spaces and inner tabs included), where `\xHH` stands for the byte HH, so
+# carriage returns, form feeds, separators and bytes that are not UTF-8 can be
+# written down; no other escape exists. Language-neutral on purpose, so any
+# other implementation of the same rule can run the same vectors.
+# Verdict UNCLEAR: ssh-keygen accepts the line, and a matcher that refuses it
+# as malformed must still find the key in it, so that the line can never hide
+# a valid entry for a key it names.
+# Placeholders: @KEYHEAD@ and @KEYTAIL@ are @KEY@ cut after 20 base64
+# characters, so bytes can be put inside the blob; @ECKEY@ is an ECDSA key
+# (the signature checked is then its own), and @ECKEYSPILL@ the same key with
+# a spill bit set in the base64 character before the padding; @RSA256@ and
+# @RSA512@ are an RSA key under the names rsa-sha2-256 and rsa-sha2-512, also
+# checked against its own signature.
+# tests/host_identity_test.sh checks lib/host_identity.py against every line,
+# and re-asks ssh-keygen itself, so a verdict here cannot drift from OpenSSH.
+# `-Y find-principals` is NOT the oracle: it ignores namespaces.
+# The far-future dates (2099) keep the verdicts stable for decades, and every
+# verdict holds in any time zone: a local date near 1970-01-01 is not (it is
+# before the epoch east of UTC), so 19700102 is the earliest one written here.
+OK	a@x namespaces="git" @KEY@
+OK	a@x NAMESPACES="git" @KEY@
+REJECT	a@x namespaces="Git" @KEY@
+OK	a@x namespaces="git," @KEY@
+REJECT	a@x namespaces="" @KEY@
+OK	a@x namespaces="!file,*" @KEY@
+OK	a@x namespaces="*it" @KEY@
+OK	"a@x,b@y" namespaces="git" @KEY@
+REJECT	a@x namespaces="git", valid-after="20200101" @KEY@
+REJECT	a@x cert-authority @KEY@
+REJECT	a@x valid-after="20990101" @KEY@
+REJECT	a@x valid-before="20250101Z" @KEY@
+REJECT	a@x foo="x" @KEY@
+REJECT	a@x namespaces=git @KEY@
+OK	   a@x namespaces="git" @KEY@
+OK	* namespaces="git" @KEY@
+OK	a@x @KEY@ trailing comment
+REJECT	a@x valid-before="garbage" @KEY@
+OK	a@x	namespaces="git"	@KEY@
+REJECT	a@x namespaces="git,!git" @KEY@
+REJECT	a@x namespaces="!git,git" @KEY@
+OK	a@x valid-after="202001011200" @KEY@
+REJECT	a@x namespaces="g\"it" @KEY@
+REJECT	a@x Cert-Authority,namespaces="git" @KEY@
+OK	a@x valid-before="20991231235959Z",valid-after="19700102" @KEY@
+OK	*@x namespaces="git" @KEY@
+REJECT	"!a@x,*" @KEY@
+REJECT	a@x namespaces="file" @KEY@
+OK	a@x namespaces="file,git" @KEY@
+REJECT	a@x valid-before="20000101" @KEY@
+REJECT	b@y @KEY@
+REJECT	A@X @KEY@
+OK	a@x @KEY@ comment with "quotes" and spaces
+OK	a@x valid-after="20000101",valid-before="20991231" @KEY@
+REJECT	a@x namespaces="git" valid-before="20000101" @KEY@
+OK	a@x namespaces="x y,git" @KEY@
+REJECT	a@x namespaces="git",cert-authority @KEY@
+OK	a@x @KEY@\x0d
+OK	a@x\x0d@KEY@
+OK	\x0da@x @KEY@
+REJECT	a@x\x0c@KEY@
+REJECT	a@x\x0b@KEY@
+OK	a@x @KEY@ c\xc2\x85d
+OK	a@x @KEY@ c\x1cd
+OK	a@x @KEY@ c\x1ed\x0c
+OK	a@x @KEY@ c\xff\xfe
+REJECT	a@x @KEY@\x0dcomment
+REJECT	a@x namespaces="git"\x0d@KEY@
+REJECT	a@x namespaces="g\x0dit" @KEY@
+REJECT	\xef\xbb\xbfa@x @KEY@
+REJECT	a@x namespaces="git",namespaces="git" @KEY@
+REJECT	a@x valid-before="20990101",valid-before="20990101" @KEY@
+REJECT	a@x valid-after="20000101",valid-after="20000101" @KEY@
+REJECT	a@x cert-authority,cert-authority @KEY@
+REJECT	a@x NAMESPACES="git",namespaces="git" @KEY@
+REJECT	a@[x] @KEY@
+REJECT	a@[xy] @KEY@
+REJECT	a@[!y] @KEY@
+REJECT	a@x namespaces="[g]it" @KEY@
+OK	a@? @KEY@
+OK	a@x namespaces="g?t" @KEY@
+OK	a@x namespaces="g*" @KEY@
+OK	"a@x" @KEY@
+REJECT	"a@x"b @KEY@
+REJECT	a"@"x @KEY@
+OK	a@x,!b@y @KEY@
+REJECT	a@x,!a@x @KEY@
+REJECT	!a@x,a@x @KEY@
+OK	*,!b@y @KEY@
+REJECT	!b@y @KEY@
+OK	a@x valid-before="20991231Z" @KEY@
+REJECT	a@x valid-after="2000010" @KEY@
+REJECT	a@x valid-after="20000101",namespaces="git", @KEY@
+OK	a@x namespaces="git" @KEY@ comment "quoted" text
+REJECT	a@x cert-authorityx @KEY@
+REJECT	a@x valid-after="19700101Z" @KEY@
+REJECT	a@x valid-after="19691231" @KEY@
+REJECT	a@x valid-before="19700101Z" @KEY@
+OK	a@x valid-before="20991231UTC" @KEY@
+OK	a@x valid-before="20991231utc" @KEY@
+REJECT	a@x valid-before="20991231UT" @KEY@
+OK	a@x valid-after="20000230" @KEY@
+OK	a@x valid-before="20990230" @KEY@
+REJECT	a@x valid-after="20001301" @KEY@
+REJECT	a@x valid-after="200001011260" @KEY@
+OK	a@x ,namespaces="git" @KEY@
+OK	a@x ,,namespaces="git" @KEY@
+OK	a@x namespaces="git",,valid-after="20000101" @KEY@
+REJECT	a@x ,namespaces="file" @KEY@
+REJECT	a@x , @KEY@
+REJECT	a@x ,foo="x" @KEY@
+REJECT	#c\x0da@x @KEY@
+REJECT	#c\x0ca@x @KEY@
+REJECT	#c\xc2\x85a@x @KEY@
+REJECT	#c\x1ca@x @KEY@
+OK	a@x,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb @KEY@
+REJECT	a@x,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb @KEY@
+REJECT	bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,a@x @KEY@
+REJECT	a@x,!bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb @KEY@
+OK	a@x @KEYHEAD@\x0c@KEYTAIL@
+OK	a@x @KEYHEAD@\x0b@KEYTAIL@
+OK	a@x @KEYHEAD@\x0d@KEYTAIL@
+REJECT	a@x @KEYHEAD@\x1c@KEYTAIL@
+OK	"a@x"@KEY@
+UNCLEAR	a@x @KEY@ c\x00d
+REJECT	a@x,\x00b@y @KEY@
+REJECT	a@x,\x00b@y namespaces="git" @KEY@
+REJECT	a@x\x00 @KEY@
+UNCLEAR	a@x @KEY@\x00
+UNCLEAR	a@x @KEY@\x00junk
+UNCLEAR	"a@x"@KEY@\x00
+UNCLEAR	a@x\x0d@KEY@\x00
+UNCLEAR	a@x namespaces="git" @KEYHEAD@\x0c@KEYTAIL@\x00
+OK	a@x @ECKEY@
+REJECT	a@x @ECKEYSPILL@
+OK	a@x @RSA256@
+OK	a@x @RSA512@

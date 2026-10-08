@@ -18,6 +18,10 @@
 #                                    recompile (wrapped by dotfiles-upgrade)
 #   install.sh uninstall [--purge]   remove framework links; --purge also clears
 #                                    generated cache/state (wrapped by dotfiles-uninstall)
+#   install.sh identity [--name NAME] [--rotate]  derive git identity + SSH
+#                                    signing from the host's allowed_signers and
+#                                    ssh-agent (install runs it too); --rotate
+#                                    replaces a signing key that no longer verifies
 #   install.sh -h | --help | help    print a short usage line
 #
 # reseed-settings is retired: kept as a no-op, cross-version ABI only (see
@@ -578,15 +582,90 @@ EOF
   return "${rc:-0}"
 }
 
+# do_identity --mode auto|identity|rotate|check [--name NAME] - derive this
+# host's git identity and SSH signing key from its allowed-signers file and
+# ssh-agent, and write them into $xdg_config/git/config.local (the same XDG
+# path the link engine's ~/.config/git/config includes); rotate the key; or
+# report a stale one. The logic is lib/host_identity.py: parsing quoted
+# allowed-signers options is fragile in bash 3.2, and python3 ships with the
+# Command Line Tools that git itself needs. `-I` keeps the cwd and PYTHON*
+# variables out of its module path. Returns the script's status: 0 identity in
+# place, 1 nothing decided, 2 usage. An unusable python3 is a skip with a
+# warning (1).
+#
+# `--mode auto` is the automatic step the `install` and `link` arms run (and so
+# every dotfiles-upgrade, which re-enters `link`): it writes only what is
+# absent, is quiet once the host signs, prints ONE line (naming
+# "$DOTFILES/install.sh identity" for the details) when it cannot act, does
+# nothing in an SSH session (a forwarded agent holds another machine's keys),
+# never rotates a key and never writes user.name (no source can derive it;
+# `identity --name` does). With --report-stale (the `link` arm only, since
+# `install` runs the fuller _signing_advisory right after), a host that already
+# signs gets ONE line when its configured key no longer verifies (retired,
+# expired or revoked). Its callers ignore its status: a host without an
+# agent or a trust root still installs and upgrades. The upgrade's scrubbed
+# git environment does not reach it: vgit scrubs per command and exports
+# nothing, the step drops git's repository-local variables itself
+# (lib/host_identity.py, GIT_LOCAL_ENV), and it refuses to write under a
+# GIT_CONFIG_GLOBAL that is not the XDG config.
+#
+# The probe RUNS python3 rather than asking `command -v`: on a Mac without the
+# Command Line Tools, /usr/bin/python3 exists as a stub that only offers to
+# install them, so its presence proves nothing. Probed once per process.
+_python_usable=""
+_python_ok() {
+  if [ -z "$_python_usable" ]; then
+    if python3 -I -c '' >/dev/null 2>&1; then _python_usable=yes; else _python_usable=no; fi
+  fi
+  [ "$_python_usable" = yes ]
+}
+do_identity() {
+  if ! _python_ok; then
+    warn "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $DOTFILES/install.sh identity)"
+    return 1
+  fi
+  python3 -I "$DOTFILES/lib/host_identity.py" --config-local "$xdg_config/git/config.local" \
+    --installer "$DOTFILES/install.sh" "$@"
+}
+
 # authoring-side advisory. The tracked git config deliberately omits
 # commit.gpgsign (a keyless fresh clone must still be able to commit), so a host
 # with no config.local commits UNSIGNED with no other signal: nothing local
 # refuses the commit, and it surfaces only after the push, as a missing Verified
 # badge or a remote branch rule that requires signatures. Warn once at install
-# time, pointing at the example. Non-fatal; reads the global config
-# (the linked ~/.config/git/config + its config.local include).
+# time, pointing at the fix. Non-fatal; reads the global config (the linked
+# ~/.config/git/config + its config.local include).
 _signing_advisory() {
+  local gpgsign
   command -v git >/dev/null 2>&1 || return 0
+  # Before ANY git call: git opens the global chain at startup, config.local
+  # include and all, even for a `git config --file` read, and a config.local
+  # that is not a regular file (a FIFO) would hold every call. Only shell tests
+  # run before this. The identity step, which runs first, has named it.
+  if [ -e "$xdg_config/git/config.local" ] && [ ! -f "$xdg_config/git/config.local" ]; then
+    return 0
+  fi
+  # ~/.gitconfig first, signing on or off: git reads it AFTER the XDG config, so
+  # whatever it sets wins, and `git config --global` then reads and writes only
+  # that file. A DANGLING one is inert today but comes back to life, old
+  # settings and all, the day its target is restored from a backup. One that
+  # carries signing settings can, for example, pit a legacy GPG signingkey
+  # against the framework's gpg.format=ssh and make every commit FAIL CLOSED.
+  if [ -L "$HOME/.gitconfig" ] && [ ! -e "$HOME/.gitconfig" ]; then
+    warn "a dangling ~/.gitconfig symlink is in place - if its target ever comes back, its"
+    warn "  settings override ~/.config/git/config. Remove it (XDG-only model)."
+  elif [ -f "$HOME/.gitconfig" ] \
+     && git config --file "$HOME/.gitconfig" --get-regexp '^(user\.signingkey|gpg\.|commit\.gpgsign)' >/dev/null 2>&1; then
+    warn "a legacy ~/.gitconfig carries signing settings and may override the"
+    warn "  framework's XDG config (e.g. a GPG signingkey vs gpg.format=ssh),"
+    warn "  which can make commits fail. Migrate host-specific settings into"
+    warn "  ~/.config/git/config.local and remove ~/.gitconfig (XDG-only model)."
+    warn "  To STAY on GPG during the interim, set gpg.format=openpgp in config.local."
+  elif [ -f "$HOME/.gitconfig" ]; then
+    warn "a ~/.gitconfig exists: its values override ~/.config/git/config, and"
+    warn "  \`git config --global\` reads and writes only it. Move its settings into"
+    warn "  ~/.config/git/config.local and remove it (XDG-only model)."
+  fi
   # Read the EFFECTIVE commit.gpgsign as a real commit would - ALL levels combined
   # (system + XDG global + ~/.gitconfig) - from a non-repo cwd ($HOME) so the
   # dotfiles repo's own local config can't skew it. NOT --global: that selects a
@@ -594,25 +673,33 @@ _signing_advisory() {
   # XDG config where config.local lives - so a --global read would false-fire when
   # a residual ~/.gitconfig sits alongside a signing-enabled config.local. Includes
   # are on by default without --global; --type=bool normalizes yes/on/1/True.
-  if [ "$(git -C "$HOME" config --includes --type=bool --get commit.gpgsign 2>/dev/null)" != true ]; then
+  # An explicit false is the host's exception, which the identity step keeps
+  # (lib/host_identity.py, identity()), so the advisory names it and says how to
+  # undo it rather than pointing at a step that will leave it alone. A false
+  # that overrides a true in config.local is not an exception but an override,
+  # which the check below names with its file (tag.gpgsign's too). Either way
+  # the check still runs: a key can go stale while commit signing is off.
+  gpgsign="$(git -C "$HOME" config --includes --type=bool --get commit.gpgsign 2>/dev/null)" || gpgsign=""
+  if [ "$gpgsign" = false ]; then
+    warn "commit signing is NOT enabled on this host (commit.gpgsign is false)."
+    if [ "$(git config --file "$xdg_config/git/config.local" --type=bool --get commit.gpgsign 2>/dev/null)" != true ]; then
+      warn "  An explicit false is kept as this host's exception, and"
+      warn "  $DOTFILES/install.sh identity leaves it. To sign, remove the false"
+      warn "  from the file that sets it (git -C ~ config --show-origin --get commit.gpgsign)."
+    fi
+  elif [ "$gpgsign" != true ]; then
     warn "commit signing is NOT enabled on this host (commit.gpgsign is unset)."
-    warn "  set user.signingkey + commit.gpgsign in ~/.config/git/config.local"
-    warn "  (see config/git/config.local.example). Optional: nothing refuses an"
-    warn "  unsigned commit, but GitHub will not show the Verified badge."
+    warn "  Run $DOTFILES/install.sh identity, or set user.signingkey +"
+    warn "  commit.gpgsign in ~/.config/git/config.local (see"
+    warn "  config/git/config.local.example). Optional: nothing refuses an unsigned"
+    warn "  commit, but GitHub will not show the Verified badge."
     return 0
   fi
-  # Signing is on - but a residual ~/.gitconfig can override the framework's XDG
-  # config: e.g. a legacy GPG signingkey against the framework's gpg.format=ssh
-  # makes every commit FAIL CLOSED, while commit.gpgsign still reads true. The
-  # framework is XDG-only; warn if a home-dir gitconfig carries signing settings.
-  if [ -f "$HOME/.gitconfig" ] \
-     && git config --file "$HOME/.gitconfig" --get-regexp '^(user\.signingkey|gpg\.|commit\.gpgsign)' >/dev/null 2>&1; then
-    warn "a legacy ~/.gitconfig carries signing settings and may override the"
-    warn "  framework's XDG config (e.g. a GPG signingkey vs gpg.format=ssh),"
-    warn "  which can make commits fail. Migrate host-specific settings into"
-    warn "  ~/.config/git/config.local and remove ~/.gitconfig (XDG-only model)."
-    warn "  To STAY on GPG during the interim, set gpg.format=openpgp in config.local."
-  fi
+  # A stale key (no longer valid in the trust root, revoked, or not in the
+  # agent), a user.signingkey set outside config.local, and a gpgsign that a
+  # later file turns off against config.local. Quiet when python3 is unusable:
+  # the identity step already said so.
+  if _python_ok; then do_identity --mode check || :; fi
 }
 
 # Dispatch only when executed, not when sourced - so tests (and any future tool)
@@ -636,6 +723,11 @@ case "$cmd" in
     # It runs even when a link was refused, for the reason the install arm gives.
     _cache_shell_inits
     harden_plugin_perms
+    # The automatic identity step (see do_identity): `link` is the arm an upgrade
+    # re-enters on the new tree, so a host gains its identity on its next
+    # dotfiles-upgrade, and hears in one line when its key has gone stale.
+    # Non-fatal, and it never changes this arm's exit status.
+    do_identity --mode auto --report-stale || :
     _link_failed "$link_rc" && exit 1
     log "links (re)created."
     ;;
@@ -681,6 +773,10 @@ case "$cmd" in
     # Pre-compile the shell integrations the startup path sources (starship, zoxide,
     # canga's and sbx's completion) so `zsh -i` never forks to build one.
     _cache_shell_inits
+    # The automatic identity step (see do_identity). Here, not through the link
+    # arm, so it runs exactly once per install, and before the advisory, which
+    # then reports what it left.
+    do_identity --mode auto || :
     _signing_advisory   # warn if commit signing isn't set up yet
     if _link_failed "$link_rc"; then
       if [ "$link_rc" -eq 1 ]; then
@@ -718,12 +814,49 @@ case "$cmd" in
     do_uninstall "$@" || { rc=$?; warn "uninstall reported problems (see warnings above)"; exit "$rc"; }
     log "uninstalled - framework links removed."
     ;;
+  identity)
+    # Configure git identity + signing from the host. Unlike the install arm,
+    # a refusal here is the answer the operator asked for, so it exits non-zero.
+    # Each option is taken once, so a typo or a second value cannot silently win.
+    shift
+    id_name="" id_has_name=0 id_rotate=0
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name | --name=*)
+          [ "$id_has_name" -eq 0 ] || { warn "identity: --name given more than once"; exit 2; }
+          if [ "$1" = --name ]; then
+            [ $# -ge 2 ] || { warn "identity: --name needs a value"; exit 2; }
+            id_name="$2"; shift
+          else
+            id_name="${1#--name=}"
+          fi
+          id_has_name=1; shift ;;
+        --rotate)
+          [ "$id_rotate" -eq 0 ] || { warn "identity: --rotate given more than once"; exit 2; }
+          id_rotate=1; shift ;;
+        *) warn "identity: unknown option: $1 (expected: --name \"Full Name\" | --rotate)"; exit 2 ;;
+      esac
+    done
+    if [ "$id_rotate" -eq 1 ] && [ "$id_has_name" -eq 1 ]; then
+      warn "identity: --rotate replaces only user.signingkey - run --name separately"; exit 2
+    fi
+    id_rc=0
+    if [ "$id_rotate" -eq 1 ]; then
+      do_identity --mode rotate || id_rc=$?
+    elif [ "$id_has_name" -eq 1 ]; then
+      # --name=VALUE, one argv word: a name that starts with a dash stays a value.
+      do_identity --mode identity --name="$id_name" || id_rc=$?
+    else
+      do_identity --mode identity || id_rc=$?
+    fi
+    exit "$id_rc"
+    ;;
   -h | --help | help)
-    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]]"
+    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]|identity [--name NAME] [--rotate]]"
     printf '%s\n' "       (retired, kept for cross-version compatibility: reseed-settings)"
     ;;
   *)
-    warn "unknown command: $cmd (expected: install | link | packages | upgrade | uninstall | reseed-settings)"
+    warn "unknown command: $cmd (expected: install | link | packages | upgrade | uninstall | identity | reseed-settings)"
     exit 2
     ;;
 esac

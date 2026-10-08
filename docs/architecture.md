@@ -26,6 +26,10 @@ quality gates, see [development](development.md).
   - [Neutralizing the fast-syntax-highlighting theme fetch](#neutralizing-the-fast-syntax-highlighting-theme-fetch)
 - [The upgrade path](#the-upgrade-path)
 - [The installer refuses root](#the-installer-refuses-root)
+- [The host's signing identity](#the-hosts-signing-identity)
+  - [Rotating the signing key](#rotating-the-signing-key)
+  - [The automatic step](#the-automatic-step)
+  - [Deferred decisions](#deferred-decisions)
 - [Security properties and where they are enforced](#security-properties-and-where-they-are-enforced)
 - [Platform differences](#platform-differences)
 
@@ -50,13 +54,14 @@ Four constraints shape every decision here.
 
 ```
 ~/.config/dotfiles
-├── install.sh          bootstrap: install | link | packages | upgrade | uninstall
+├── install.sh          bootstrap: install | link | packages | upgrade | uninstall | identity
 ├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, local-ci, repo-settings-check
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
 │   ├── uninstall.sh    the manifest-driven reverse of link.sh
-│   └── packages.sh     brew bundle plus pinned gh extensions
+│   ├── packages.sh     brew bundle plus pinned gh extensions
+│   └── host_identity.py   git identity and signing key from allowed_signers + ssh-agent
 ├── bin/                repo tools; only tmux-status is linked onto PATH
 │   ├── check-patterns  static lint gate (dev only, run by make)
 │   ├── secret-scan     secret-shaped content scanner (dev only)
@@ -495,6 +500,99 @@ the framework needs root: Homebrew is user-scoped.
 A root `dotfiles-upgrade` run from an older release still runs that release's
 own git steps (fetch, merge, submodule update) as root; only the new tree's
 `install.sh`, which the upgrade re-enters for the relink, refuses.
+
+## The host's signing identity
+
+Each host signs with its own SSH key, held by its ssh-agent and listed, with
+the email it commits as, in an allowed-signers file. That file is the one
+source: `install.sh identity` derives `user.email` and a literal
+`user.signingkey` from it, and git verifies against the same file. The exact
+rule is in the [shell reference](shell-reference.md#installsh-identity).
+
+The key is a static value in `config.local`, not chosen again at every
+signature. Git runs no selection code when it signs, so a commit made from a
+GUI client or a cron job signs the same way as one made from a shell. The cost
+is that a new key needs one explicit step, `--rotate`, below.
+
+The step reads the allowed-signers file the way `ssh-keygen -Y verify` does,
+not the way `ssh-keygen -Y find-principals` does: `find-principals` ignores
+namespaces, so it would accept an entry that `git verify-commit` rejects.
+`tests/fixtures/allowed_signers/verify-git.txt` holds the vectors, and
+`tests/host_identity_test.sh` re-checks them against `ssh-keygen` on every run,
+in four time zones, because a validity time without a `Z` is local. A
+generated leg in `tests/host_identity_conformance.py` adds a fixed, seeded
+corpus of altered lines for ed25519, ECDSA and RSA keys, and fails when the
+step accepts a line `ssh-keygen` refuses, or when `ssh-keygen` accepts a line
+the step neither accepts nor names as malformed for that key. It holds each
+key's spellings, the security-key types included, to `ssh-keygen -l` the same
+way.
+
+Git does not bind the signer to the committer. A commit whose author is
+`a@example.com`, signed by a key listed only for `b@example.com`, still
+verifies as `G`. A check that matters therefore asserts the signer principal
+(`%GS`) and the key fingerprint (`%GF`), not only that the signature is good;
+`tests/host_identity_test.sh` does both on a real signed commit.
+
+### Rotating the signing key
+
+Add the new key to the allowed-signers file next to the old one, load it into
+the agent, then retire the old entry with a `valid-before` date in the past
+and run `./install.sh identity --rotate`. It replaces `user.signingkey` only
+when the old key no longer verifies for your email and exactly one agent key
+does, so while both entries are valid nothing changes. A configured key that
+has gone stale is reported by the installer's advisory, and in one line by
+every `link` and `dotfiles-upgrade`.
+
+`valid-before` is routine retirement only, never revocation. `ssh-keygen`
+checks it against the commit's own date, which the signer chooses: whoever
+holds the old private key can backdate a commit and it still verifies as `G`.
+A key that is lost or compromised goes into the file named by
+`gpg.ssh.revocationFile`, or its entry is deleted; either makes every
+signature by it fail to verify, whatever date it claims. The identity step
+reads the same revocation file: it never selects a revoked key, reports a
+configured one, and `--rotate` replaces it.
+
+### The automatic step
+
+`install`, `link` and every `dotfiles-upgrade` run the identity step on a host
+that does not sign yet, so a key added to the allowed-signers file later is
+picked up without a separate command. It stays deliberately small: it writes
+only what is absent, never rotates and never writes a name. When it cannot
+act it prints one line, not the full explanation, because it runs on every
+relink. It writes nothing in an SSH session, where a forwarded agent offers
+another machine's keys. On a host that already signs, `link` (and so every
+upgrade) only checks that the configured key still verifies, and says so in
+one line when it does not.
+
+An explicit `commit.gpgsign = false` or `tag.gpgsign = false` is that host's
+exception to signing, unless `config.local` itself says `true` (then it is an
+override, which `link` reports in one line): the step keeps it and still
+writes the email and the key, while a conflicting key, email or trust root
+still makes it write nothing. Making signed commits mandatory in the tracked
+config, with that same `false` as the per-host exception, is a separate
+change.
+
+### Deferred decisions
+
+Each stays as it is until its trigger fires.
+
+| Decision | Kept for now | Reopen when |
+| --- | --- | --- |
+| Pick the key at every signature (`gpg.ssh.defaultKeyCommand`) instead of a static `user.signingkey` | The static key, rotated by `--rotate` | Rotations become frequent, or the stale-key report fires in practice |
+| One selector implementation, in canga, shared with the sandbox (sandboxed agents today pick their signing key from a pinned list of their own, not from the host's allowed-signers file) | The Python step in `lib/host_identity.py` | The sandbox selects keys from the host's allowed-signers file, or another matcher diverges on the shared vectors |
+| Repair a `~/.config/git/config` that does not include `config.local` | The step checks the include chain before it writes and reports a missing one, and [framework git settings do not apply](troubleshooting.md#framework-git-settings-do-not-apply) has the fix | A host shows a broken include chain |
+| Test two identity runs writing `config.local` at once | One writer per run: a temporary file and a rename, and the first `.bak` is never replaced; no concurrency test | A host reports a corrupt `config.local` or a second `.bak` |
+| Match glibc's leniencies in the allowed-signers and revocation readers (a seconds field of 61, spaces inside a date field), and `ssh-keygen`'s acceptance of a repeated `cert-authority` or of a line cut short by a NUL byte | Read more strictly, the same on every platform (the header of `lib/host_identity.py`): such an allowed-signers line is malformed, and one that names an ssh-agent key makes the step write nothing, as an ambiguity; such a revocation line makes it write nothing | One of these spellings turns up in a real allowed-signers or revocation file |
+| Hold the test `.py` files to the Python 3.9 floor, in `tests/host_identity_units.py` and the Makefile `py-syntax` leg | The floor is checked for `lib/host_identity.py` only | A test `.py` file uses syntax newer than 3.9, or CI gains a 3.9 leg |
+| Refuse on a malformed allowed-signers line only when it could change this host's own identity (its principals match `user.email`) | Any malformed line that names an ssh-agent key makes the step write nothing, even a line for another email: it fails closed | Someone is blocked by a malformed line for another principal |
+| Explain a signing override in `_signing_advisory` when python3 is unusable | The advisory says signing is off; the override and stale-key checks need python3 and are skipped, and the identity step already says python3 is unusable | A host without a usable python3 reports a signing override it could not trace |
+| Make `--rotate`, and the stale-key line that points at it, agree with every platform's `ssh-keygen` on a line only glibc accepts; report a `user.signingkey` that names no readable key from `link` | `--rotate` may move away from a key glibc's `ssh-keygen` still accepts, or refuse with the malformed-line message after `link` pointed at it; `link` stays quiet on a `user.signingkey` it cannot read (it reports only what it can judge) | A host hits either path in practice |
+| Check for ambiguity a key spelled only inside a quoted option value | Not checked: the review that found it judged the shape contrived and failing closed | Such a line turns up in a real allowed-signers file |
+| Name the `webauthn-sk-ecdsa-sha2-nistp256@openssh.com` spelling of a security key on purpose: add it to `TYPE_ALIASES`, or pin today's behaviour with a test | A line using that name is malformed here, and `keys_named()` finds its key only because the name contains `sk-ecdsa-sha2-nistp256@openssh.com` | The next edit to `keys_named()` |
+| Require a minimum `ssh-keygen` version for the conformance vectors | The suite uses the host's `ssh-keygen`; the review reported that the vector `OK \x0da@x @KEY@` fails with OpenSSH 9.2 and 9.6 and passes with 9.7 and later (not reproduced here) | A host with `ssh-keygen` 9.6 or older goes red on it, or the macOS CI leg shows it |
+| Probe `ssh-keygen -Y sign` and `-Y verify` once, with a named message, before the conformance checks | The suite signs and verifies directly, so a broken `ssh-keygen` fails it without naming the cause | A report of a conformance failure that is empty or a traceback |
+| Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
+| Guard against a FIFO at `~/.gitconfig` | Not guarded: git itself hangs on one, so every git command does, not only this step | A host reports a hang that traces to a special file at `~/.gitconfig` |
 
 ## Security properties and where they are enforced
 

@@ -11,6 +11,7 @@ variables and files. For the reasoning behind any of it, see
 [architecture](architecture.md).
 
 - [`install.sh` subcommands](#installsh-subcommands)
+  - [`install.sh identity`](#installsh-identity)
 - [Lifecycle commands](#lifecycle-commands)
 - [restic wrappers](#restic-wrappers)
 - [Helper functions](#helper-functions)
@@ -37,11 +38,12 @@ given.
 
 | Subcommand | Arguments | What it does |
 | --- | --- | --- |
-| `install` | none | Creates the state and cache directories, migrates a pre-XDG `~/.zsh_history` on a first install, creates every link, initializes missing plugin submodules with object checking forced on, caches the shell integrations, removes group and other write permission from `zsh/plugins`, and warns if commit signing is not configured. |
-| `link` | none | Creates links and rewrites the manifest, refreshes the cached shell integrations, and removes group and other write permission from `zsh/plugins`. Nothing else. This is the arm an upgrade re-enters. |
+| `install` | none | Creates the state and cache directories, migrates a pre-XDG `~/.zsh_history` on a first install, creates every link, initializes missing plugin submodules with object checking forced on, caches the shell integrations, removes group and other write permission from `zsh/plugins`, runs the automatic [identity step](#installsh-identity), and warns if commit signing is not configured or the signing key is stale. |
+| `link` | none | Creates links and rewrites the manifest, refreshes the cached shell integrations, removes group and other write permission from `zsh/plugins`, and runs the automatic [identity step](#installsh-identity). Nothing else. This is the arm an upgrade re-enters. |
 | `packages` | none | `brew bundle` over `packages/Brewfile`, then `packages/Brewfile.local` if present, then the pinned `gh` extensions. Never runs a remote bootstrap script. |
-| `upgrade` | none | Fetch, fast-forward merge, update submodules, relink, recompile. There is no bypass flag, and any argument is rejected. |
+| `upgrade` | none | Fetch, fast-forward merge, update submodules, relink (which runs the automatic [identity step](#installsh-identity)), recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
+| `identity` | `[--name "Full Name"]`, `[--rotate]` | Sets `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
 
@@ -51,11 +53,168 @@ plugin: it then runs `git submodule update --init` to repair a non-recursive
 clone. On a healthy checkout it is a strict no-op.
 
 Exit codes: `2` for a usage error (unknown subcommand, an argument to a
-subcommand that takes none, unknown uninstall option), `1` when the work could
-not complete, `0` on success. A refused link makes `install` and `link` exit 1,
-but only after the other links and the cached integrations are in place.
+subcommand that takes none, unknown uninstall or identity option), `1` when
+the work could not complete, `0` on success. A refused link makes `install`
+and `link` exit 1, but only after the other links and the cached integrations
+are in place.
 `install` then skips the plugin submodule step (its one network step) until a
 re-run links cleanly.
+
+### `install.sh identity`
+
+Configures this host's git identity and SSH commit signing from the host
+itself: its allowed-signers file and its ssh-agent. The logic is
+`lib/host_identity.py`, run with `python3 -I`. When `python3 -I -c ''` fails,
+the step warns and is skipped.
+
+`install` and `link` run the same step automatically, and so does `upgrade`,
+which re-enters `link` on the new tree. The automatic step:
+
+- writes only when the effective config lacks `user.email`,
+  `user.signingkey` or `commit.gpgsign` (`true`, or the explicit `false`
+  below), so a host that signs hears nothing from it while its key verifies;
+- on such a host, in `link` and so in every `upgrade`, prints one line when
+  a later file turns off the signing `config.local` turns on, or when the
+  configured key no longer verifies for `user.email` (its entry is gone or
+  expired, the key is revoked, or the revocation file cannot be checked),
+  naming `<checkout>/install.sh identity --rotate` or, for an override or
+  when the revocation file is the cause, `<checkout>/install.sh identity`.
+  `install` leaves that to its advisory, which prints the full report below;
+- never rotates a key, and never writes `user.name`, which nothing on the host
+  can derive;
+- writes nothing in an SSH session (`SSH_CONNECTION` is set), where the agent
+  is usually forwarded from another machine and holds that machine's keys.
+  `install.sh identity`, run on purpose, still works there;
+- prints one line when it cannot act, naming the cause and
+  `<checkout>/install.sh identity`, which prints the details;
+- never changes the exit status of `install`, `link` or `upgrade`.
+
+Every git config read here asks for the effective value outside any
+repository: all system and global levels, includes on, with git's
+repository-local environment variables (`GIT_DIR`, `GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_COUNT` and the rest of `git rev-parse --local-env-vars`) removed.
+A repository's own config, or a `git -c` in the calling environment, never
+steers it. A `GIT_CONFIG_GLOBAL` that names any file other than
+`$XDG_CONFIG_HOME/git/config` hides `config.local`, which that file includes,
+so the step writes nothing under it. Relative paths in `user.signingkey`,
+`gpg.ssh.allowedSignersFile` and `gpg.ssh.revocationFile` resolve against
+`$HOME` here.
+
+1. **Find the allowed-signers file.** The first of these that is set wins:
+   `$CANGA_HOST_ALLOWED_SIGNERS`, then the effective
+   `gpg.ssh.allowedSignersFile` (a leading `~` is expanded), then
+   `$XDG_CONFIG_HOME/git/allowed_signers` (`~/.config/git/allowed_signers` by
+   default) if it exists. A source that is set but names a missing file is
+   reported, not skipped. The file must be a regular file of at most 1 MiB.
+2. **Read it** in the ssh-keygen(1) ALLOWED SIGNERS format,
+   `principals [options] keytype base64 [comment]`, deciding each line the way
+   `ssh-keygen -Y verify -n git` does, which is what `git verify-commit` runs:
+   lines end at a newline only, principal and namespace patterns know `*` and
+   `?` and nothing else, a `!pattern` denies, and a repeated or unknown option
+   rejects the line. An entry counts only when its `namespaces` option is
+   absent or matches `git`, its `valid-after` and `valid-before` bounds hold
+   now, and it is not a `cert-authority` line. A key that the effective
+   `gpg.ssh.revocationFile` lists (a key list or a KRL) never counts, and a
+   revocation file that is set but cannot be read writes nothing, and so does
+   a key list that holds a line, other than a comment, that is not a key or
+   holds a NUL byte. A principal
+   counts only when it is a literal address, never a pattern such as
+   `*@example.com`, and holds no space, `<>`, `[]`, quote, control or
+   invisible character. Malformed lines are skipped and named, and a line
+   other than a comment that holds a NUL byte is one, since `ssh-keygen`
+   stops reading a line there.
+   A malformed line that spells an ssh-agent key anywhere in it, read the way
+   `ssh-keygen` reads it or word by word, makes the step and `--rotate` write
+   nothing: this step reads some lines more strictly than `ssh-keygen` does
+   (glibc's takes a seconds field of 61, for one), so that key may be valid
+   there.
+3. **Match the ssh-agent keys** from `ssh-add -L` by the exact
+   `<keytype> <base64>`. An RSA key listed as `rsa-sha2-256` or
+   `rsa-sha2-512` is the `ssh-rsa` key, as `ssh-keygen` reads it, and is
+   written as `ssh-rsa`. Comments are ignored on both sides, and agent order
+   decides nothing. Every match is a candidate: one email, one key.
+4. **Narrow to one identity.** The expected email is the effective
+   `user.email` when it is set, and otherwise the one email every candidate
+   shares. Candidates for any other email drop out. Several emails with no
+   `user.email`, no candidate left for the `user.email` you set, or more than
+   one key left for the email write nothing. The message names each email and
+   key fingerprint (`SHA256:...`).
+5. **Write**, only where no level sets the key yet: `user.email`,
+   `user.signingkey` as `key::<keytype> <base64>`, `commit.gpgsign = true`,
+   `tag.gpgsign = true`, `gpg.ssh.allowedSignersFile` (the file from step 1, so
+   a git that does not inherit your shell's environment verifies against it
+   too), and `user.name` when `--name` is given. The file is
+   `$XDG_CONFIG_HOME/git/config.local`.
+
+A key that already has a value, in `config.local` or anywhere in the effective
+config, is never overwritten. An equal value is left alone (a
+`user.signingkey` path to the same public key counts as equal). A different
+one is kept and reported, and then the step writes nothing at all, so
+`commit.gpgsign` is never turned on beside a key it did not choose. A value
+that is right in `config.local` but overridden by a later file, such as
+`~/.gitconfig`, is reported with that file's name.
+
+One exception: an effective `commit.gpgsign = false` or `tag.gpgsign =
+false`, set in `config.local` or at any other level, is this host's exception
+to signing, unless `config.local` itself says `true`. The step keeps it,
+prints `identity: <key> is false (<origin>) - kept as this host's exception,
+so it stays off`, and still writes the email, the key and whatever else is
+absent. A conflicting `user.email`, `user.signingkey` or
+`gpg.ssh.allowedSignersFile` still makes it write nothing.
+
+A `true` in `config.local` that a later file turns `false` is not the
+exception: `install.sh identity` reports it as overridden and writes nothing,
+the `install` advisory names it, and `link` (so every `upgrade`) prints one
+line naming the file that turns signing off. A `false` in `config.local` that
+a later `true` overrides is named too, and leaves nothing to write.
+
+Before writing, the step checks that some file git reads has an `[include]`
+of `config.local`. Before it first changes an existing `config.local`, it
+copies it to `config.local.bak`. An existing `.bak` is kept, because the first
+backup is the pristine one. The write goes through a temporary file next to
+`config.local` and a rename. A `config.local` that is a symlink is not written.
+A run with nothing to add rewrites nothing. After a write, the step reads
+every written key back through the effective config and reports one that
+reads differently.
+
+The step writes nothing unless the effective `gpg.format` is `ssh`, which the
+tracked config sets. Under any other format the `key::` value would go to gpg,
+and every signed commit would fail.
+
+`--name` takes one line without `<` or `>`. A `config.local` that exists but
+is not a regular file (a FIFO, a directory) is refused before any git read,
+since git opens it through the include.
+
+#### Rotating the signing key
+
+`install.sh identity --rotate` replaces `user.signingkey`, and nothing else,
+when two things hold: the configured key no longer verifies for the effective
+`user.email` (its entry is gone, expired, outside the `git` namespace, not yet
+valid, or the key is revoked), and exactly one ssh-agent key does. It refuses
+when the key is still valid, when no key or several keys qualify, and when
+`user.signingkey` comes from a file other than `config.local`. It keeps the
+`.bak` rule above and prints the old and the new fingerprint. The automatic
+step never rotates. What retiring an old key does and does not protect against
+is in [architecture](architecture.md#rotating-the-signing-key).
+
+#### The stale-key report
+
+`install.sh identity` and the installer's signing advisory report:
+
+- an effective `user.signingkey` that no longer verifies for `user.email` in
+  the allowed-signers file, or that the revocation file lists;
+- a `key::` (or public-key path) `user.signingkey` that the ssh-agent does not
+  hold, since signing then fails. A certificate, or a private key with no
+  `.pub` beside it, is reported as not checked: git can sign with one, and
+  this step does not read either;
+- a `user.signingkey` set in any file other than `config.local`;
+- a dangling or present `~/.gitconfig` (the advisory only, signing on or off),
+  since git reads it after `~/.config/git/config` and `git config --global`
+  then reads and writes only it.
+
+`install.sh identity` exits `0` when the identity is in place, `1` when it wrote
+nothing, kept a different value, or reported a stale key, and `2` on a usage
+error.
 
 ## Lifecycle commands
 
@@ -313,6 +472,7 @@ Read as configuration:
 | `DOTFILES_UPDATE_DISABLE` | unset | Any non-empty value disables the update sentinel. `DOTFILES_UPDATE_DISABLE=0` disables it too, because the test is `-n`, not a comparison against `1`. |
 | `FZF_SHELL_DIR` | unset | Where to find fzf's `key-bindings.zsh` and `completion.zsh`. |
 | `STRICT` | unset | Set by CI. Turns a skipped gate into a hard failure. |
+| `CANGA_HOST_ALLOWED_SIGNERS` | unset | Read by [`install.sh identity`](#installsh-identity) as the first place to look for the allowed-signers file. |
 
 ## Generated files
 

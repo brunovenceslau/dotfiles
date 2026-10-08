@@ -19,6 +19,11 @@ this page no longer exists in the code.
 | `canga <TAB>` completes nothing | [canga has no completion](#canga-has-no-completion) |
 | `sbx <TAB>` completes nothing | [sbx has no completion](#sbx-has-no-completion) |
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
+| `identity: ... - writing nothing`, `is already set to a different value`, or `is overridden by` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: user.signingkey ... is not valid for`, or `is not loaded in the ssh-agent` | [The signing key is stale](#the-signing-key-is-stale) |
+| `identity: python3 is not usable here - skipping` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: signing is off against`, or `sets it false and wins` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `git config --global user.email` prints nothing | [`git config --global` returns empty](#git-config---global-returns-empty) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
 | `git pull` asks `Username for github.com` | [Git prompts for a username](#git-prompts-for-a-username) |
 | `git: ~/.config/git/config exists - leaving the machine-local file intact` on a first install | [Framework git settings do not apply](#framework-git-settings-do-not-apply) |
@@ -231,7 +236,10 @@ instead:
 git cat-file commit HEAD | grep -c gpgsig     # 0 means unsigned
 ```
 
-**Fix.**
+**Fix.** `./install.sh identity` sets the key from your allowed-signers file
+and ssh-agent (see
+[the installer did not set the git identity](#the-installer-did-not-set-the-git-identity)
+when it cannot). By hand:
 
 ```sh
 git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.pub
@@ -246,6 +254,197 @@ carries signing settings. A legacy GPG `signingkey` against the framework's
 true. Remove the file, as in
 [new mac host, step 6](new-mac-host.md#6-remove-a-legacy-gitconfig). To stay on
 GPG for now, set `gpg.format = openpgp` in `config.local`.
+
+## The installer did not set the git identity
+
+`install.sh identity` prints one of the lines below. `install`, `link` and
+`dotfiles-upgrade` print only the first line of the same explanation, ending
+in `(details: <checkout>/install.sh identity)`; run that command to see the
+rest.
+
+```text
+install: identity: python3 is not usable here - skipping (install the Command Line Tools, then run <path to install.sh> identity)
+install: identity: no allowed-signers file found - writing nothing
+install: identity: cannot read the allowed-signers file <path> (from <source>): <reason> - writing nothing
+install: identity: ssh-add was not found on PATH - writing nothing
+install: identity: ssh-add -L did not answer within 15 seconds - writing nothing
+install: identity: the ssh-agent holds no keys - writing nothing
+install: identity: cannot reach an ssh-agent (ssh-add -L exited 2) - writing nothing
+install: identity: no ssh-agent key is listed for the git namespace in <path> - writing nothing
+install: identity: every ssh-agent key listed <where> is revoked by gpg.ssh.revocationFile <path> - writing nothing
+install: identity: ssh-keygen -Q could not check the ssh-agent key(s) listed <where> against gpg.ssh.revocationFile <path> - writing nothing
+install: identity: malformed allowed-signers line(s) <n> in <path> name an ssh-agent key - writing nothing
+install: identity: more than one identity matches the ssh-agent keys - writing nothing
+install: identity: more than one ssh-agent key is listed for <email> - writing nothing
+install: identity: no ssh-agent key is listed for user.email <email> - writing nothing
+install: identity: cannot read gpg.ssh.revocationFile <path>: <reason> - writing nothing
+install: identity: gpg.ssh.revocationFile <path> line <n> is not a public key - writing nothing
+install: identity: gpg.ssh.revocationFile <path> line <n> holds a NUL byte - writing nothing
+install: identity: gpg.format is <value>, not ssh - writing nothing
+install: identity: git does not read <path> (no [include] reaches it) - writing nothing
+install: identity: GIT_CONFIG_GLOBAL=<value> is not <path>, so git would not read <path> - writing nothing
+install: identity: <key> is already set to a different value - leaving it: <value>
+install: identity: <key> is overridden by <origin> - leaving it: <value>
+install: identity: <key> reads <value> from <origin> after the write, not the value written
+install: identity: refusing to write through the symlink <path> - add the keys by hand
+install: identity: <path> is not a regular file - writing nothing
+install: identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run <path to install.sh> identity to set it on purpose
+```
+
+In the two revocation lines, `<where>` is `in <path>`, or
+`for <email> in <path>` when `user.email` is set.
+
+**Cause.** The identity step writes only when the allowed-signers file and the
+ssh-agent agree on exactly one email and exactly one key for the `git`
+namespace, and it never replaces a value you set. The full rule is in
+[`install.sh identity`](shell-reference.md#installsh-identity).
+
+An explicit `commit.gpgsign = false` or `tag.gpgsign = false` that
+`config.local` does not contradict is not in this list: the step keeps it as
+the host's exception, writes the rest, and prints the first line below. A
+`false` in `config.local` that a later `true` overrides prints the second.
+
+```text
+install: identity: <key> is false (<origin>) - kept as this host's exception, so it stays off
+install: identity: <key> is false in <path>, but <origin> sets it true and wins
+```
+
+A `true` in `config.local` that a later file turns `false` is an override,
+not the exception: `install.sh identity` prints `is overridden by` (above),
+the `install` advisory prints the first line below, and `link` and
+`dotfiles-upgrade` print the second:
+
+```text
+install: identity: <key> is true in <path>, but <origin> sets it false and wins - signing stays off
+install: identity: signing is off against <path>: <key> = false from <origin> - see <path to install.sh> identity
+```
+
+**Fix.** Supply the missing piece, then re-run the step:
+
+- `python3` is not usable: on a Mac, `/usr/bin/python3` is a stub until the
+  Command Line Tools are installed. Run `xcode-select --install`.
+
+- No file, or one that cannot be read: list this host's key as
+  `<email> <keytype> <key>` in `~/.config/git/allowed_signers`, or point
+  `CANGA_HOST_ALLOWED_SIGNERS` or `gpg.ssh.allowedSignersFile` at your file.
+  It must be a regular file you can read.
+- No `ssh-add`, no answer, no agent or no key: `ssh-add` the signing key, and
+  check `ssh-add -L` lists it.
+- No match: the agent's key must appear in the file byte for byte, as
+  `<keytype> <base64>`. An entry with a `namespaces` option that excludes
+  `git`, an expired `valid-before`, or a key in `gpg.ssh.revocationFile` does
+  not count.
+- More than one identity: the message lists each email with its key
+  fingerprint. Set the email this host commits as with
+  `git config --file ~/.config/git/config.local user.email <email>`, and the
+  step picks among that email's keys only.
+- More than one key for the email: keep only this host's signing key in the
+  agent (`ssh-add -d <key file>`), or retire the other entry with a past
+  `valid-before`. The fingerprints in the message match `ssh-add -l`.
+- No key for your `user.email`: the agent's keys are listed for another email,
+  which the message names. Fix `user.email` or the allowed-signers file.
+- The revocation file: fix the path in `gpg.ssh.revocationFile`, or make the
+  file a KRL or a list of public keys, one per line. A line holding only a
+  carriage return is not blank to `ssh-keygen`, and fails the file too. When
+  every agent key listed (for your `user.email`, when the message names it)
+  is revoked, load a key that is not, and list it in the allowed-signers
+  file.
+- A malformed line that names an agent key: this step cannot read the line,
+  but the `ssh-keygen` that verifies may (glibc's, for example, takes a
+  seconds field of 61), so which key is this host's is unclear. Fix the line
+  or remove it.
+- `gpg.format` is not `ssh`, or git does not read `config.local`: the
+  framework git config is not in effect, see
+  [framework git settings do not apply](#framework-git-settings-do-not-apply).
+- `GIT_CONFIG_GLOBAL`: something in your environment points git at another
+  global file, which does not include `config.local`. Unset it and re-run.
+- A different or an overriding value: the step leaves it on purpose, and then
+  writes nothing at all. Edit `~/.config/git/config.local` if the old value is
+  wrong, or remove the overriding line from the file the message names. For
+  `user.signingkey`, use `--rotate`, below.
+- A value that reads differently after the write: another file overrides it;
+  the message names the file.
+- A symlinked `config.local`: add the keys to the file it points at by hand.
+- A `config.local` that is not a regular file: move it aside, and let the
+  step create the file.
+- An SSH session: the automatic step stays out of it on purpose. Run
+  `install.sh identity` there only when the agent holds this host's own key.
+
+```sh
+cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
+```
+
+## The signing key is stale
+
+`install.sh`, or `install.sh identity`, prints one of:
+
+```text
+install: identity: user.signingkey <fingerprint> is not valid for <email> in <path> (<reason>)
+install: identity: user.signingkey <fingerprint> is not loaded in the ssh-agent - signing will fail
+install: identity: user.signingkey is set in <origin>, outside <path>
+```
+
+`link` and `dotfiles-upgrade` print the first one alone, as one line that
+names the command to run. The second form below is for a revocation file
+that cannot be checked, where `--rotate` refuses:
+
+```text
+install: identity: user.signingkey <fingerprint> is not valid for <email> in <path> (<reason>) - run <path to install.sh> identity --rotate
+install: identity: user.signingkey <fingerprint> is not valid for <email> in <path> (<reason>) - see <path to install.sh> identity
+```
+
+A certificate, or a private key whose `.pub` is missing, is not a stale key:
+git can sign with either, and the step only says it did not check it:
+
+```text
+install: identity: user.signingkey (<value>) is a certificate or a private key without its .pub - not checked
+```
+
+**Cause.** The configured key no longer verifies against your allowed-signers
+file (its entry was retired, expired, never listed for that email, or the key
+is in `gpg.ssh.revocationFile`), the ssh-agent does not hold it, or a
+`user.signingkey` in another file competes with the one in `config.local`.
+When several files set it, the line ends in `the last one git reads wins`.
+
+**Fix.** For a retired or revoked key, load the new key into the agent and
+rotate:
+
+```sh
+cd ~/.config/dotfiles && ./install.sh identity --rotate
+```
+
+It replaces `user.signingkey` only when exactly one agent key verifies for
+your email; the rule is in
+[rotating the signing key](shell-reference.md#rotating-the-signing-key). It
+prints one of these when it will not:
+
+```text
+install: identity: --rotate: <fingerprint> is still valid for <email> in <path> - nothing to rotate
+install: identity: --rotate: <n> ssh-agent keys are valid for <email> in <path> - refusing
+install: identity: --rotate: user.signingkey comes from <origin>, not <path> - edit it there
+install: identity: --rotate: user.signingkey is not set - nothing to rotate; run <path to install.sh> identity
+```
+
+For a key missing from the agent, `ssh-add` it. For a competing value, delete
+the other file's `user.signingkey`.
+
+## `git config --global` returns empty
+
+`git config --global user.email` (or `gpg.format`, or any framework setting)
+prints nothing, although commits use the right values.
+
+**Cause.** `--global` reads one file, without includes: `~/.gitconfig` when it
+exists, and `~/.config/git/config` otherwise. The framework's settings and your
+identity arrive through includes (the tracked `config/git/config` and
+`~/.config/git/config.local`), so `--global` never sees them. With a
+`~/.gitconfig` present it does not even read `~/.config/git/config`.
+
+**Fix.** Ask git the way a commit does, from a directory outside any
+repository, and let it name the file each value came from:
+
+```sh
+git -C ~ config --show-origin --get user.email
+```
 
 ## pinentry does not appear on Intel
 
