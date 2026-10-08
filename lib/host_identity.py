@@ -68,6 +68,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -140,10 +141,6 @@ GIT_LOCAL_ENV = frozenset(
     ]
 )
 
-# GIT_DIR for every config read: a path that cannot exist (/dev/null is not
-# a directory), so git finds no repository and reads only the system and
-# global levels, even when $HOME itself is a git repository.
-NO_REPO = "/dev/null/no-repository"
 
 # In auto mode warnings are collected here and reduced to one line (main()).
 _captured = None
@@ -581,22 +578,68 @@ def read_small_file(path):
             os.close(fd)
 
 
-def git_env():
+def git_env(ceiling):
+    """The environment of every git call: the caller's, without git's
+    repository-local variables (GIT_DIR among them), and with
+    GIT_CEILING_DIRECTORIES set to CEILING alone, never appended to: an
+    inherited list is the caller's, and an empty entry in it would stop git
+    from resolving the entries after it. Without GIT_TRACE* too, and with
+    the trace2 targets set to 0: a trace sent to stderr would come before the
+    line _isolate() matches, and trace2.*Target in a config file turns one on
+    unless the environment says otherwise."""
     env = dict(os.environ)
     for k in list(env):
-        if k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_"):
+        if (k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_")
+                or k.startswith("GIT_TRACE")):
             del env[k]
-    env["GIT_DIR"] = NO_REPO
+    for k in ("GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"):
+        env[k] = "0"
+    env["GIT_CEILING_DIRECTORIES"] = ceiling
     return env
 
 
-def git(args, cwd=None):
-    """Run git; return (rc, stdout without the final newline, stderr)."""
+# GitPlace.refusal before git_isolate() has decided anything.
+UNDECIDED = "git has not been proven to run outside a repository"
+
+
+class GitPlace(object):
+    """Where every git call of this process runs, decided once by
+    git_isolate() and undone by git_release().
+
+    made     the empty directory, recorded as soon as it exists, so
+             git_release() removes it whatever happens after
+    cwd      that directory as getcwd() spells it, set only once git has
+             been proven to find no repository from there
+    refusal  why git cannot run outside a repository here: UNDECIDED until
+             git_isolate() decides, None once it is proven
+
+    git() runs git only when refusal is None."""
+
+    def __init__(self):
+        self.made = None
+        self.cwd = None
+        self.refusal = UNDECIDED
+
+    @property
+    def ceiling(self):
+        """The one GIT_CEILING_DIRECTORIES entry: cwd's parent."""
+        return os.path.dirname(self.cwd)
+
+
+_git_place = None
+
+
+class Refusal(Exception):
+    """A reason git cannot run outside a repository here, raised where it
+    is found and returned by _isolate()."""
+
+
+def _run_git(args, cwd, env):
     try:
         p = subprocess.run(
             ["git"] + args,
             cwd=cwd,
-            env=git_env(),
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -607,6 +650,137 @@ def git(args, cwd=None):
     out = p.stdout.decode("utf-8", "replace")
     out = out[:-1] if out.endswith("\n") else out
     return p.returncode, out, p.stderr.decode("utf-8", "replace").strip()
+
+
+# Opens the current directory for fchdir() without reading it: O_PATH
+# (Linux) needs search permission only, so an execute-only directory is a
+# place to return to. macOS has no O_PATH, and O_RDONLY needs read
+# permission; there the way back is the path getcwd() names instead.
+_BACK_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
+
+
+def _getcwd_in(path):
+    """PATH as getcwd() spells it from inside. git compares exactly that
+    string with its ceilings, and on a case-insensitive or normalizing file
+    system (APFS) neither PATH nor realpath(PATH) need spell it the same way.
+    This process steps in and back out: through a descriptor when it can
+    open its current directory, else by the path getcwd() gives for it.
+    Raises Refusal when it finds no way back (before stepping anywhere) or
+    cannot take the one it found."""
+    back, back_path = None, None
+    try:
+        back = os.open(".", _BACK_FLAGS)
+    except OSError as e:
+        try:
+            back_path = os.getcwd()
+        except OSError:
+            raise Refusal("cannot open the current directory to return to it (%s)" % e)
+    try:
+        os.chdir(path)
+        return os.getcwd()
+    finally:
+        try:
+            if back is not None:
+                os.fchdir(back)
+            else:
+                os.chdir(back_path)
+        except OSError as e:
+            # This process stays in the empty directory, which
+            # git_release() then removes: its working directory may be gone.
+            raise Refusal("cannot return to the current directory (%s)" % e)
+        finally:
+            if back is not None:
+                os.close(back)
+
+
+def _isolate(place):
+    """None once git is proven to run outside any repository from PLACE,
+    else the reason it cannot."""
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        value = os.environ.get(name)
+        if value and not os.path.isabs(value):
+            return "%s=%s is not an absolute path, so git would look for it where git runs" % (name, value)
+    try:
+        place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+        cwd = _getcwd_in(place.made)
+    except Refusal as e:
+        return str(e)
+    except OSError as e:
+        return "cannot make an empty directory for git and enter it: %s" % e
+    ceiling = os.path.dirname(cwd)
+    # ':' separates ceilings: a path holding one would be half-applied.
+    if os.pathsep in ceiling:
+        return "%s holds %r, which GIT_CEILING_DIRECTORIES cannot express" % (ceiling, os.pathsep)
+    # Anyone who can rename entries here could swap the empty directory for
+    # one inside a repository. Only the plain case is refused; the rest is a
+    # deferred decision (docs/architecture.md, "Deferred decisions").
+    try:
+        st = os.stat(ceiling)
+    except OSError as e:
+        return "cannot stat %s: %s" % (ceiling, e.strerror)
+    if st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX:
+        return "%s is writable by every user and not sticky" % ceiling
+    # The proof, not the premise: git itself must find no repository from
+    # there. In the C locale, so its first line can be matched exactly; any
+    # other failure (a config file git cannot parse, a repository it refuses
+    # as dubiously owned) means git cannot start here at all.
+    env = git_env(ceiling)
+    env["LC_ALL"] = "C"
+    env.pop("LANGUAGE", None)
+    rc, out, err = _run_git(["rev-parse", "--git-dir"], cwd, env)
+    if rc == 0:
+        return "git finds a repository (%s) from the empty directory %s" % (out, cwd)
+    if not err.startswith("fatal: not a git repository"):
+        return "git cannot start (%s)" % (err or "exit %d" % rc)
+    place.cwd = cwd
+    return None
+
+
+def git_isolate():
+    """None when every git call here runs outside any repository, else the
+    reason it cannot, which git() then returns as its error (rc 127) without
+    running git.
+
+    git runs from one fresh, empty temporary directory per process, and
+    GIT_CEILING_DIRECTORIES names that directory's parent, so discovery looks
+    at the empty directory alone and never climbs to the caller's
+    repository, a $HOME that is one, or one holding $TMPDIR. Only the system
+    and global levels are read. Not a GIT_DIR that cannot exist: git then
+    dies on every read that evaluates an [includeIf "gitdir:..."] condition
+    (rc 128, "Invalid path"). The parent is taken from the path getcwd()
+    gives inside the directory (_getcwd_in()), the string git itself
+    compares with its ceilings, and git must then report that it finds no
+    repository there (_isolate()). With the empty directory as git's working
+    directory, a relative GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM would name a
+    file inside it, so such a value is refused. Decided once, then
+    remembered; an interrupted decision is a refusal."""
+    global _git_place
+    if _git_place is None:
+        _git_place = GitPlace()
+        try:
+            _git_place.refusal = _isolate(_git_place)
+        except BaseException:
+            _git_place.refusal = "the check that git runs outside any repository was interrupted"
+            raise
+    return _git_place.refusal
+
+
+def git_release():
+    """Remove the empty directory and forget the decision. Explicit, not a
+    finalizer's: the directory is gone when this returns."""
+    global _git_place
+    if _git_place is not None and _git_place.made is not None:
+        shutil.rmtree(_git_place.made, ignore_errors=True)
+    _git_place = None
+
+
+def git(args):
+    """Run git outside any repository (git_isolate()); return (rc, stdout
+    without the final newline, stderr)."""
+    reason = git_isolate()
+    if reason is not None:
+        return 127, "", reason
+    return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
 
 
 class Value(object):
@@ -777,16 +951,23 @@ class Host(object):
         args = ["config", "--includes"]
         if typ:
             args.append("--type=" + typ)
-        rc, out, err = git(args + ["--get", key], cwd=self.home)
+        rc, out, err = git(args + ["--get", key])
         return Value(rc, out, err)
 
     def origins(self, key):
-        """[(origin, value)] for every effective value of KEY, in git's order."""
-        rc, out, _ = git(["config", "--includes", "--show-origin", "--null", "--get-all", key], cwd=self.home)
+        """[(origin, value)] for every effective value of KEY, in git's order;
+        [] when it is unset or cannot be read (origins_or_error())."""
+        return self.origins_or_error(key)[0]
+
+    def origins_or_error(self, key):
+        """(origins, None), or ([], git's error) when git fails to read."""
+        rc, out, err = git(["config", "--includes", "--show-origin", "--null", "--get-all", key])
+        if rc == 1:
+            return [], None
         if rc != 0:
-            return []
+            return [], err or "git exited %d" % rc
         parts = out.split("\0")
-        return [(parts[i], parts[i + 1]) for i in range(0, len(parts) - 1, 2)]
+        return [(parts[i], parts[i + 1]) for i in range(0, len(parts) - 1, 2)], None
 
     def in_local(self, key, typ=None):
         if not os.path.lexists(self.config_local):
@@ -801,17 +982,21 @@ class Host(object):
         return origin.startswith("file:") and same_file(origin[len("file:"):], self.config_local)
 
     def includes_local(self):
-        """True when some file git reads has an [include] path that resolves
-        to config.local, so a value written there is read. includeIf is not
-        counted: outside a repository its conditions do not hold."""
-        for origin, value in self.origins("include.path"):
+        """(True, None) when some file git reads has an [include] path that
+        resolves to config.local, so a value written there is read; (False,
+        git's error) when the includes cannot be read. includeIf is not
+        counted: these reads run outside any repository (git_isolate()),
+        where a gitdir: or onbranch: condition never holds, and leaving out a
+        hasconfig: one can only make the writing modes write nothing."""
+        origins, err = self.origins_or_error("include.path")
+        for origin, value in origins:
             if not origin.startswith("file:") or not value:
                 continue
             base = os.path.dirname(origin[len("file:"):])
             path = os.path.join(base, os.path.expanduser(value))
             if same_file(path, self.config_local):
-                return True
-        return False
+                return True, None
+        return False, err
 
     def locate_signers(self):
         """Return (path, source, error_message).
@@ -1106,6 +1291,9 @@ def require_ssh_format(host):
     v = host.effective("gpg.format")
     if v.set and v.text == "ssh":
         return True
+    if v.error:
+        warn("identity: cannot read gpg.format (%s) - writing nothing" % v.err)
+        return False
     warn("identity: gpg.format is %s, not ssh - writing nothing"
          % (repr(v.text) if v.set else "unset"))
     warn("identity:   see \"Framework git settings do not apply\" in docs/troubleshooting.md")
@@ -1165,7 +1353,9 @@ def select(host, pairs, email):
 
 
 def last_origin(host, key):
-    """The origin git reads KEY from last (the one that wins), or a stand-in."""
+    """The origin git reads KEY from last (the one that wins), or a stand-in.
+    Only ever names a file in a message, so a read error gets the stand-in
+    too."""
     origins = host.origins(key)
     return origins[-1][0] if origins else "another level"
 
@@ -1330,7 +1520,11 @@ def identity(host, name):
     if to_write:
         # Prove git reads config.local BEFORE writing to it: a file nothing
         # includes is written but never read.
-        if not host.includes_local():
+        included, err = host.includes_local()
+        if err is not None:
+            warn("identity: cannot read include.path (%s) - writing nothing" % err)
+            return 1
+        if not included:
             warn("identity: git does not read %s (no [include] reaches it) - writing nothing" % host.config_local)
             warn("identity:   see \"Framework git settings do not apply\" in docs/troubleshooting.md")
             return 1
@@ -1373,7 +1567,10 @@ def rotate(host):
         warn("identity: --rotate needs user.email - run %s identity first" % host.installer)
         return 1
     email = email_v.text
-    origins = host.origins("user.signingkey")
+    origins, err = host.origins_or_error("user.signingkey")
+    if err is not None:
+        warn("identity: --rotate: cannot read user.signingkey (%s) - writing nothing" % err)
+        return 1
     if not origins:
         warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % host.installer)
         return 1
@@ -1438,9 +1635,16 @@ def stale_reason(host, key):
 def check_signing_key(host):
     """Report an effective user.signingkey that will not work, or that comes
     from outside config.local. Returns True when something was reported."""
-    if host.effective("gpg.format").text != "ssh":
+    fmt = host.effective("gpg.format")
+    if fmt.error:
+        warn("identity: cannot read gpg.format (%s) - user.signingkey not checked" % fmt.err)
+        return True
+    if fmt.text != "ssh":
         return False  # a GPG key id is not ours to judge
-    origins = host.origins("user.signingkey")
+    origins, err = host.origins_or_error("user.signingkey")
+    if err is not None:
+        warn("identity: cannot read user.signingkey (%s) - not checked" % err)
+        return True
     if not origins:
         return False
     reported = False
@@ -1498,6 +1702,8 @@ def stale_line(host):
     report of _signing_advisory."""
     if host.effective("gpg.format").text != "ssh":
         return 0
+    # origins(): a read error is nothing to judge, and this report stays
+    # quiet on what it cannot judge (identity and check name the error).
     origins = host.origins("user.signingkey")
     key = resolve_signingkey(origins[-1][1], host.home)[0] if origins else None
     stale = stale_reason(host, key) if key is not None else None
@@ -1558,6 +1764,11 @@ def local_is_regular(host):
 def run(host, mode, name, report_stale):
     """Dispatch one mode; returns its exit status."""
     if not local_is_regular(host):
+        return 0 if mode == "check" else 1
+    # Before any git read, so a mode never acts on reads that only failed.
+    reason = git_isolate()
+    if reason is not None:
+        warn("identity: not reading the git config: %s" % reason)
         return 0 if mode == "check" else 1
     if mode == "check":
         check_signing_key(host)
@@ -1623,6 +1834,7 @@ def main(argv):
     try:
         rc = run(host, args.mode, args.name, args.report_stale)
     finally:
+        git_release()
         lines, _captured = _captured, None
     if lines:
         if rc == 0:
@@ -1636,5 +1848,18 @@ def main(argv):
     return rc
 
 
+def entry(argv):
+    """main(), with an interrupt reported without a traceback. main()'s
+    finally has already removed git's empty directory by then. The process
+    then dies of SIGINT itself, not a plain exit 130: a shell waiting on it
+    stops too, as it would for any command killed by ^C."""
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
+        return 130  # only if SIGINT is blocked
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(entry(sys.argv[1:]))

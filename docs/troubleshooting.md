@@ -23,6 +23,7 @@ page no longer exists in the code.
 | `identity: ... - writing nothing`, `is already set to a different value`, or `is overridden by` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `identity: user.signingkey ... is not valid for`, or `is not loaded in the ssh-agent` | [The signing key is stale](#the-signing-key-is-stale) |
 | `identity: python3 is not usable here - skipping` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: not reading the git config:`, or `identity: cannot read` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `identity: signing is off against`, or `sets it false and wins` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `git config --global user.email` prints nothing | [`git config --global` returns empty](#git-config---global-returns-empty) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
@@ -284,6 +285,12 @@ install: identity: gpg.ssh.revocationFile <path> line <n> holds a NUL byte - wri
 install: identity: gpg.format is <value>, not ssh - writing nothing
 install: identity: git does not read <path> (no [include] reaches it) - writing nothing
 install: identity: GIT_CONFIG_GLOBAL=<value> is not <path>, so git would not read <path> - writing nothing
+install: identity: not reading the git config: <reason>
+install: identity: cannot read <key> (<git's error>) - writing nothing
+install: identity: cannot read <key> (<git's error>) - leaving it
+install: identity: cannot read <key> (<git's error>) - not checked
+install: identity: cannot read gpg.format (<git's error>) - user.signingkey not checked
+install: identity: --rotate: cannot read user.signingkey (<git's error>) - writing nothing
 install: identity: <key> is already set to a different value - leaving it: <value>
 install: identity: <key> is overridden by <origin> - leaving it: <value>
 install: identity: <key> reads <value> from <origin> after the write, not the value written
@@ -324,6 +331,19 @@ install: identity: signing is off against <path>: <key> = false from <origin> - 
 
 - `python3` is not usable: on a Mac, `/usr/bin/python3` is a stub until the
   Command Line Tools are installed. Run `xcode-select --install`.
+- Not reading the git config: the step runs git from an empty directory under
+  `$TMPDIR`, outside every repository, and the reason says what stopped it.
+  Give `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` absolute paths, or unset
+  them. Point `TMPDIR` at a directory whose path holds no `:` and that only you
+  can write to, or that has the sticky bit, as `/tmp` does. `git cannot start`
+  quotes git's own error, most often a config file git cannot parse: fix the
+  line it names. `cannot open the current directory to return to it` and
+  `cannot return to the current directory` mean the directory you ran the step
+  from cannot be named or re-entered, for example because it was removed or
+  lost its permissions: run it from another one, such as your home directory.
+- `cannot read <key>`: git failed to read your config, and its own error is in
+  the parentheses. `git config --list --show-origin` run outside a repository
+  shows the same error and the file it comes from.
 
 - No file, or one that cannot be read: list this host's key as
   `<email> <keytype> <key>` in `~/.config/git/allowed_signers`, or point
