@@ -3403,17 +3403,22 @@ bounded_run 20 "$work/mdw-nested-brackets.out" env STRICT= "$cp" "$r" \
   || fail "arm 15: 30000 nested bracket pairs outlived 20 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 1 ] && ok || fail "arm 15: the nested-bracket line must still fail as too long, got $br_rc"
 
-# backtick runs of every length 1..1400, none closed: every opener used to
-# scan the rest of the line for a run of its own length (measured on mawk:
-# 8 s at 700 runs, over 120 s at 1400). Each run's partner is now listed
-# once per line, so the scan is linear.
+# backtick runs of every length 1..2000 (a 2 MB line), none closed. Two
+# quadratic costs met here: every opener scanned the rest of the line for a
+# run of its own length (mawk: 8 s at 700 runs, over 120 s at 1400), and on
+# the onetrue awk (macOS) every substr() call runs strlen() over the whole
+# line, so even a linear walk by substr was quadratic (a build of the macOS
+# awk source: 8.5 s at 1400 runs here, past 20 s on the macOS CI runners).
+# Each run's partner is now listed once per line and the walk reads a
+# character array split once: about 1 s at 2000 runs on that build, 0.1 s on
+# mawk.
 r="$work/mdw-backtick-runs"; seed "$r"; mkdir -p "$r/docs"
-python3 -I -c 'import sys; sys.stdout.write("a " + "".join("`" * k + " x " for k in range(1, 1400)) + "\n")' \
+python3 -I -c 'import sys; sys.stdout.write("a " + "".join("`" * k + " x " for k in range(1, 2000)) + "\n")' \
   > "$r/docs/x.md"
 bounded_run 20 "$work/mdw-backtick-runs.out" env STRICT= "$cp" "$r" \
   || fail "arm 15 backtick runs: bounded_run could not turn job control on"
 [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
-  || fail "arm 15: a line of 1400 distinct backtick runs outlived 20 s (hung $br_hung, stuck $br_stuck)"
+  || fail "arm 15: a line of 2000 distinct backtick runs outlived 20 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 1 ] && ok || fail "arm 15: the backtick-run line must still fail as too long, got $br_rc"
 
 # How a line's links and code spans are paired. Each case is one line over

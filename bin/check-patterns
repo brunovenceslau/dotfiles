@@ -1803,19 +1803,25 @@ function cols(s,   t) {
   if (u8) return length(s)
   t = s; gsub(/[\200-\277]/, "", t); return length(t)
 }
+# Every walk below reads the line from ch[], split into one character per
+# element ONCE per line (tokens), never with substr(s, i, 1): the onetrue
+# awk (macOS) runs strlen() over the whole string on every substr call, so
+# a walk by substr is quadratic in the line length there (measured: 8.5 s
+# on a 1 MB line), while mawk and gawk do not notice. split() with an empty
+# separator is one character per element in onetrue awk, mawk and gawk.
 # runs: ONE pass listing every maximal backtick run of the line (its start
 # rs, its length rl, its index by start ri), then, right to left, the next
 # run of the same length (rn). A code span is a run up to the next run of
 # exactly its length, so skipcode looks the closer up instead of scanning:
 # a line of runs of every length 1..k, none closed, scanned the rest of the
 # line once per length (measured: 8 s at k=700 on mawk).
-function runs(s, n,   i, j, k, nr) {
+function runs(n,   i, j, k, nr) {
   split("", ri); split("", rs); split("", rl); split("", rn); split("", lastrun)
   nr = 0; i = 1
   while (i <= n) {
-    if (substr(s, i, 1) != "`") { i++; continue }
+    if (ch[i] != "`") { i++; continue }
     j = i
-    while (j <= n && substr(s, j, 1) == "`") j++
+    while (j <= n && ch[j] == "`") j++
     rs[++nr] = i; rl[nr] = j - i; ri[i] = nr
     i = j
   }
@@ -1828,7 +1834,7 @@ function runs(s, n,   i, j, k, nr) {
 # at i when no run of its length follows (literal backticks). Every caller
 # lands on the FIRST backtick of a run: a walk reaches a backtick only from a
 # character that is not one, or from the end of a run or a link.
-function skipcode(s, i, n,   k) {
+function skipcode(i,   k) {
   k = ri[i]
   if (k in rn) return rs[rn[k]] + rl[k]
   return i + rl[k]
@@ -1840,17 +1846,17 @@ function skipcode(s, i, n,   k) {
 # escaped backtick makes its whole run literal (CommonMark would let the
 # rest of the run open a span): the walk never lands inside a run, which
 # keeps skipcode a lookup.
-function pairs(s, n,   i, c, nb, np) {
+function pairs(n,   i, c, nb, np) {
   split("", pb); split("", pp); split("", sb); split("", sp)
-  runs(s, n)
+  runs(n)
   nb = 0; np = 0; i = 1
   while (i <= n) {
-    c = substr(s, i, 1)
-    if (c == "`") { i = skipcode(s, i, n); continue }
+    c = ch[i]
+    if (c == "`") { i = skipcode(i); continue }
     if (c == "\\") {
       i++
-      if (substr(s, i, 1) != "`") { i++; continue }
-      while (i <= n && substr(s, i, 1) == "`") i++
+      if (ch[i] != "`") { i++; continue }
+      while (i <= n && ch[i] == "`") i++
       continue
     }
     if (c == "[") sb[++nb] = i
@@ -1862,26 +1868,29 @@ function pairs(s, n,   i, c, nb, np) {
 }
 # skiplink: the index after a whole link or image `[text](dest)` opening at
 # i, or 0 when it is not one.
-function skiplink(s, i,   j) {
-  if (substr(s, i, 1) == "!") i++
+function skiplink(i,   j) {
+  if (ch[i] == "!") i++
   if (!(i in pb)) return 0
   j = pb[i] + 1
-  if (substr(s, j, 1) != "(" || !(j in pp)) return 0
+  if (ch[j] != "(" || !(j in pp)) return 0
   return pp[j] + 1
 }
+# tokens: the indent, every `>` quote marker and a list marker are cut in
+# one match each (a loop of substr per marker copied the line once per
+# marker), then the rest is split into ch[] and walked.
 function tokens(s,   i, n, c, a, intok, j) {
   sub(/^[ \t]+/, "", s)
-  while (match(s, /^>[ \t]*/)) s = substr(s, RLENGTH + 1)
+  if (match(s, /^(>[ \t]*)+/)) s = substr(s, RLENGTH + 1)
   if (match(s, /^([-*+]|[0-9]+[.)])[ \t]+/)) s = substr(s, RLENGTH + 1)
-  n = length(s); a = 0; intok = 0; i = 1
-  pairs(s, n)
+  n = split(s, ch, ""); a = 0; intok = 0; i = 1
+  pairs(n)
   while (i <= n) {
-    c = substr(s, i, 1)
+    c = ch[i]
     if (c == " " || c == "\t") { intok = 0; i++; continue }
     if (!intok) { a++; intok = 1 }
-    if (c == "`") { i = skipcode(s, i, n); continue }
-    if (c == "[" || (c == "!" && substr(s, i + 1, 1) == "[")) {
-      j = skiplink(s, i)
+    if (c == "`") { i = skipcode(i); continue }
+    if (c == "[" || (c == "!" && ch[i + 1] == "[")) {
+      j = skiplink(i)
       if (j) { i = j; continue }
     }
     i++
