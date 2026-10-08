@@ -242,7 +242,7 @@ an unsigned commit are these (measured on git 2.53):
 - `git stash`, `git commit-tree` and `git notes` do not read
   `commit.gpgsign`;
 - `--no-gpg-sign` turns signing off for one run of `git commit`,
-  `git merge`, `git pull` (when it merges), `git rebase`,
+  `git merge`, `git pull` (when it merges or rebases), `git rebase`,
   `git cherry-pick`, `git revert` and `git am`;
 - `git -c commit.gpgsign=false`, and its environment form
   (`GIT_CONFIG_PARAMETERS`, or `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`
