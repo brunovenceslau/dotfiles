@@ -12,7 +12,9 @@
 
 import ast
 import base64
+import contextlib
 import errno
+import io
 import importlib.util
 import os
 import signal
@@ -419,6 +421,57 @@ def git_units(mod, scratch):
     check(os.listdir(inside) == [], "nothing is left inside the repository")
 
 
+def main_twice_units(mod, scratch):
+    """main() run more than once in one process: what one run decides about
+    the automatic step's line never reaches the next. A copy of the tracked
+    config's bytes is included first, as the link engine does, so its
+    commit.gpgsign = true is read; its relative include then reaches no
+    repo-side config.local."""
+    module_dir = os.path.dirname(os.path.abspath(mod.__file__))
+    tracked = os.path.join(scratch, "tracked", "config")
+    os.makedirs(tracked)
+    with open(os.path.join(module_dir, os.pardir, "config", "git", "config")) as fh:
+        body = fh.read()
+    with open(os.path.join(tracked, "config"), "w") as fh:
+        fh.write(body)
+    home = os.path.join(scratch, "twice")
+    gitdir = os.path.join(home, ".config", "git")
+    os.makedirs(gitdir)
+    with open(os.path.join(gitdir, "config"), "w") as fh:
+        fh.write("[include]\n\tpath = %s\n[include]\n\tpath = config.local\n" % os.path.join(tracked, "config"))
+    local = os.path.join(gitdir, "config.local")
+    # No agent of the caller's: doctor asks one for its keys.
+    for name in ("GIT_CONFIG_GLOBAL", "SSH_CONNECTION", "CANGA_HOST_ALLOWED_SIGNERS", "SSH_AUTH_SOCK", "SSH_AGENT_PID"):
+        os.environ.pop(name, None)
+    os.environ.update({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+                       "GIT_CONFIG_SYSTEM": os.devnull})
+
+    def said(mode):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = mod.main(["--config-local", local, "--installer", "INST", "--mode", mode])
+        return rc, out.getvalue()
+
+    # No key and no allowed-signers file: the tracked true fails closed.
+    rc, text = said("auto")
+    check(rc == 1 and "; every commit fails until this host has a signing key" in text,
+          "a first auto run on a host that fails closed names the consequence (%r)" % text)
+    # The same process, now with a key: the refusal no longer fails closed.
+    with open(local, "w") as fh:
+        fh.write("[user]\n\tsigningkey = key::ssh-ed25519 AAAA\n")
+    rc, text = said("auto")
+    check(rc == 1 and "every commit fails" not in text and "(details: INST identity)" in text,
+          "a second auto run on a keyed host carries nothing over from the first (%r)" % text)
+    os.remove(local)
+    for mode in ("check", "doctor"):
+        rc, text = said("auto")
+        check("; every commit fails until this host has a signing key" in text,
+              "the auto run before --mode %s fails closed (%r)" % (mode, text))
+        rc, text = said(mode)
+        check("every commit fails until" not in text,
+              "--mode %s after a fail-closed auto run does not repeat its suffix (%r)" % (mode, text))
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -683,6 +736,13 @@ def main(argv):
           "a key the effective config does not read back is reported, exit 1")
     os.environ.clear()
     os.environ.update(saved)
+
+    try:
+        main_twice_units(mod, scratch)
+    finally:
+        mod.git_release()
+        os.environ.clear()
+        os.environ.update(saved)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0

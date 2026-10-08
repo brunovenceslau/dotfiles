@@ -44,7 +44,7 @@ given.
 | `packages` | none | `brew bundle` over `packages/Brewfile`, then `packages/Brewfile.local` if present, then the pinned `gh` extensions. Never runs a remote bootstrap script. |
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink (which runs the automatic [identity step](#installsh-identity)), recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
-| `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
+| `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent; `commit.gpgsign` comes from the tracked config. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
 | `doctor` | `[--verbose]` | Checks the identity, the signing key and the tools they need, and writes nothing. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
@@ -91,7 +91,11 @@ which re-enters `link` on the new tree. The automatic step:
   and prints one line saying so. `install.sh identity`, run on purpose,
   still works there;
 - prints one line when it cannot act, naming the cause and
-  `<checkout>/install.sh identity`, which prints the details;
+  `<checkout>/install.sh identity`, which prints the details. When it leaves
+  the host with commit signing on and no `user.signingkey`, the line ends
+  instead in `; every commit fails until this host has a signing key - run
+  <checkout>/install.sh identity on this host, or opt it out of signing (see
+  docs/signing-key.md)`, and so does the SSH-session line;
 - writes nothing and prints nothing on a host that opted out of signing (see
   [opting a host out of signing](#opting-a-host-out-of-signing));
 - never changes the exit status of `install`, `link` or `upgrade`.
@@ -170,7 +174,8 @@ so the step writes nothing under it. Relative paths in `user.signingkey`,
    one key left for the email write nothing. The message names each email and
    key fingerprint (`SHA256:...`).
 5. **Write**, only where no level sets the key yet: `user.email`,
-   `user.signingkey` as `key::<keytype> <base64>`, `commit.gpgsign = true`,
+   `user.signingkey` as `key::<keytype> <base64>`, `commit.gpgsign = true`
+   (only where git does not read the tracked config, which sets it),
    `tag.gpgsign = true`, `gpg.ssh.allowedSignersFile` (the file from step 1, so
    a git that does not inherit your shell's environment verifies against it
    too), and `user.name` when `--name` is given. The file is
@@ -179,8 +184,10 @@ so the step writes nothing under it. Relative paths in `user.signingkey`,
 A key that already has a value, in `config.local` or anywhere in the effective
 config, is never overwritten. An equal value is left alone (a
 `user.signingkey` path to the same public key counts as equal). A different
-one is kept and reported, and then the step writes nothing at all, so
-`commit.gpgsign` is never turned on beside a key it did not choose. A value
+one is kept and reported, and then the step writes nothing at all, so it
+never adds a signing setting beside a key it did not choose. A
+`commit.gpgsign = true` that an earlier release wrote to `config.local` is
+equal to the tracked value, and is left alone. A value
 that is right in `config.local` but overridden by a later file, such as
 `~/.gitconfig`, is reported with that file's name.
 
@@ -190,7 +197,9 @@ to signing, unless `config.local` itself says `true`. `install.sh identity`
 keeps it, prints `identity: <key> is false (<origin>) - kept as this host's
 exception, so it stays off`, and still writes the email, the key and
 whatever else is absent. A conflicting `user.email`, `user.signingkey` or
-`gpg.ssh.allowedSignersFile` still makes it write nothing.
+`gpg.ssh.allowedSignersFile` still makes it write nothing. A
+`commit.gpgsign = false` at the system level is read before the tracked
+`true` and loses, so it is no exception: commits there stay signed.
 
 A `true` in `config.local` that a later file turns `false` is not the
 exception: `install.sh identity` reports it as overridden and writes nothing,
@@ -214,6 +223,39 @@ and every signed commit would fail.
 `--name` takes one line without `<` or `>`. A `config.local` that exists but
 is not a regular file (a FIFO, a directory) is refused before any git read,
 since git opens it through the include.
+
+#### Where commit signing is mandatory
+
+The tracked `config/git/config` sets `commit.gpgsign = true`, so wherever
+git reads that file a plain `git commit` signs by default, and git refuses
+the commit while no `user.signingkey` is set (`fatal: either
+user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured`).
+`tag.gpgsign` is not in the tracked config: the identity step writes it per
+host.
+
+It is mandatory only where git reads the tracked config. A host whose own
+real `~/.config/git/config` does not include it, a `~/.config/git` that is a
+symlink to somewhere else, or an exported `GIT_CONFIG_GLOBAL` does not read
+it. And where git does read it, the known paths that still produce or allow
+an unsigned commit are these (measured on git 2.53):
+
+- `git stash`, `git commit-tree` and `git notes` do not read
+  `commit.gpgsign`;
+- `--no-gpg-sign` turns signing off for one run of `git commit`,
+  `git merge`, `git pull` (when it merges or rebases), `git rebase`,
+  `git cherry-pick`, `git revert` and `git am`;
+- `git -c commit.gpgsign=false`, and its environment form
+  (`GIT_CONFIG_PARAMETERS`, or `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`
+  and `GIT_CONFIG_VALUE_<n>`), override it for one command;
+- a repository's own config and an `[includeIf]` override it;
+- a `false` in `~/.gitconfig` overrides it, since git reads that file
+  after `~/.config/git/config`;
+- `git config --global` writes to `~/.gitconfig` when that file exists,
+  and otherwise to `~/.config/git/config` after both includes, so a
+  `false` written that way overrides it either way.
+
+What refuses an unsigned commit on `main` is in
+[security properties](architecture.md#security-properties-and-where-they-are-enforced).
 
 #### Opting a host out of signing
 
@@ -272,8 +314,10 @@ is in [architecture](architecture.md#rotating-the-signing-key).
 - a dangling or present `~/.gitconfig` (the advisory only, signing on or off),
   since git reads it after `~/.config/git/config` and `git config --global`
   then reads and writes only it;
-- a `commit.gpgsign` that is unset, `false` or not a boolean (the advisory
-  only).
+- a `commit.gpgsign` that is unset (git does not read the tracked config,
+  which sets it), `false` or not a boolean (the advisory only);
+- commit signing on with no `user.signingkey`, so git refuses every commit
+  (the advisory only).
 
 The advisory is `--mode check` of `lib/host_identity.py`, so it prints
 nothing when `python3` does not run; the identity step, which runs first,
@@ -302,7 +346,7 @@ Both are removed before it exits. The checks are a registry, `CHECKS` in
 | `git` | `git --version`, `GIT_CONFIG_GLOBAL`, the `[include]` chain | git does not run, is older than 2.34 (the first to sign with SSH keys), `GIT_CONFIG_GLOBAL` names a file other than `$XDG_CONFIG_HOME/git/config`, the `include.path` values cannot be read, or no `[include]` reaches `config.local` |
 | `python3` | the running interpreter | `python3 -I -c ''` fails (`install.sh` reports this itself, since the checks need python3) |
 | `ssh-keygen` | `ssh-keygen -Y find-principals` on empty input | `ssh-keygen` is missing, does not run, or does not know `-Y` |
-| `values` | `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read; `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
+| `values` | `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read (an unset `user.signingkey` while commit signing is on is named as git refusing every commit; an unset `commit.gpgsign` as the tracked config not being read); `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
 | `trust root` | the allowed-signers file, found the way [`install.sh identity`](#installsh-identity) finds it, and the revocation file | no allowed-signers file is found or readable, or the revocation file cannot be used |
 | `ssh-agent` | `ssh-add -L`, and which agent keys the allowed-signers file lists for the `git` namespace | the agent cannot be reached or holds no key while signing needs it, or a malformed line names an agent key |
 | `signing key` | the effective `user.signingkey`, as the [stale-key report](#the-stale-key-report) judges it | the key no longer verifies, is not in a reachable agent, names no readable key, or is set outside `config.local` |

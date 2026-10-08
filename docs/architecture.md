@@ -590,6 +590,43 @@ names the `false` and its file. The rule is in
 and the steps in
 [keep a host from signing](signing-key.md#keep-a-host-from-signing).
 
+### Commit signing is on in the tracked config
+
+The tracked `config/git/config` sets `commit.gpgsign = true`. Where git
+reads the tracked config, a plain `git commit` signs by default, so an
+unsigned commit there is the exception a host asks for, not the state a
+fresh host falls into; the other ways to an unsigned commit are the known
+paths in
+[where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
+A host with no signing key fails closed: git refuses a plain `git commit`
+until `install.sh identity` sets the key, or until
+`config.local` opts the host out. The automatic step, the `install` advisory
+and `install.sh doctor` all say so: the automatic step's line says every
+commit fails, and the advisory and doctor say git refuses every commit. That
+matters most on a host upgraded only over SSH, where the automatic step
+never acts.
+
+The `false` that opts a host out wins because git reads `config.local` after
+the tracked file: `~/.config/git/config` includes the tracked config first
+and `config.local` second (`_write_git_local_config` in `lib/link.sh`). A
+`false` at the system level is read before the tracked `true` and loses.
+`tag.gpgsign` stays out of the tracked config and is written per host by the
+identity step, so an opted-out host never signs tags by surprise.
+
+Signing is mandatory only where git reads the tracked config, and some git
+paths do not sign even there; the list is in
+[where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
+What refuses an unsigned commit on `main` is listed under "Signed commits on
+`main`" in
+[security properties](#security-properties-and-where-they-are-enforced).
+
+A `commit.gpgsign = false` in the checkout's own `config/git/config.local`,
+which the whole-directory symlink layout of older installs used, still turns
+signing off, since the tracked config includes that file. It counts as the
+host's exception, not as an opt-out (`Host.is_local_origin()` in
+`lib/host_identity.py` matches only `~/.config/git/config.local`), so
+`install.sh doctor` reports it as a problem.
+
 ### Deferred decisions
 
 Each stays as it is until its trigger fires. The ones that concern only the
@@ -599,14 +636,14 @@ test suite are in development.md's
 | Decision | Kept for now | Reopen when |
 | --- | --- | --- |
 | Pick the key at every signature (`gpg.ssh.defaultKeyCommand`) instead of a static `user.signingkey` | The static key, rotated by `--rotate` | Rotations become frequent, or the stale-key report fires in practice |
-| Make signed commits mandatory in the tracked config, with an explicit `commit.gpgsign = false` as the per-host exception | Signing is on per host, in `config.local`; the tracked config carries no `commit.gpgsign`, so a clone with no key can still commit | Every host that commits with the framework signs, so the exception would be the only unsigned path |
+| Count a `commit.gpgsign = false` in the checkout's own `config/git/config.local` (the whole-directory symlink era) as the host's opt-out | It is the host's exception: it still turns signing off, and `install.sh doctor` reports it as a problem ([commit signing is on in the tracked config](#commit-signing-is-on-in-the-tracked-config)) | `install.sh doctor` reports a host whose `commit.gpgsign = false` comes from the repo-side `config.local` |
 | One selector implementation, in canga, shared with other tools that pick a signing key (agents that run in a disposable sandbox pick theirs today from a pinned list of their own, not from the host's allowed-signers file) | The Python step in `lib/host_identity.py` | A sandboxed agent selects keys from the host's allowed-signers file, or another matcher diverges on the shared vectors |
 | Repair a `~/.config/git/config` that does not include `config.local` | The step checks the include chain before it writes and reports a missing one, and [framework git settings do not apply](troubleshooting.md#framework-git-settings-do-not-apply) has the fix | A host shows a broken include chain |
 | Check more of the directory that holds the identity step's empty git directory: a parent owned by another user, one group-writable without the sticky bit, and the parent's ancestors | Only a parent that every user can write to without the sticky bit is refused (`_isolate()` in `lib/host_identity.py`). The once-per-process `git rev-parse` check runs before the first read; renaming the empty directory after that check was observed to redirect later reads (same user). The default macOS `/var/folders/.../T` and Linux `/tmp` are not exposed | A host has a shared or other-owned `TMPDIR`, or a user sets `safe.directory=*` |
 | Read a `TMPDIR` spelled in decomposed Unicode (NFD) the way git does under `core.precomposeunicode` on macOS | `getcwd()` decides the ceiling; a mismatch can only make the identity step refuse (`not reading the git config`), never read a repository | A refusal is reported with a non-ASCII `TMPDIR` |
 | Match glibc's leniencies in the allowed-signers and revocation readers (a seconds field of 61, spaces inside a date field), and `ssh-keygen`'s acceptance of a repeated `cert-authority` or of a line cut short by a NUL byte | Read more strictly, the same on every platform (the header of `lib/host_identity.py`): such an allowed-signers line is malformed, and one that names an ssh-agent key makes the step write nothing, as an ambiguity; such a revocation line makes it write nothing | One of these spellings turns up in a real allowed-signers or revocation file |
 | Refuse on a malformed allowed-signers line only when it could change this host's own identity (its principals match `user.email`) | Any malformed line that names an ssh-agent key makes the step write nothing, even a line for another email: it fails closed | Someone is blocked by a malformed line for another principal |
-| Warn about an unsigned host in `_signing_advisory` when python3 is unusable | The advisory is `lib/host_identity.py`'s `advisory()`, so without python3 it says nothing; the identity step, which runs first, already says python3 is unusable | A host without a usable python3 commits unsigned without noticing |
+| Warn about an unsigned host in `_signing_advisory` when python3 is unusable | The advisory is `lib/host_identity.py`'s `advisory()`, so without python3 it says nothing; the identity step, which runs first, already says python3 is unusable. Where git reads the tracked config and no later file sets it false, a host with no key cannot make a plain `git commit` ([the known exceptions](shell-reference.md#where-commit-signing-is-mandatory)) | A host that does not read the tracked config, and has no usable python3, commits unsigned without noticing |
 | Make `--rotate`, and the stale-key line that points at it, agree with every platform's `ssh-keygen` on a line only glibc accepts; report a `user.signingkey` that names no readable key from `link` | `--rotate` may move away from a key glibc's `ssh-keygen` still accepts, or refuse with the malformed-line message after `link` pointed at it; `link` stays quiet on a `user.signingkey` it cannot read (it reports only what it can judge) | A host hits either path in practice |
 | Check for ambiguity a key spelled only inside a quoted option value | Not checked: the shape is contrived, and was judged to fail closed | Such a line turns up in a real allowed-signers file |
 | Guard against a FIFO at `~/.gitconfig` | Not guarded: git itself hangs on one, so every git command does, not only this step | A host reports a hang that traces to a special file at `~/.gitconfig` |

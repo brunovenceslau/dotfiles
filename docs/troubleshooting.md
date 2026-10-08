@@ -20,6 +20,8 @@ page no longer exists in the code.
 | `canga <TAB>` completes nothing | [canga has no completion](#canga-has-no-completion) |
 | `sbx <TAB>` completes nothing | [sbx has no completion](#sbx-has-no-completion) |
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
+| `git commit` fails with `either user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured` | [Every commit fails with no signing key](#every-commit-fails-with-no-signing-key) |
+| `every commit fails until this host has a signing key`, or `git refuses every commit` | [Every commit fails with no signing key](#every-commit-fails-with-no-signing-key) |
 | `identity: ... - writing nothing`, `is already set to a different value`, or `is overridden by` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `identity: user.signingkey ... is not valid for`, or `is not loaded in the ssh-agent` | [The signing key is stale](#the-signing-key-is-stale) |
 | `identity: python3 is not usable here - skipping` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
@@ -244,10 +246,18 @@ signing in `config.local` hears neither; the rule is in
 and the steps in
 [keep a host from signing](signing-key.md#keep-a-host-from-signing).
 
-**Cause.** Signing config lives in the untracked `config.local`, not in a global
-`~/.gitconfig`. Removing a legacy `~/.gitconfig` drops its global
-`commit.gpgsign = true`, and commits then go out unsigned. Nothing in the
-framework refuses an unsigned commit.
+The `unset` line goes on to say that git does not read the framework git
+config there, and points at
+[framework git settings do not apply](#framework-git-settings-do-not-apply).
+
+**Cause.** The tracked `config/git/config` sets `commit.gpgsign = true`, so a
+commit goes out unsigned only where that does not apply: git does not read
+the tracked config at all (`commit.gpgsign` is unset), a `false` from a file
+git reads after it turns it off, or the commit took a path the setting does
+not cover. The known paths are in
+[where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
+What refuses an unsigned commit on `main` is in
+[security properties](architecture.md#security-properties-and-where-they-are-enforced).
 
 **Diagnose.** Do not trust `git log --format=%G?`: it reports `N` even for a
 good SSH signature unless git can see an allowed-signers file. Check the raw
@@ -257,14 +267,12 @@ commit instead:
 git cat-file commit HEAD | grep -c gpgsig     # 0 means unsigned
 ```
 
-**Fix.** `./install.sh identity` sets the key from your allowed-signers file
-and ssh-agent (see
-[the installer did not set the git identity](#the-installer-did-not-set-the-git-identity)
-when it cannot). By hand:
+**Fix.** When `commit.gpgsign` is unset, add the includes as in
+[framework git settings do not apply](#framework-git-settings-do-not-apply).
+When a `false` turns it off, remove it from the file the message names, or
+keep it there on purpose. Then sign the last commit again:
 
 ```sh
-git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.pub
-git config --file ~/.config/git/config.local commit.gpgsign true
 git commit --amend --no-edit -S
 git cat-file commit HEAD | grep -c gpgsig     # want: 1
 ```
@@ -291,12 +299,59 @@ file, as in
 [new mac host, step 4](new-mac-host.md#4-remove-a-legacy-gitconfig). To stay
 on GPG for now, set `gpg.format = openpgp` in `config.local`.
 
+## Every commit fails with no signing key
+
+`git commit` stops, and no commit is made:
+
+```text
+fatal: either user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured
+```
+
+The installer says the same before it happens, in one of these lines (the
+first from `install`, `link` and `dotfiles-upgrade`, after the cause; the
+next from the `install` advisory; the last from `install.sh doctor`):
+
+```text
+install: identity: <cause>; every commit fails until this host has a signing key - run <path to install.sh> identity on this host, or opt it out of signing (see docs/signing-key.md)
+install: commit signing is on, but user.signingkey is not set, so git refuses every commit.
+install: doctor: values: user.signingkey is not set, so git refuses every commit - run: <path to install.sh> identity, or opt this host out of signing (see docs/signing-key.md)
+```
+
+**Cause.** The tracked `config/git/config` sets `commit.gpgsign = true`, and
+this host has no `user.signingkey` yet. git refuses to make a commit it
+cannot sign. On a new host this lasts from the first install until the
+identity step finds the key; on a host upgraded only over SSH the automatic
+step never acts, since a forwarded agent holds another machine's keys.
+
+**Fix.** Give the host its key: on the host itself, with its own signing key
+in the ssh-agent and listed in the allowed-signers file, run
+
+```sh
+cd ~/.config/dotfiles && ./install.sh identity
+```
+
+When the step cannot find the key, its message names the missing piece; see
+[the installer did not set the git identity](#the-installer-did-not-set-the-git-identity).
+The steps for a new key are in
+[provision a new mac host](new-mac-host.md#5-set-identity-and-signing).
+
+A host that must commit without signing opts out instead, in its own
+`config.local`, as in
+[keep a host from signing](signing-key.md#keep-a-host-from-signing):
+
+```sh
+git config --file ~/.config/git/config.local commit.gpgsign false
+```
+
 ## The installer did not set the git identity
 
 `install.sh identity` prints one of the lines below. `install`, `link` and
 `dotfiles-upgrade` print only the first line of the same explanation, ending
 in `(details: <checkout>/install.sh identity)`; run that command to see the
-rest.
+rest. When the host is left with commit signing on and no signing key, that
+line ends instead in `; every commit fails until this host has a signing
+key`, as in
+[every commit fails with no signing key](#every-commit-fails-with-no-signing-key).
 
 ```text
 install: identity: python3 is not usable here - skipping (install the Command Line Tools, then run <path to install.sh> identity)
@@ -331,6 +386,7 @@ install: identity: <key> reads <value> from <origin> after the write, not the va
 install: identity: refusing to write through the symlink <path> - add the keys by hand
 install: identity: <path> is not a regular file - writing nothing
 install: identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run <path to install.sh> identity to set it on purpose
+install: identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys); every commit fails until this host has a signing key - run <path to install.sh> identity on this host, or opt it out of signing (see docs/signing-key.md)
 install: identity: cannot read user.email (<reason>) - writing nothing
 install: identity: CANGA_HOST_ALLOWED_SIGNERS (<path>) differs from gpg.ssh.allowedSignersFile (<value>),
 install: identity: --rotate replaces only user.signingkey - run --name separately
@@ -539,7 +595,8 @@ install: doctor: values: user.name is not set - run: git config --file <path> us
 install: doctor: values: user.email is not set - run: git config --file <path> user.email <your email>
 install: doctor: values: <key> is not set - run: <path to install.sh> identity
 install: doctor: values: <key> is not a boolean git reads (<error>) - git refuses to <commit or tag> until it is; fix it in the file git -C ~ config --show-origin --get <key> names
-install: doctor: values: commit.gpgsign is not set, so commits are not signed - run: <path to install.sh> identity
+install: doctor: values: user.signingkey is not set, so git refuses every commit - run: <path to install.sh> identity, or opt this host out of signing (see docs/signing-key.md)
+install: doctor: values: commit.gpgsign is not set, so git does not read the framework git config and commits are not signed - see "Framework git settings do not apply" in docs/troubleshooting.md
 install: doctor: values: commit.gpgsign = false from <origin>, outside <path>, so commits are not signed - remove it there to sign, or set the false in <path> to opt out
 install: doctor: values: <key> is true in <path>, but <origin> sets it false and wins - remove the false there, or the true in <path>
 install: doctor: values: gpg.ssh.allowedSignersFile is not set, so git cannot verify signatures - run: <path to install.sh> identity
@@ -659,9 +716,9 @@ install: git: ~/.config/git/config exists - leaving the machine-local file intac
 **Cause.** `~/.config/git/config` was already a real file when you first ran the
 installer. The installer never rewrites that file, so it does not add the
 `[include]` of the tracked `config/git/config`, and none of the framework's git
-settings apply: `fsckObjects` on every fetch, SSH signing, the pager and the
-rest. On a re-run the same line is expected and harmless, because the file is
-then the one the installer wrote.
+settings apply: `fsckObjects` on every fetch, SSH signing and the mandatory
+`commit.gpgsign = true`, the pager and the rest. On a re-run the same line is
+expected and harmless, because the file is then the one the installer wrote.
 
 To check, ask git where `transfer.fsckObjects` comes from:
 
