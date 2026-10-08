@@ -7,9 +7,10 @@
 #
 # Tests for the commit-identity guard: .githooks/pre-commit and
 # .githooks/pre-push, the rule in .githooks/commit_identity.py, and the
-# `make commit-identity` gate. The rule: a user.email or user.name at git
-# config scope `local` or `worktree` is refused; `-c` per command, the
-# GIT_AUTHOR_*/GIT_COMMITTER_* variables and the global scope are allowed.
+# `make commit-identity` gate. The rule: an email or name under user, author
+# or committer at git config scope `local` or `worktree` is refused; `-c` per
+# command, the GIT_AUTHOR_*/GIT_COMMITTER_* variables and the global scope are
+# allowed.
 #
 # Every case runs in scratch repositories under a scratch HOME, with
 # GIT_CONFIG_GLOBAL pointing at a scratch file and GIT_CONFIG_NOSYSTEM set, so
@@ -29,18 +30,45 @@ pass=0; ok() { pass=$((pass + 1)); echo "  ok: $1"; }
 recipe="$(awk '/^commit-identity:/{p=1; next} /^[^\t]/{p=0} p' "$mk")"
 [ -n "$recipe" ] || fail "Makefile has no 'commit-identity' recipe"
 grep -qF 'python3 -I .githooks/commit_identity.py check' <<<"$recipe" \
-  || fail "the 'commit-identity' recipe must run 'python3 -I .githooks/commit_identity.py check'"
+  || fail "the 'commit-identity' recipe must run" \
+    "'python3 -I .githooks/commit_identity.py check'"
 grep -qF '$(GIT_ENV_SCRUB)' <<<"$recipe" \
-  || fail "the 'commit-identity' recipe must unset git's local env vars first (\$(GIT_ENV_SCRUB))"
-grep -q 'STRICT' <<<"$recipe" && grep -q 'exit 1' <<<"$recipe" \
-  || fail "the 'commit-identity' recipe must fail closed under STRICT=1 when python3 is absent"
+  || fail "the 'commit-identity' recipe must unset git's local env vars" \
+    "first (\$(GIT_ENV_SCRUB))"
 grep -qw commit-identity <<<"$(grep -E '^local-ci:' "$mk")" \
-  || fail "commit-identity must be a local-ci prerequisite (it is a blocking gate)"
-ok "the 'commit-identity' target runs the check, scrubs git's env, honours STRICT and gates local-ci"
+  || fail "commit-identity must be a local-ci prerequisite (a blocking gate)"
+ok "make commit-identity runs the check, scrubs git's env and gates local-ci"
 for h in pre-commit pre-push; do
-  [ -x "$repo_root/.githooks/$h" ] || fail ".githooks/$h must be executable, or a dispatcher skips it"
+  [ -x "$repo_root/.githooks/$h" ] \
+    || fail ".githooks/$h must be executable, or a dispatcher skips it"
 done
 ok ".githooks/pre-commit and .githooks/pre-push are executable"
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/commit-identity-test.XXXXXX")"
+trap 'rm -rf "$work"' EXIT
+work="$(cd "$work" && pwd -P)"
+
+# The recipe's python3-missing arms, run: a PATH holding only what the recipe
+# calls besides python3 (git and grep, for $(GIT_ENV_SCRUB)). STRICT is set on
+# each command line: a parent `make local-ci STRICT=1` exports its own.
+make_bin="$(command -v make)" || fail "make not installed"
+mkdir "$work/nopy"
+for t in git grep; do
+  ln -s "$(command -v "$t")" "$work/nopy/$t" || fail "fixture: no $t to link"
+done
+(cd "$work" && PATH="$work/nopy" "$make_bin" -s -f "$mk" commit-identity \
+  STRICT=) \
+  >"$work/out" 2>&1 \
+  || fail "without python3 and STRICT, the gate must skip: $(cat "$work/out")"
+grep -q '^WARN: python3 not installed - skipping' "$work/out" \
+  || fail "without python3 the gate must say it skipped: $(cat "$work/out")"
+if (cd "$work" && PATH="$work/nopy" "$make_bin" -s -f "$mk" commit-identity \
+    STRICT=1) >"$work/out" 2>&1; then
+  fail "without python3 under STRICT=1 the gate must fail closed"
+fi
+grep -q '^ERROR: python3 not installed and STRICT=1' "$work/out" \
+  || fail "under STRICT=1 the gate must say why it failed: $(cat "$work/out")"
+ok "without python3 the gate skips, and fails closed under STRICT=1"
 
 if ! command -v python3 >/dev/null 2>&1; then
   [ -z "${STRICT:-}" ] || fail "python3 not installed and STRICT=1 - failing closed"
@@ -50,9 +78,6 @@ if ! command -v python3 >/dev/null 2>&1; then
 fi
 
 # --- Hermetic environment ----------------------------------------------------
-work="$(mktemp -d "${TMPDIR:-/tmp}/commit-identity-test.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
-work="$(cd "$work" && pwd -P)"
 mkdir -p "$work/home" "$work/dispatch"
 export HOME="$work/home" XDG_CONFIG_HOME="$work/home/.config"
 export GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1
@@ -101,6 +126,16 @@ try_commit() {
 }
 err() { cat "$work/err"; }
 
+# check DIR - run the rule directly as `check` from DIR; sets $rc, and its
+# stderr lands in $work/err.
+check() {
+  set +e
+  (cd "$1" && python3 -B -I "$repo_root/.githooks/commit_identity.py" check \
+    </dev/null) 2>"$work/err"
+  rc=$?
+  set -e
+}
+
 # --- Commit: the refusals ----------------------------------------------------
 r="$work/r1"; new_repo "$r"
 git -C "$r" config user.email a@b
@@ -139,6 +174,78 @@ grep -qF "$r/.git/config" "$work/err" || fail "the refusal must name the shared 
 if try_commit "$r"; then fail "the incident: a commit in the main worktree must be refused too"; fi
 ok "a user.email set in a linked worktree lands in the shared config and is refused"
 
+# author.* and committer.* set the identity too, so each family is refused.
+for key in author.email author.name committer.email committer.name; do
+  r="$work/r-$key"; new_repo "$r"
+  git -C "$r" config "$key" v
+  if try_commit "$r"; then
+    fail "a repository-scoped $key must refuse the commit"
+  fi
+  grep -q "refusing: $key 'v' is set at scope local" "$work/err" \
+    || fail "the refusal must name $key: $(err)"
+done
+ok "a repository-scoped author.email/name and committer.email/name are refused"
+
+# Why author.* matters: a local author.email wins over `-c user.email`.
+r="$work/r-override"; new_repo "$r"
+git -C "$r" config author.email auth@x
+git -C "$r" -c core.hooksPath=/dev/null \
+  -c user.email=c@x commit -q --allow-empty -m m \
+  || fail "fixture: the unhooked commit failed"
+[ "$(git -C "$r" log -1 --format=%ae)" = auth@x ] \
+  || fail "fixture: a local author.email no longer overrides -c user.email"
+if try_commit "$r" -c user.email=c@x -c user.name=C; then
+  fail "a local author.email must be refused even under -c user.email"
+fi
+grep -q "refusing: author.email 'auth@x'" "$work/err" \
+  || fail "the refusal must name author.email: $(err)"
+ok "a local author.email overrides -c user.email and is refused"
+
+# A file the repository's config includes is scope local too.
+r="$work/r-include"; new_repo "$r"
+printf '[include]\n\tpath = inc\n' >> "$r/.git/config"
+printf '[user]\n\temail = i@x\n' > "$r/.git/inc"
+if try_commit "$r"; then
+  fail "a user.email in an included file must be refused"
+fi
+grep -qF "user.email 'i@x' is set at scope local in $r/.git/inc;" "$work/err" \
+  && grep -qF "fix: git config --file $r/.git/inc --unset-all user.email" \
+    "$work/err" \
+  || fail "the refusal must name scope local and the included file: $(err)"
+ok "a user.email in a relative [include] file is refused at scope local"
+
+# worktreeConfig in a linked worktree: its own config.worktree, refused there
+# and not in the main worktree, which does not read that file.
+r="$work/r-wtc"; new_repo "$r"
+git -C "$r" config extensions.worktreeConfig true
+git -C "$r" worktree add -q -b side "$work/r-wtc-linked"
+git -C "$work/r-wtc-linked" config --worktree user.email w@x
+wt_cfg="$r/.git/worktrees/r-wtc-linked/config.worktree"
+[ -f "$wt_cfg" ] || fail "fixture: no config.worktree at $wt_cfg"
+if try_commit "$work/r-wtc-linked"; then
+  fail "a worktree-scoped user.email in a linked worktree must be refused"
+fi
+grep -qF "is set at scope worktree in $wt_cfg;" "$work/err" \
+  || fail "the refusal must name the linked worktree's config.worktree: $(err)"
+try_commit "$r" \
+  || fail "the main worktree does not read it, so it must pass: $(err)"
+ok "a worktree-scoped user.email in a linked worktree is refused there only"
+
+# Several offending keys: one line each, in git's config order.
+r="$work/r-many"; new_repo "$r"
+git -C "$r" config committer.email c@x
+git -C "$r" config user.name U
+git -C "$r" config author.name A
+check "$r"
+[ "$rc" -eq 1 ] || fail "several offending keys must exit 1, got $rc: $(err)"
+got="$(sed -n 's/^commit-identity: check: refusing: \([^ ]*\) .*/\1/p' \
+  "$work/err" | tr '\n' ' ')"
+[ "$got" = "committer.email user.name author.name " ] \
+  || fail "one refusal per key, in config order, got '$got': $(err)"
+[ "$(wc -l < "$work/err")" -eq 4 ] \
+  || fail "three refusals plus one pointer: $(err)"
+ok "several offending keys print one line each, in config order"
+
 # --- Commit: what stays allowed ----------------------------------------------
 # No identity anywhere in config, so the commit can only take the one given.
 r="$work/r5"; new_repo "$r"
@@ -151,6 +258,13 @@ GIT_AUTHOR_NAME=E GIT_AUTHOR_EMAIL=e@x GIT_COMMITTER_NAME=E GIT_COMMITTER_EMAIL=
   try_commit "$r" || fail "GIT_AUTHOR_*/GIT_COMMITTER_* must be allowed: $(err)"
 [ "$(git -C "$r" log -1 --format=%ae/%ce)" = e@x/e@x ] || fail "fixture: the env identity was not used"
 ok "GIT_AUTHOR_EMAIL/GIT_COMMITTER_EMAIL are allowed"
+
+GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=user.email GIT_CONFIG_VALUE_0=k@x \
+  GIT_CONFIG_KEY_1=user.name GIT_CONFIG_VALUE_1=K try_commit "$r" \
+  || fail "GIT_CONFIG_COUNT (scope command) must be allowed: $(err)"
+[ "$(git -C "$r" log -1 --format=%ae)" = k@x ] \
+  || fail "fixture: the GIT_CONFIG_COUNT identity was not used"
+ok "GIT_CONFIG_COUNT per command is allowed"
 global_config
 
 r="$work/r6"; new_repo "$r"
@@ -182,7 +296,7 @@ if git -C "$remote" rev-parse -q --verify refs/heads/topic >/dev/null; then
   fail "a refused push must not create the remote branch"
 fi
 ok "pre-push refuses after a rebase under a repository-scoped identity"
-git -C "$r" config --unset user.email
+git -C "$r" config --unset-all user.email
 
 # Every push shape git can hand pre-push on stdin, with a clean config.
 git -C "$r" push -q origin topic 2>"$work/err" || fail "pre-push: a new branch must pass: $(err)"
@@ -203,11 +317,13 @@ ok "pre-push tolerates a new branch, a deletion, a tag push and a missing remote
 r="$work/r 8"; new_repo "$r"
 git -C "$r" config user.email a@b
 if try_commit "$r"; then fail "fixture: the commit in '$r' should be refused"; fi
-want="commit-identity: pre-commit: refusing: user.email 'a@b' is set at scope local in $r/.git/config; fix: git config --file '$r/.git/config' --unset-all user.email"
+want="commit-identity: pre-commit: refusing: user.email 'a@b' is set at"
+want="$want scope local in $r/.git/config; fix: git config --file"
+want="$want '$r/.git/config' --unset-all user.email"
 grep -qxF "$want" "$work/err" || fail "the refusal line is not what was expected: $(err)"
 grep -qF "git -c user.email=" "$work/err" || fail "the refusal must point at 'git -c user.email=...': $(err)"
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "one line per offending key plus one pointer, got: $(err)"
-ok "the message names the file and the --unset fix, escaped"
+ok "the message names the file and the --unset-all fix, quoted"
 
 r="$work/r9"; new_repo "$r"
 git -C "$r" config user.name "$(printf 'x\033[31my\nforged\342\200\256z\\')"
@@ -217,6 +333,78 @@ grep -qF "'x\\x1b[31my\\x0aforged\\u202ez\\\\'" "$work/err" \
 if LC_ALL=C grep -q "$(printf '\033')" "$work/err"; then fail "a raw ESC reached the message"; fi
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "an LF in a value must not forge a line: $(err)"
 ok "control characters in a value are escaped"
+
+# Every escape() branch: a byte that is not UTF-8 (\xHH via surrogateescape),
+# DEL and the non-printable 0x80-0xFF range (\xHH), a non-printable astral
+# character (\UHHHHHHHH).
+r="$work/r-esc"; new_repo "$r"
+git -C "$r" config user.name \
+  "$(printf 'a\377b\177c\302\205d\302\240e\363\240\200\201f')"
+check "$r"
+[ "$rc" -eq 1 ] || fail "fixture: the escape case should be refused, got $rc"
+grep -qF "'a\\xffb\\x7fc\\x85d\\xa0e\\U000e0001f'" "$work/err" \
+  || fail "every escape branch must print its escape: $(err)"
+ok "a non-UTF-8 byte, DEL, 0x80-0xFF and an astral format character are escaped"
+
+# A path the escape changes gets no command: the command would name another
+# file. A path it leaves alone gets the runnable command (the r 8 case above).
+r="$work/r-bs"; new_repo "$r"
+mkdir "$r/.git/in\\x"
+printf '[include]\n\tpath = in\\\\x/extra\n' >> "$r/.git/config"
+printf '[user]\n\temail = i@x\n' > "$r/.git/in\\x/extra"
+check "$r"
+[ "$rc" -eq 1 ] \
+  || fail "fixture: the backslash path should be refused, got $rc: $(err)"
+want="commit-identity: check: refusing: user.email 'i@x' is set at scope"
+want="$want local in $r/.git/in\\\\x/extra; fix: remove user.email from"
+want="$want that file (path shown escaped)"
+grep -qxF "$want" "$work/err" \
+  || fail "an escaped path must not print a command: $(err)"
+ok "a path that prints escaped names the file, not a command for another file"
+
+# --- Direct runs: where it runs from, and the exit-2 contract -----------------
+r="$work/r-where"; new_repo "$r"
+git -C "$r" config user.email a@b
+mkdir -p "$r/sub/dir"
+for d in "$r/sub/dir" "$r/.git" "$r/.git/refs"; do
+  check "$d"
+  [ "$rc" -eq 1 ] \
+    && grep -qF "fix: git config --file $r/.git/config " "$work/err" \
+    || fail "a run from $d must refuse and name $r/.git/config, got $rc: $(err)"
+done
+ok "a run from a subdirectory or from inside .git names the same config file"
+
+b="$work/bare.git"; git init -q --bare "$b"
+git -C "$b" config user.email a@b
+check "$b"
+[ "$rc" -eq 1 ] && grep -qF "fix: git config --file $b/config " "$work/err" \
+  || fail "a bare repository must refuse and name $b/config, got $rc: $(err)"
+ok "a bare repository is checked and names its config file"
+
+mkdir "$work/norepo"
+GIT_CEILING_DIRECTORIES="$work" check "$work/norepo"
+[ "$rc" -eq 2 ] && grep -q "^commit-identity: 'git rev-parse" "$work/err" \
+  || fail "outside a repository it must exit 2 with its prefix, got $rc: $(err)"
+ok "outside a repository it exits 2 and says why"
+
+r="$work/r-bad"; new_repo "$r"
+printf '[user]\n\temail\n' >> "$r/.git/config"
+check "$r"
+[ "$rc" -eq 2 ] && grep -q "missing value for 'user.email'" "$work/err" \
+  || fail "a config git refuses to parse must exit 2, got $rc: $(err)"
+ok "a valueless identity key (git refuses the config) exits 2"
+
+for args in "" "bogus" "check extra"; do
+  set +e
+  # shellcheck disable=SC2086 # word-split on purpose: the argv under test
+  python3 -B -I "$repo_root/.githooks/commit_identity.py" $args \
+    </dev/null 2>"$work/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] && grep -q '^usage: commit_identity.py' "$work/err" \
+    || fail "argv '$args' must exit 2 with the usage, got $rc: $(err)"
+done
+ok "a wrong argv exits 2 with the usage"
 
 # --- The dispatcher contract from a linked worktree ---------------------------
 r="$work/r10"; new_repo "$r"
@@ -238,11 +426,25 @@ git -C "$r" config --unset user.email
   || fail "pre-commit with no stdin must pass on a clean config: $(err)"
 ok "the hook runs through the dispatcher contract (args and stdin) from a linked worktree"
 
+# pre-push drains its stdin: a writer of far more than a pipe buffer of ref
+# lines must not meet a closed pipe (SIGPIPE, exit 141).
+set +e
+(cd "$work/r10-linked" \
+  && for _ in $(seq 6000); do printf '%s\n' "$line"; done \
+  | .githooks/pre-push origin "$work/remote.git") 2>"$work/err"
+rc=$?
+set -e
+[ "$rc" -eq 0 ] \
+  || fail "pre-push must read every ref line, not close the pipe," \
+    "got $rc: $(err)"
+ok "pre-push drains a multi-line stdin larger than a pipe buffer"
+
 # The sandbox's real dispatcher, when this machine has one.
 if [ -x /etc/git/hooks/pre-commit ]; then
   git -C "$r" config user.email a@b
   if (unset GIT_CONFIG_NOSYSTEM
-      git -C "$work/r10-linked" -c core.hooksPath=/etc/git/hooks commit -q --allow-empty -m m) 2>"$work/err"; then
+      git -C "$work/r10-linked" -c core.hooksPath=/etc/git/hooks \
+        commit -q --allow-empty -m m) 2>"$work/err"; then
     fail "the real dispatcher at /etc/git/hooks must run .githooks/pre-commit and refuse"
   fi
   grep -q 'commit-identity: pre-commit: refusing' "$work/err" \

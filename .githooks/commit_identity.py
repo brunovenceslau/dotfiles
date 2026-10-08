@@ -6,15 +6,22 @@
 
 Usage: python3 -I .githooks/commit_identity.py pre-commit|pre-push|check
 
-Exits 1 when `user.email` or `user.name` is set at git config scope `local`
-(the repository's shared config, `.git/config`, or a file it includes) or
-`worktree` (`config.worktree`, when extensions.worktreeConfig is on). A
+Exits 1 when an identity key (`email` or `name` under `user`, `author` or
+`committer`) is set at git config scope `local` (the repository's shared
+config, `.git/config`, or a file it includes) or `worktree`
+(`config.worktree`, when extensions.worktreeConfig is on). A
 `git config user.email ...` run inside a linked worktree lands in the SHARED
 `.git/config`, so every worktree of the repository then commits under that
 identity, signed by the right key but authored by the wrong person.
+`author.*` and `committer.*` count too: they set the identity as well, and a
+repository-scoped `author.email` even wins over `git -c user.email=...`.
 
-Allowed, by design: `git -c user.email=...` per command (scope `command`, the
-recipe for a scratch commit), the GIT_AUTHOR_* and GIT_COMMITTER_* variables
+A guardrail against accidents, not an enforcement boundary: merge, rebase
+and cherry-pick skip pre-commit, pre-push reads config at push time only,
+and `--no-verify` or a repository core.hooksPath skips both hooks.
+
+Allowed, by design: `git -c user.email=...` per command (scope `command`,
+GIT_CONFIG_COUNT included; the recipe for a scratch commit), the GIT_AUTHOR_* and GIT_COMMITTER_* variables
 (not config at all), and the global and system scopes. Nothing else is
 checked: no trust root, no signature, no allowed-signers lookup.
 
@@ -36,7 +43,9 @@ import shlex
 import subprocess
 import sys
 
-KEYS = ("user.email", "user.name")
+SECTIONS = ("user", "author", "committer")
+KEYS = tuple("%s.%s" % (s, k) for s in SECTIONS for k in ("email", "name"))
+KEYS_REGEXP = r"^(%s)\.(email|name)$" % "|".join(SECTIONS)
 REFUSED_SCOPES = ("local", "worktree")
 CALLERS = ("pre-commit", "pre-push", "check")
 PREFIX = "commit-identity"
@@ -81,13 +90,14 @@ def git_dir():
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = decode(p.stdout)
     if p.returncode != 0 or not out.endswith("\n") or "\n" in out[:-1]:
-        fail("not inside a git repository, or 'git rev-parse' failed "
-             "(exit %d): %s" % (p.returncode, decode(p.stderr).strip()))
+        fail("'git rev-parse --absolute-git-dir' failed (exit %d), not "
+             "inside a git repository?: %s"
+             % (p.returncode, decode(p.stderr).strip()))
     return out[:-1]
 
 
 def entries(gdir):
-    """Yield (scope, origin, key, value) for each user.email/user.name.
+    """Yield (scope, origin, key, value) for each identity key in KEYS.
 
     GIT_DIR is pinned to the ABSOLUTE git dir: git prints a repository
     origin relative to its own working directory otherwise (`.git/config`
@@ -96,7 +106,7 @@ def entries(gdir):
     env = dict(os.environ, GIT_DIR=gdir)
     p = subprocess.run(
         ["git", "config", "--show-scope", "--show-origin", "-z",
-         "--get-regexp", r"^user\.(email|name)$"],
+         "--get-regexp", KEYS_REGEXP],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     # 1 is "no such key": nothing set anywhere is a pass.
     if p.returncode == 1 and not p.stdout:
@@ -104,15 +114,20 @@ def entries(gdir):
     if p.returncode != 0:
         fail("'git config' failed (exit %d): %s"
              % (p.returncode, decode(p.stderr).strip()))
-    # -z: each entry is SCOPE NUL ORIGIN NUL KEY [LF VALUE] NUL. A key with
-    # no `=` at all (`[user] name`) has no LF and no value.
+    # -z: each entry is SCOPE NUL ORIGIN NUL KEY LF VALUE NUL. A key with no
+    # `=` at all (`[user] name`) would print no LF, but git refuses every
+    # one of KEYS without a value ("missing value"), so git_dir()'s
+    # rev-parse has already failed on it: an entry without the LF is an
+    # unexpected shape, not a case to format.
     fields = p.stdout.split(b"\0")
     if fields[-1] != b"" or (len(fields) - 1) % 3:
         fail("'git config -z' printed an unexpected shape")
     for i in range(0, len(fields) - 1, 3):
         key, sep, value = fields[i + 2].partition(b"\n")
+        if not sep:
+            fail("'git config -z' printed a key without a value")
         yield (decode(fields[i]), decode(fields[i + 1]), decode(key),
-               decode(value) if sep else None)
+               decode(value))
 
 
 def origin_file(origin, gdir):
@@ -130,18 +145,24 @@ def refusals(gdir):
     for scope, origin, key, value in entries(gdir):
         if scope not in REFUSED_SCOPES or key not in KEYS:
             continue
-        shown = "(no value)" if value is None else "'%s'" % escape(value)
+        shown = "'%s'" % escape(value)
         path = origin_file(origin, gdir)
         if path is None:
             where = "from %s" % escape(origin)
             fix = "remove it from that source"
-        else:
-            # Quoted after escaping: the escape removes anything a shell
-            # or a terminal would act on, and the quote keeps a space or a
-            # `$` in the path one literal word.
-            where = "in %s" % escape(path)
+        elif escape(path) == path:
+            # Quoted: the path escapes to itself, so it holds nothing a
+            # shell or a terminal would act on, and the quote keeps a space
+            # or a `$` in it one literal word.
+            where = "in %s" % path
             fix = "git config --file %s --unset-all %s" % (
-                shlex.quote(escape(path)), key)
+                shlex.quote(path), key)
+        else:
+            # No command: the printed path is escaped (a backslash doubled,
+            # a control character spelled out), so a command naming it
+            # would name another file, which may not exist.
+            where = "in %s" % escape(path)
+            fix = "remove %s from that file (path shown escaped)" % key
         lines.append("%s %s is set at scope %s %s; fix: %s"
                      % (key, shown, scope, where, fix))
     return lines

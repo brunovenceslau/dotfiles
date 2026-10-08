@@ -107,7 +107,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
 | `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference link and definition, HTML `href` and `src`, and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
-| `make commit-identity` | `python3 -I .githooks/commit_identity.py check`, with git's local environment variables unset | No `user.email` or `user.name` is set inside this repository's own git config. See [What `make commit-identity` checks](#what-make-commit-identity-checks). |
+| `make commit-identity` | `python3 -I .githooks/commit_identity.py check`, with git's local environment variables unset | No commit identity (`email` or `name` under `user`, `author` or `committer`) is set inside this repository's own git config. See [What `make commit-identity` checks](#what-make-commit-identity-checks). |
 | `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck, commit-identity | Everything CI runs. |
 | `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
@@ -493,18 +493,20 @@ tree.
 
 ### What `make commit-identity` checks
 
-A commit identity belongs in the global config. The check refuses a
-`user.email` or `user.name` set at git config scope `local` (the repository's
-`.git/config`, or a file it includes) or `worktree` (a `config.worktree`, when
-`extensions.worktreeConfig` is on). A `git config user.email` run inside a
-linked worktree writes the shared `.git/config`, so every worktree of the
-repository then commits under it: signed by the right key, authored by the
-wrong person.
+A commit identity belongs in the global config. The check refuses an `email`
+or `name` under `user`, `author` or `committer` set at git config scope
+`local` (the repository's `.git/config`, or a file it includes) or `worktree`
+(a `config.worktree`, when `extensions.worktreeConfig` is on). A
+`git config user.email` run inside a linked worktree writes the shared
+`.git/config`, so every worktree of the repository then commits under it:
+signed by the right key, authored by the wrong person. `author.*` and
+`committer.*` count because they set the identity too: a repository-scoped
+`author.email` wins even over `git -c user.email=...`.
 
 These stay allowed: `git -c user.email=... -c user.name=...` per command
-(scope `command`), the `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the
-global and system scopes. The check reads config only. It does not look at
-signatures or keys.
+(scope `command`, which `GIT_CONFIG_COUNT` also sets), the `GIT_AUTHOR_*` and
+`GIT_COMMITTER_*` variables, and the global and system scopes. The check
+reads config only. It does not look at signatures or keys.
 
 A refusal prints one line per offending key, naming the key, its value, the
 scope and the file, and the command that removes it, then one line pointing
@@ -516,8 +518,10 @@ commit-identity: check: refusing: user.email 'a@b' is set at scope local in /pat
 
 Control characters, bidi and zero-width characters in a value or a path print
 as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`, so a value
-cannot forge a line. It exits 2 when it cannot answer, for example outside a
-repository.
+cannot forge a line. When that escaping changes a path, the fix names the key
+to remove from that file instead of a command, which would name another
+file. It exits 2 when it cannot answer: outside a repository, on a config git
+refuses to parse, or on a wrong argument.
 
 The same rule runs as two git hooks, `.githooks/pre-commit` and
 `.githooks/pre-push`, which run `.githooks/commit_identity.py`. `pre-push`
@@ -532,6 +536,14 @@ the guard runs only as this gate (see
 [Deferred decisions](#deferred-decisions)). A CI checkout sets no identity in
 its repository, so the gate passes there.
 `tests/commit_identity_test.sh` proves each rule in scratch repositories.
+
+The guard catches accidents. It is not an enforcement boundary: a merge, a
+rebase or a cherry-pick skips `pre-commit`; `pre-push` reads config at push
+time only, so an identity removed before the push lets the commits made under
+it through; and `--no-verify` or a repository `core.hooksPath` skips both
+hooks. The backstop on GitHub is the signed-commits rule of the
+`main-protection` branch ruleset (see
+[Repository settings](#repository-settings)).
 
 ## CI
 

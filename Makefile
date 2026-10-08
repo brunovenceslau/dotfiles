@@ -447,12 +447,12 @@ linkcheck:
 	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
 	fi
 
-# Commit identity - refuse a user.email or user.name set at git config scope
-#   `local` or `worktree` in this repository: the one place a stray
-#   `git config user.email` inside a linked worktree lands, from where every
-#   worktree commits under it. The rule lives in .githooks/commit_identity.py,
+# Commit identity - refuse an email or name under user, author or committer
+#   set at git config scope `local` or `worktree` in this repository: the one
+#   place a stray `git config user.email` inside a linked worktree lands, from
+#   where every worktree commits under it. The rule lives in .githooks/commit_identity.py,
 #   shared with the pre-commit and pre-push hooks there, so the gate and the
-#   hooks cannot disagree. A CI checkout sets no user.* in its repository, so
+#   hooks cannot disagree. A CI checkout sets no identity in its repository, so
 #   the gate passes there; it bites on a developer's checkout, before a push.
 #   git's local env vars are unset first ($(GIT_ENV_SCRUB)): a GIT_DIR leaked
 #   from a hook would point the check at another repository. stdin is
