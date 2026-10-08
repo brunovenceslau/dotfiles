@@ -10,8 +10,11 @@
 # `python3 -I lib/host_identity.py --config-local PATH --installer PATH
 #  --mode MODE ...`:
 #   auto      the `install` and `link` arms (so every upgrade too): quiet when
-#             the host already signs, one line when it cannot act, never
-#             rotates, never writes user.name, never writes in an SSH session,
+#             the host already signs and has a user.name, one line when it
+#             cannot act, one line naming `identity --name` while only
+#             user.name is missing, never rotates, never writes user.name
+#             (the operator's to choose; the line only suggests the
+#             account's full name), never writes in an SSH session,
 #             silent on a host that opted out of signing (a false in
 #             config.local, opted_out());
 #             with --report-stale (the `link` arm) one line when the
@@ -75,6 +78,7 @@ import errno
 import hashlib
 import os
 import platform
+import pwd
 import re
 import shutil
 import signal
@@ -562,6 +566,80 @@ def valid_name(n):
     """A user.name git can put in an ident line: no `<>`, no control,
     invisible or line-separator characters."""
     return bool(n) and _clean(n) and not any(c in "<>" for c in n)
+
+
+def gecos_name(pw):
+    """The full name git itself would take from the account PW (a pwd
+    entry), as its ident.c does: the GECOS field up to its first comma, each
+    `&` replaced by the login with its first letter capitalized. Empty when
+    the account has none (a Linux account's GECOS often is)."""
+    field = (pw.pw_gecos or "").split(",", 1)[0]
+    login = pw.pw_name or ""
+    # git capitalizes with an ASCII toupper(); str.upper() differs from it
+    # only when the login's first letter is not ASCII, which a login never
+    # is in practice. Either way the result is only a suggestion.
+    return field.replace("&", login[:1].upper() + login[1:]).strip()
+
+
+# Characters that a shell still interprets inside double quotes (`!` in an
+# interactive bash or zsh): a name holding one is not suggested, since the
+# suggested command would not pass it through unchanged.
+_SHELL_ACTIVE = '"\\$`!'
+
+# Code points a terminal shows as nothing or as a plain space that
+# _BAD_CATEGORIES lets through (they are letters, marks or symbols, not
+# format characters): the Hangul fillers, the combining grapheme joiner,
+# the Khmer and Mongolian invisible vowels and selectors, the variation
+# selectors, the braille blank, the Egyptian hieroglyph blanks and the
+# Khitan small script filler. A suggested name holding one would look like
+# a different name than the one written.
+_INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+              (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+# Unassigned (Cn) and private-use (Co) code points have no agreed glyph, so
+# a suggestion holding one may render as another name. Only the suggestion
+# refuses them: valid_name(), which decides what is written, does not, and
+# an older Python's Unicode table only makes the placeholder more likely.
+_UNSHOWN_CATEGORIES = frozenset(["Cn", "Co"])
+
+
+def _invisible(c):
+    o = ord(c)
+    return any(lo <= o <= hi for lo, hi in _INVISIBLE)
+
+
+def suggested_name(name):
+    """The value the missing-name line puts after --name: NAME when
+    install.sh identity would accept it, a shell passes it through double
+    quotes unchanged, and it reads on screen as what it is (a letter or a
+    digit, no space but U+0020, no invisible, unassigned or private-use
+    code point), else the placeholder. Through _shown() as well, so a control character could
+    never reach the terminal even if valid_name() were loosened."""
+    if (name and valid_name(name)
+            and not any(c in _SHELL_ACTIVE for c in name)
+            and any(c.isalnum() for c in name)
+            and not any(c.isspace() and c != " " for c in name)
+            and not any(_invisible(c) for c in name)
+            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)):
+        return _shown(name)
+    return "Full Name"
+
+
+def account_name():
+    """gecos_name() of the account running this, or "" when it has none."""
+    try:
+        return gecos_name(pwd.getpwuid(os.getuid()))
+    except (KeyError, OSError):
+        return ""
+
+
+def missing_name_line(host):
+    """ONE literal, quoted by docs/signing-key.md: the hint for a host with no
+    user.name. The step never writes the name itself (only --name does): it
+    is the operator's to choose, so the account's full name is a
+    suggestion."""
+    return 'identity: user.name is not set - run: %s identity --name "%s"' % (
+        host.installer, suggested_name(account_name()))
 
 
 # --- reading files and running tools -----------------------------------------
@@ -1420,7 +1498,7 @@ def opted_out(host):
     return origin
 
 
-def already_configured(host):
+def signing_configured(host):
     """user.email, user.signingkey and commit.gpgsign are all set, the last
     true or false. A false is the host's exception (identity() kept it) or
     one overriding a true in config.local, which `auto --report-stale`
@@ -1430,6 +1508,12 @@ def already_configured(host):
     key = host.effective("user.signingkey")
     sign = host.effective("commit.gpgsign", typ="bool")
     return email.set and key.set and sign.set
+
+
+def already_configured(host):
+    """signing_configured(), and user.name is set too: the tracked
+    user.useConfigOnly = true makes git refuse every commit without it."""
+    return signing_configured(host) and host.effective("user.name").set
 
 
 def commits_fail_closed(host):
@@ -1636,7 +1720,7 @@ def identity(host, name):
     if conflicts:
         return 1
     if host.effective("user.name").unset:
-        warn('identity: user.name is not set - run: %s identity --name "Full Name"' % host.installer)
+        warn(missing_name_line(host))
     return 0
 
 
@@ -2091,8 +2175,8 @@ class Doctor(object):
         inst = host.installer
         cl = host.config_local
         off = self.opted_out_origin
-        for key in ("user.name", "user.email", "user.signingkey", "commit.gpgsign", "tag.gpgsign",
-                    "gpg.format", "gpg.ssh.allowedSignersFile", "gpg.ssh.revocationFile"):
+        for key in ("user.name", "user.email", "user.useConfigOnly", "user.signingkey", "commit.gpgsign",
+                    "tag.gpgsign", "gpg.format", "gpg.ssh.allowedSignersFile", "gpg.ssh.revocationFile"):
             origins = host.origins(key)
             if origins:
                 origin, value = origins[-1]
@@ -2103,24 +2187,45 @@ class Doctor(object):
         if not (fmt.set and fmt.text == "ssh"):
             self.problem('gpg.format is %s, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md'
                          % (repr(fmt.text) if fmt.set else "unset"), signing=True)
+        # The tracked config sets user.useConfigOnly = true: git then refuses
+        # every commit, signed or not, without a user.name and a user.email,
+        # so the lines for those two say so. A false (config.local may set
+        # one) lets git invent both from the account and host name instead.
+        only = host.effective("user.useConfigOnly", "bool")
+        refuses = only.set and only.text == "true"
+        if only.set and only.text == "false":
+            self.info("user.useConfigOnly = false from %s: git invents a name and an email from this account and host when none is set"
+                      % last_origin(host, "user.useConfigOnly"))
+        # Each line ONE literal, fix included: docs/troubleshooting.md quotes
+        # them. The `git config --file` fixes are an opted-out host's, where
+        # `install.sh identity` needs a signing key.
+        if refuses:
+            name_local = 'user.name is not set, so git refuses every commit - run: git config --file %s user.name "Full Name"'
+            name_step = 'user.name is not set, so git refuses every commit - run: %s identity --name "Full Name"'
+            email_local = "user.email is not set, so git refuses every commit - run: git config --file %s user.email <your email>"
+            email_step = "user.email is not set, so git refuses every commit - run: %s identity"
+        else:
+            name_local = 'user.name is not set - run: git config --file %s user.name "Full Name"'
+            name_step = 'user.name is not set - run: %s identity --name "Full Name"'
+            email_local = "user.email is not set - run: git config --file %s user.email <your email>"
+            email_step = "user.email is not set - run: %s identity"
         for key in ("user.name", "user.email", "user.signingkey"):
             signing = key == "user.signingkey"
             v = host.effective(key)
             if v.error:
                 self.problem("cannot read %s (%s) - check the file git -C ~ config --show-origin --get %s names"
                              % (key, v.err, key), signing=signing)
-            elif v.unset and key == "user.name" and off:
-                self.problem('user.name is not set - run: git config --file %s user.name "Full Name"' % cl)
             elif v.unset and key == "user.name":
-                self.problem('user.name is not set - run: %s identity --name "Full Name"' % inst)
-            elif v.unset and key == "user.email" and off:
-                self.problem("user.email is not set - run: git config --file %s user.email <your email>" % cl)
+                self.problem(name_local % cl if off else name_step % inst)
+            elif v.unset and key == "user.email":
+                self.problem(email_local % cl if off else email_step % inst)
             elif v.unset and signing and commits_fail_closed(host):
                 self.problem("user.signingkey is not set, so git refuses every commit - run: %s identity, or opt this host out of signing (see docs/signing-key.md)"
                              % inst, signing=True)
             elif v.unset:
                 self.problem("%s is not set - run: %s identity" % (key, inst), signing=signing)
-        for key, verb in (("commit.gpgsign", "commit"), ("tag.gpgsign", "tag")):
+        for key, verb in (("user.useConfigOnly", "run most commands"), ("commit.gpgsign", "commit"),
+                          ("tag.gpgsign", "tag")):
             v = host.effective(key, "bool")
             if v.error:
                 # git dies on such a value: `fatal: bad boolean config value`.
@@ -2320,6 +2425,19 @@ def run(host, mode, name, report_stale, verbose=False):
             return 0, None
         # One line at most: main() keeps only the first warning.
         return (overridden_line(host) or stale_line(host)), None
+    if mode == "auto" and signing_configured(host) and host.effective("user.name").unset:
+        # Only user.name is missing, which the step never writes. Its line is
+        # the one line, ahead of a stale-key or override line: under the
+        # tracked user.useConfigOnly = true git refuses every commit without
+        # a name, while a stale key only leaves new signatures unverified.
+        # Not through identity(): with the email and key in place it would
+        # write nothing, and an unreachable agent would bury the name line
+        # under an agent line. The next run, once the name is set, reports
+        # the stale key. A user.name git cannot read is not "not set": it
+        # falls through to identity(), like any other failed read (git fails
+        # a read for the whole config, so the email's read names the error).
+        warn(missing_name_line(host))
+        return 0, None
     if not global_reads_local(host):
         return 1, None
     if mode == "rotate":
@@ -2382,6 +2500,16 @@ def main(argv):
         lines, _captured = _captured, None
     if args.mode == "doctor":
         lines = []
+    # Precedence among auto's one-line warnings: a missing user.name or
+    # user.email comes first, since git refuses every commit without it
+    # (the tracked user.useConfigOnly). A missing email is never a line of
+    # its own: the step writes it, or the headline names why it cannot. A
+    # missing name on an otherwise configured host is printed alone by
+    # run(), ahead of a stale-key or override line. A host missing both
+    # hears the cause first: a run that writes the email prints its `wrote`
+    # line (log(), not a warning) and then the name line, since rc 0 keeps
+    # every warning; a run that cannot write prints its one cause line, and
+    # the name line comes on a later run.
     if lines:
         if rc == 0:
             for line in lines:

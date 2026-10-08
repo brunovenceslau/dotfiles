@@ -597,15 +597,18 @@ EOF
 #
 # `--mode auto` is the automatic step the `install` and `link` arms run (and so
 # every dotfiles-upgrade, which re-enters `link`): it writes only what is
-# absent, is quiet once the host signs, prints ONE line (naming
-# "$DOTFILES/install.sh identity" for the details) when it cannot act, which
-# says every commit fails when the tracked commit.gpgsign = true is left with
-# no signing key, does
+# absent, is quiet once the host signs and has a user.name, prints ONE line
+# (naming "$DOTFILES/install.sh identity" for the details) when it cannot act,
+# which says every commit fails when the tracked commit.gpgsign = true is left
+# with no signing key, prints one line naming `identity --name` while only
+# user.name is missing (the tracked user.useConfigOnly = true makes git refuse
+# every commit without it), does
 # nothing in an SSH session (a forwarded agent holds another machine's keys),
 # writes and prints nothing on a host that opted out of signing (a
 # commit.gpgsign = false in config.local itself; `doctor` names it), never
-# rotates a key and never writes user.name (no source can derive it;
-# `identity --name` does). With --report-stale (the `link` arm only, since
+# rotates a key and never writes user.name (the name is the operator's to
+# choose: the line only suggests the account's full name, and
+# `identity --name` writes it). With --report-stale (the `link` arm only, since
 # `install` runs the fuller _signing_advisory right after), a host that already
 # signs gets ONE line when its configured key no longer verifies (retired,
 # expired or revoked). Its callers ignore its status: a host without an

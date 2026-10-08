@@ -613,6 +613,17 @@ and `config.local` second (`_write_git_local_config` in `lib/link.sh`). A
 `tag.gpgsign` stays out of the tracked config and is written per host by the
 identity step, so an opted-out host never signs tags by surprise.
 
+The tracked config also sets `user.useConfigOnly = true`. Without it, a host
+with no `user.email` commits under an address git guesses from the login and
+host name, which matches no signing key on GitHub, so those commits never
+show as Verified. With it, wherever git reads the tracked config, git
+refuses the commit until `config.local` sets `user.name` and `user.email`,
+on a host opted out of signing too. The identity step writes the email but
+never the name, which only `--name` sets; the automatic step names a missing
+name in one line. A `false` read after the tracked `true` (from
+`config.local`) turns this off, and `install.sh doctor --verbose` names the
+file it comes from.
+
 Signing is mandatory only where git reads the tracked config, and some git
 paths do not sign even there; the list is in
 [where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
@@ -646,6 +657,8 @@ test suite are in development.md's
 | Warn about an unsigned host in `_signing_advisory` when python3 is unusable | The advisory is `lib/host_identity.py`'s `advisory()`, so without python3 it says nothing; the identity step, which runs first, already says python3 is unusable. Where git reads the tracked config and no later file sets it false, a host with no key cannot make a plain `git commit` ([the known exceptions](shell-reference.md#where-commit-signing-is-mandatory)) | A host that does not read the tracked config, and has no usable python3, commits unsigned without noticing |
 | Make `--rotate`, and the stale-key line that points at it, agree with every platform's `ssh-keygen` on a line only glibc accepts; report a `user.signingkey` that names no readable key from `link` | `--rotate` may move away from a key glibc's `ssh-keygen` still accepts, or refuse with the malformed-line message after `link` pointed at it; `link` stays quiet on a `user.signingkey` it cannot read (it reports only what it can judge) | A host hits either path in practice |
 | Check for ambiguity a key spelled only inside a quoted option value | Not checked: the shape is contrived, and was judged to fail closed | Such a line turns up in a real allowed-signers file |
+| Suggest the account's full name in doctor's name lines too | Doctor's `user.name is not set` lines say `"Full Name"`; only the identity step's line suggests the account's GECOS full name (`suggested_name()` in `lib/host_identity.py`) | An operator asks for it |
+| Decide which full names to suggest by what they hold (a letter of a common script) instead of by what they lack | `suggested_name()` in `lib/host_identity.py` refuses a name with no letter or digit, a space other than U+0020, an unassigned or private-use code point, or one on the `_INVISIBLE` list of blank-looking code points | Another blank-looking code point turns up that the list misses |
 | Guard against a FIFO at `~/.gitconfig` | Not guarded: git itself hangs on one, so every git command does, not only this step | A host reports a hang that traces to a special file at `~/.gitconfig` |
 
 ## Security properties and where they are enforced

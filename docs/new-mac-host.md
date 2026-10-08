@@ -176,7 +176,9 @@ skip to item 5.
    fails and asks for it. The refresh opens the same browser flow as the
    login; the last line drops the scope again.
 
-5. Set the identity, and your name once:
+5. Set the identity, and your name once. git refuses every commit without
+   a name, since the tracked config sets `user.useConfigOnly = true`, and
+   the step writes one only from `--name`:
 
    ```sh
    cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
@@ -226,7 +228,9 @@ git -C ~ config --show-origin --get user.signingkey
 
 The last line names `~/.config/git/config.local`. The tracked config sets
 `gpg.format = ssh` and `commit.gpgsign = true` and carries no key, so until
-`user.signingkey` is set every commit fails. Verify with the
+`user.signingkey` is set every commit fails. It also sets
+`user.useConfigOnly = true`, so git refuses every commit until `user.name`
+and `user.email` are set too, rather than invent them. Verify with the
 scratch-repository commit in item 6.
 
 ## 6. Install the packages

@@ -48,6 +48,11 @@ git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.p
 The tracked git config turns commit signing on, so until a signing key is
 set every commit fails. A machine that must commit without one opts out, as
 in [keep a host from signing](docs/signing-key.md#keep-a-host-from-signing).
+It also sets `user.useConfigOnly`, so git never invents a name or an email:
+until both are set, every commit fails too, even on a machine that opted
+out. The installer writes the email, but only `--name` sets the name. The
+`GIT_AUTHOR_*` and `GIT_COMMITTER_*` environment variables still supply an
+identity, as they always do.
 
 Bare Mac, no `git` yet? Start with
 [Provision a new mac host](docs/new-mac-host.md). Before you trust `install.sh`

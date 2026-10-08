@@ -125,6 +125,10 @@ fresh() {
   : > "$signers"
 }
 get() { git config --file "$local_cfg" --get "$1" || echo UNSET; }
+# named - give config.local a user.name, which the step never writes: the
+# automatic step is quiet only on a host that has one (the tracked
+# user.useConfigOnly = true makes git refuse every commit without it).
+named() { git config --file "$local_cfg" user.name "Jane Doe"; }
 # run ARGS... - install.sh identity, capturing combined output and status.
 run() { rc=0; out="$("$installer" identity "$@" 2>&1)" || rc=$?; }
 expect_rc() { [ "$rc" -eq "$1" ] || fail "$2: exit $rc, want $1 (output: $out)"; }
@@ -477,6 +481,7 @@ for cond in gitdir gitdir/i; do
   done
   # The two quiet modes read the same way: auto finds the host signing, and
   # check has no stale key to report.
+  named
   rc=0
   out="$(cd "$HOME/work/r" && python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" \
     --mode auto 2>&1)" || rc=$?
@@ -698,9 +703,32 @@ fresh
 printf 'me@example.com %s\n' "$K1" > "$signers"
 export FAKE_AGENT_KEYS="$K1"
 idrun() { rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto' _ "$installer" 2>&1)" || rc=$?; }
+# A host missing both the name and the email hears the cause first. A run
+# that cannot write prints its one cause line, never the name line (main()
+# keeps one line on a failure), and writes nothing.
+FAKE_AGENT_DOWN=1 idrun; expect_rc 1 "auto mode with no agent, no name and no email"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "auto mode with no agent, no name and no email: want one line: $out"
+has "identity: cannot reach an ssh-agent" "auto mode with no agent, no name and no email names the agent"
+lacks "user.name" "auto mode with no agent, no name and no email"
+unwritten "auto mode with no agent"
+# A run that writes prints its wrote line, then the name line: two lines, in
+# that order (rc 0 keeps every warning).
 idrun; expect_rc 0 "auto mode writes"
 [ "$(get user.email)" = "me@example.com" ] || fail "auto mode did not write"
+[ "$(grep -c . <<<"$out")" -eq 2 ] || fail "auto mode writing on a host with no name: want two lines: $out"
+grep -q '^install: identity: wrote user.email, ' <<<"$(sed -n 1p <<<"$out")" \
+  || fail "auto mode writing on a host with no name: the wrote line comes first: $out"
+grep -qF "identity: user.name is not set - run: $installer identity --name \"" <<<"$(sed -n 2p <<<"$out")" \
+  || fail "auto mode writing on a host with no name: the name line comes second: $out"
 export FAKE_AGENT_DOWN=1
+# Everything but the name: the one line is the --name hint, never the agent
+# the step does not need here, and the name is not written.
+idrun; expect_rc 0 "auto mode on a host with no user.name"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "auto mode on a host with no user.name: want one line: $out"
+has "identity: user.name is not set - run: $installer identity --name \"" "auto mode on a host with no user.name"
+lacks "ssh-agent" "auto mode on a host with no user.name names the agent"
+[ "$(get user.name)" = UNSET ] || fail "auto wrote user.name"
+named
 idrun; expect_rc 0 "auto mode on a configured host"
 [ -z "$out" ] || fail "auto mode is not quiet on a configured host: $out"
 unset FAKE_AGENT_DOWN
@@ -756,6 +784,15 @@ expect_rc 0 "link writes the identity"
 [ "$(git -C "$HOME" config --get user.email)" = "me@example.com" ] || fail "link: user.email not effective"
 [ "$(git -C "$HOME" config --get user.signingkey)" = "key::$K1" ] || fail "link: user.signingkey not effective"
 [ "$(get user.name)" = "UNSET" ] || fail "link wrote user.name"
+# link on a keyed host with no user.name prints the identity --name line:
+# one line, and config.local is left as it is.
+before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
+rc=0; out="$(bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
+expect_rc 0 "link on a keyed host with no user.name"
+[ "$(grep -c 'identity:' <<<"$out")" -eq 1 ] || fail "link with no user.name printed more than one identity line: $out"
+has "identity: user.name is not set - run: $B/install.sh identity --name \"" "link on a keyed host with no user.name prints the identity --name line"
+[ "$(ls -li "$local_cfg")" = "$before" ] && [ "$(cat "$local_cfg")" = "$content" ] || fail "link with no user.name rewrote config.local"
+named
 before="$(ls -li "$local_cfg")"
 rc=0; out="$(bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
 expect_rc 0 "second link"; lacks "identity:" "second link is quiet"
@@ -772,6 +809,7 @@ git -C "$A" -c user.name=t -c user.email=t@x -c commit.gpgsign=false commit -q -
 rc=0; out="$(bash "$B/install.sh" upgrade </dev/null 2>&1)" || rc=$?
 expect_rc 0 "upgrade"; has "upgrade: done" "upgrade merged"
 [ "$(git -C "$HOME" config --get user.signingkey)" = "key::$K1" ] || fail "upgrade did not write the identity: $out"
+named
 before="$(ls -li "$local_cfg")"
 rc=0; out="$(bash "$B/install.sh" upgrade </dev/null 2>&1)" || rc=$?
 expect_rc 0 "second upgrade"; lacks "identity:" "second upgrade is quiet"
@@ -784,6 +822,16 @@ expect_rc 0 "link with a stale key"
 [ "$(grep -c 'identity:' <<<"$out")" -eq 1 ] || fail "link printed more than one identity line: $out"
 has "identity: user.signingkey $FP1 is not valid for me@example.com in $signers (line 1: expired) - run $B/install.sh identity --rotate" "link names the stale key"
 [ "$(ls -li "$local_cfg")" = "$before" ] || fail "link with a stale key rewrote config.local"
+# A missing user.name line wins over a stale-key line: git refuses every
+# commit without the name, while the stale key only leaves new signatures
+# unverified. Once the name is back, the stale key is reported again.
+git config --file "$local_cfg" --unset user.name
+rc=0; out="$(bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
+expect_rc 0 "link with a stale key and no user.name"
+[ "$(grep -c 'identity:' <<<"$out")" -eq 1 ] || fail "link with a stale key and no name printed more than one identity line: $out"
+has "identity: user.name is not set - run: $B/install.sh identity --name \"" "a missing user.name line wins over a stale-key line"
+named
+before="$(ls -li "$local_cfg")"
 printf 'c3\n' > "$A/NEXT"
 git -C "$A" -c user.name=t -c user.email=t@x -c commit.gpgsign=false commit -q -am c3
 rc=0; out="$(bash "$B/install.sh" upgrade </dev/null 2>&1)" || rc=$?
@@ -824,8 +872,11 @@ rm -f "$HOME/.gitconfig"
 # tag.gpgsign is never turned on for it.
 printf '[user]\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
 before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
+# An opted-out host with no user.name hears nothing from auto: doctor, below,
+# is where it learns that git refuses every commit without one.
+[ "$(get user.name)" = UNSET ] || fail "the opted-out fixture has a user.name"
 rc=0; out="$(FAKE_AGENT_DOWN=1 bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
-expect_rc 0 "link on an opted-out host with no agent"; lacks "identity:" "link on an opted-out host is quiet"
+expect_rc 0 "link on an opted-out host with no agent"; lacks "identity:" "an opted-out host with no user.name hears nothing from auto"
 printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
 git config --file "$local_cfg" user.signingkey "key::$K1"
 before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
@@ -905,7 +956,9 @@ for where in local global; do
       [ "$(get commit.gpgsign)" = UNSET ] || fail "$key = false in $where: commit.gpgsign written beside the tracked true"
     fi
     if [ "$where" = global ]; then [ "$(get "$key")" = UNSET ] || fail "$key written beside a global false"; fi
-    # Quiet afterwards, through the automatic step too.
+    # Quiet afterwards, through the automatic step too, once the host has
+    # the name the step never writes.
+    named
     idrun; expect_rc 0 "auto after $key = false in $where"; [ -z "$out" ] || fail "auto not quiet: $out"
   done
 done
@@ -1072,6 +1125,7 @@ idrun
 expect_rc 0 "auto beside a repo-side false"
 has "identity: wrote user.email" "a repo-side false is not an opt-out: auto still writes"
 has "identity: commit.gpgsign is false (file:$legacy) - kept as this host's exception, so it stays off" "auto names the repo-side false as the exception"
+named
 idrun; expect_rc 0 "auto again beside a repo-side false"
 [ -z "$out" ] || fail "auto is not quiet on a configured host with a repo-side false: $out"
 rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
@@ -1254,6 +1308,7 @@ has "identity: not set automatically in an SSH session (a forwarded agent holds 
 unwritten "auto in an SSH session"
 rc=0; out="$(SSH_CONNECTION='10.0.0.1 22 10.0.0.2 22' "$installer" identity 2>&1)" || rc=$?
 expect_rc 0 "an explicit identity run in an SSH session"
+named
 # A configured host whose key went stale: auto without --report-stale (the
 # install arm, whose advisory reports it in full) stays quiet; with it (the
 # link arm) it prints one line, in an SSH session too, since it only reads.
@@ -1271,13 +1326,13 @@ expect_rc 2 "--report-stale outside --mode auto"; has "taken only by --mode auto
 # XDG config: nothing to write, so the guard that protects writing stays out.
 printf 'me@example.com %s\n' "$K1" > "$signers"
 other_global="$HOME/other_global"
-printf '[user]\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = true\n' "$K1" > "$other_global"
+printf '[user]\n\tname = Jane Doe\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = true\n' "$K1" > "$other_global"
 rc=0; out="$(GIT_CONFIG_GLOBAL="$other_global" bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?
 expect_rc 0 "auto on a configured host under another GIT_CONFIG_GLOBAL"
 [ -z "$out" ] || fail "auto refused a configured host for its GIT_CONFIG_GLOBAL: $out"
 # Signing turned off against config.local, for both keys, while the key is
 # also stale: ONE line, the override first (it names every key and file).
-printf '[user]\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n' "$K1" > "$local_cfg"
+printf '[user]\n\tname = Jane Doe\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n' "$K1" > "$local_cfg"
 printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
 printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
 rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?
@@ -1285,6 +1340,15 @@ expect_rc 1 "auto --report-stale, both keys overridden and a stale key"
 [ "$(grep -c . <<<"$out")" -eq 1 ] || fail "more than one line for an override and a stale key: $out"
 has "identity: signing is off against $local_cfg: commit.gpgsign = false from file:$HOME/.gitconfig; tag.gpgsign = false from file:$HOME/.gitconfig - see $installer identity" "the joined override line"
 lacks "is not valid for" "the override line takes precedence over the stale one"
+# The same host without a user.name: ONE line, and it is the name line, ahead
+# of the override and the stale key (git refuses every commit without it).
+git config --file "$local_cfg" --unset user.name
+rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?
+expect_rc 0 "auto --report-stale, overridden, stale and no user.name"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "the name line beside an override and a stale key: want one line: $out"
+has "identity: user.name is not set - run: $installer identity --name \"" "the name line wins over the override line"
+lacks "signing is off against" "the name line wins over the override line"
+named
 printf '[tag]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
 rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?
 has "signing is off against $local_cfg: tag.gpgsign = false from file:$HOME/.gitconfig - see" "a tag.gpgsign override alone"
@@ -1663,10 +1727,10 @@ fresh
 printf 'me@example.com %s\n' "$K1" > "$signers"
 printf '[user]\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
 FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, no user.name"; one "doctor, opted out, no user.name"
-has "doctor: values: user.name is not set - run: git config --file $local_cfg user.name \"Full Name\"" "an opted-out host still needs user.name"
+has "doctor: values: user.name is not set, so git refuses every commit - run: git config --file $local_cfg user.name \"Full Name\"" "an opted-out host still needs user.name"
 printf '[user]\n\tname = Jane Doe\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
 FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, no user.email"; one "doctor, opted out, no user.email"
-has "doctor: values: user.email is not set - run: git config --file $local_cfg user.email <your email>" "an opted-out host still needs user.email"
+has "doctor: values: user.email is not set, so git refuses every commit - run: git config --file $local_cfg user.email <your email>" "an opted-out host still needs user.email"
 printf '[user]\n\tname = Jane Doe\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
 FAKE_AGENT_DOWN=1 doc; expect_rc 0 "doctor, opted out, name and email set"; [ -z "$out" ] || fail "doctor, opted out: $out"
 FAKE_AGENT_DOWN=1 doc --verbose; expect_rc 0 "doctor --verbose, opted out"
@@ -1681,6 +1745,58 @@ rm -f "$HOME/.gitconfig"
 printf '[gpg]\n\tformat = ssh\n' > "$XDG_CONFIG_HOME/git/config"
 FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, include broken"
 has "doctor: git: no [include] reaches $local_cfg" "a broken include on an opted-out host"
+# user.useConfigOnly: the tracked true makes a missing name or email a
+# refusal of every commit, and doctor says so; a false is the operator's
+# escape, named as a note with its origin and never a problem; a value git
+# cannot read as a boolean is a problem, since git then dies on most
+# commands.
+dhealthy
+git config --file "$local_cfg" --unset user.name
+doc; expect_rc 1 "doctor, no user.name"; one "doctor, no user.name"
+has "doctor: values: user.name is not set, so git refuses every commit - run: $installer identity --name \"Full Name\"" "doctor says a missing user.name refuses every commit under useConfigOnly"
+git config --file "$local_cfg" user.useConfigOnly false
+doc; expect_rc 1 "doctor, no user.name, useConfigOnly false"; one "doctor, no user.name, useConfigOnly false"
+has "doctor: values: user.name is not set - run: $installer identity --name \"Full Name\"" "a missing user.name without useConfigOnly is not called a refusal"
+lacks "refuses every commit" "a missing user.name without useConfigOnly is not called a refusal"
+git config --file "$local_cfg" user.name "Jane Doe"
+doc; expect_rc 0 "doctor, useConfigOnly false"; [ -z "$out" ] || fail "a useConfigOnly false is a doctor note, not a problem: $out"
+doc --verbose; expect_rc 0 "doctor --verbose, useConfigOnly false"
+has "doctor: values: note: user.useConfigOnly = false from file:$local_cfg: git invents a name and an email from this account and host when none is set" "a useConfigOnly false is a doctor note, not a problem"
+has "doctor: values: user.useConfigOnly = false (file:$local_cfg)" "doctor --verbose lists user.useConfigOnly with its origin"
+git config --file "$local_cfg" user.useConfigOnly maybe
+doc; expect_rc 1 "doctor, unparseable useConfigOnly"
+has "doctor: values: user.useConfigOnly is not a boolean git reads (" "doctor names an unparseable user.useConfigOnly"
+has "- git refuses to run most commands until it is; fix it in the file git -C ~ config --show-origin --get user.useConfigOnly names" "doctor names an unparseable user.useConfigOnly"
+# Every spelling git reads as a boolean: yes, on and 1 keep the refusal;
+# no, off and 0 are the note.
+git config --file "$local_cfg" --unset user.name
+for b in yes on 1; do
+  git config --file "$local_cfg" user.useConfigOnly "$b"
+  doc; expect_rc 1 "doctor, no user.name, useConfigOnly $b"; one "doctor, no user.name, useConfigOnly $b"
+  has "doctor: values: user.name is not set, so git refuses every commit - run:" "useConfigOnly $b is a refusal"
+done
+for b in no off 0; do
+  git config --file "$local_cfg" user.useConfigOnly "$b"
+  doc --verbose; expect_rc 1 "doctor --verbose, no user.name, useConfigOnly $b"
+  has "doctor: values: user.name is not set - run:" "useConfigOnly $b is not a refusal"
+  lacks "refuses every commit" "useConfigOnly $b is not a refusal"
+  has "doctor: values: note: user.useConfigOnly = false from file:$local_cfg:" "useConfigOnly $b is the note"
+done
+# user.useConfigOnly unset everywhere (a host that does not read the tracked
+# true): no refusal and no note.
+sed '/useConfigOnly/d' "$tracked_cfg" > "$work/tracked_no_only"
+printf '[include]\n\tpath = %s\n[include]\n\tpath = config.local\n' "$work/tracked_no_only" > "$XDG_CONFIG_HOME/git/config"
+git config --file "$local_cfg" --unset user.useConfigOnly
+doc --verbose; expect_rc 1 "doctor --verbose, no user.name, useConfigOnly unset"
+has "doctor: values: user.name is not set - run:" "useConfigOnly unset is not a refusal"
+lacks "refuses every commit" "useConfigOnly unset is not a refusal"
+has "doctor: values: user.useConfigOnly is unset" "doctor --verbose lists an unset user.useConfigOnly"
+lacks "note: user.useConfigOnly" "useConfigOnly unset is not the note"
+# A keyed host, not opted out, with no user.email: the identity step's line.
+dhealthy
+git config --file "$local_cfg" --unset user.email
+doc; expect_rc 1 "doctor, no user.email"
+has "doctor: values: user.email is not set, so git refuses every commit - run: $installer identity" "doctor says a missing user.email refuses every commit under useConfigOnly"
 # tag.gpgsign = true keeps the signing checks: tags still sign.
 dhealthy
 git config --file "$local_cfg" commit.gpgsign false
