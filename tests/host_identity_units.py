@@ -377,13 +377,28 @@ def git_units(mod, scratch):
     env = mod.git_env("/c")
     for trace in ("GIT_TRACE", "GIT_TRACE2", "GIT_TRACE_SETUP"):
         del os.environ[trace]
-    check(not any(k.startswith("GIT_TRACE") for k in env), "git_env drops every GIT_TRACE* variable")
+    check(sorted(k for k in env if k.startswith("GIT_TRACE")) == ["GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"]
+          and all(env[k] == "0" for k in ("GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF")),
+          "git_env drops every inherited GIT_TRACE* variable and turns the trace2 targets off")
     for trace in ("GIT_TRACE", "GIT_TRACE2"):
         os.environ[trace] = "1"
         use_tmpdir(mod, inside)
         reason = mod.git_isolate()
         del os.environ[trace]
         check(reason is None, "%s=1 does not turn the guard into a refusal (%s)" % (trace, reason))
+    # A trace2 target set in a config file, not in the environment: only
+    # GIT_TRACE2*=0 in the environment overrides it.
+    traced = os.path.join(scratch, "traced.gitconfig")
+    for target in ("normalTarget", "eventTarget", "perfTarget"):
+        for value in ("1", "2"):
+            with open(traced, "w") as fh:
+                fh.write("[trace2]\n\t%s = %s\n" % (target, value))
+            os.environ["GIT_CONFIG_GLOBAL"] = traced
+            use_tmpdir(mod, inside)
+            reason = mod.git_isolate()
+            os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+            check(reason is None, "trace2.%s=%s in the global config does not turn the guard into a refusal (%s)"
+                  % (target, value, reason))
     link = os.path.join(scratch, "tmp-link")
     os.symlink(inside, link)
     use_tmpdir(mod, link)

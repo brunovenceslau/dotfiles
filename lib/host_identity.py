@@ -583,13 +583,17 @@ def git_env(ceiling):
     repository-local variables (GIT_DIR among them), and with
     GIT_CEILING_DIRECTORIES set to CEILING alone, never appended to: an
     inherited list is the caller's, and an empty entry in it would stop git
-    from resolving the entries after it. Without GIT_TRACE* too: a trace
-    sent to stderr would come before the line _isolate() matches."""
+    from resolving the entries after it. Without GIT_TRACE* too, and with
+    the trace2 targets set to 0: a trace sent to stderr would come before the
+    line _isolate() matches, and trace2.*Target in a config file turns one on
+    unless the environment says otherwise."""
     env = dict(os.environ)
     for k in list(env):
         if (k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_")
                 or k.startswith("GIT_TRACE")):
             del env[k]
+    for k in ("GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF"):
+        env[k] = "0"
     env["GIT_CEILING_DIRECTORIES"] = ceiling
     return env
 

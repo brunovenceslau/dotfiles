@@ -363,6 +363,9 @@ fi
 # directory and back, and needs no read permission on where it started.
 # Linux returns through an O_PATH descriptor. macOS has none: it returns by
 # path, or refuses when it cannot tell that path; never anything else.
+# The units in tests/host_identity_units.py are the only guard for the
+# fchdir() return, the GIT_TRACE* scrub, the "cannot return" refusal and
+# git()'s refusal against mutation.
 rm -f "$local_cfg"
 mkdir "$HOME/xonly"
 chmod 0311 "$HOME/xonly"
