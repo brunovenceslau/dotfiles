@@ -279,6 +279,30 @@ if grep -Eq 'docs/crlf\.md|fm-gone' <<<"$out"; then
 fi
 ok "CRLF headings, wrapped link text and front matter behave like LF ones"
 
+# CRLF reference definitions: a broken one is reported like its LF twin, and
+# a used one satisfies its reference link (a CR once hid both).
+new_tree
+printf '[unused]: gone.md\r\n' >"$work/r/docs/crlf-def.md"
+printf '[ref]: guide.md\r\n\r\nSee [x][ref].\r\n' >"$work/r/docs/crlf-ref.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] || fail "CRLF refdef: expected exactly the broken definition to fail (exit $rc): $out"
+grep -qx 'docs/crlf-def.md:1: no such tracked file or directory: gone.md' <<<"$out" \
+  || fail "CRLF refdef: a broken CRLF definition must be reported: $out"
+if grep -q 'crlf-ref' <<<"$out"; then
+  fail "CRLF refdef: a CRLF definition must satisfy its reference link: $out"
+fi
+ok "CRLF reference definitions are checked and satisfy their links, as LF ones do"
+
+# A closing sequence of `#` is not heading text: `## Closed ##` is #closed,
+# and a heading of a long run of spaces is read in linear time (below).
+new_tree
+printf '## Closed ##\n\n## #\n\n[c](#closed)\n' >"$work/r/docs/atx.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an ATX closing sequence must not reach the slug (exit $rc): $out"
+ok "an ATX closing sequence is dropped from the heading's id"
+
 # An HTML comment that never closes runs to the end of the file.
 new_tree
 printf '<!-- open
@@ -311,30 +335,52 @@ ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
+long_name="$(printf 'x%.0s' $(seq 1 2100)).md"
+expect_broken README.md "An <a href=\"docs/$long_name\">long</a>." \
+  "no such tracked file or directory: docs/x{2100}\\.md" \
+  "an HTML href over 2048 characters is still checked"
+expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
+  'docs/a\\u202eb\.md' \
+  "a bidi override in a report prints as \\uHHHH"
 
 # Hostile input stays near-linear: many unclosed comment openers, tag
 # openers with no `>`, unclosed quotes, backtick runs of every length and
-# unclosed brackets, 100 to 200 KB each. The previous regexes were quadratic
-# here (measured: 24.6 s over the same shapes at half these sizes, so about
-# 100 s at these), while the str.find scanners take well under a second, so
-# the 30 s bound separates the two with room for a slow runner.
+# unclosed brackets, 100 KB to 2.2 MB each, in prose and in headings (a link
+# with an #anchor into each file makes the heading pass read it too). The
+# previous regexes were quadratic here (measured: one 200 KB line of
+# `[a](b` alone, or of `<a `, outlived 20 s, and a single 200 KB heading of
+# `[` or of `[a](x` did too), while every scan now takes well under a second,
+# so the 30 s bound separates the two with room for a slow runner.
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
 new_tree
 python3 -I - "$work/r/docs" <<'PY'
 import os, sys
-d = sys.argv[1]
+d, n = sys.argv[1], 200000
 shapes = {
     "h1.md": "<!-- x " * 30000,
     "h2.md": '<a title="x ' * 18000,
     "h3.md": "<img href='" * 18000,
-    "h4.md": "".join("`" * k + " x " for k in range(1, 450)),
+    "h4.md": "".join("`" * k + " x " for k in range(1, 1500)),
     "h5.md": "[" * 100000,
     "h6.md": "<a " * 60000 + ">",
+    "h7.md": "[a](b" * (n // 5),
+    "h8.md": '[a](b "x ' * (n // 9),
+    "h9.md": "[a\n" * (2 * n // 3),
+    "h10.md": "<a " * (n // 3),
+    "h11.md": '<a id="x ' * (n // 9),
+    "h12.md": "# " + " " * n + "x",
+    "h13.md": "# " + "[a](x" * (n // 5),
+    "h14.md": "# " + "[" * n,
+    "h15.md": "# " + "<" * (2 * n),
+    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 2100)),
+    "h17.md": "[a][" * (n // 4),
 }
-for name, body in shapes.items():
-    with open(os.path.join(d, name), "w") as f:
-        f.write(body + "\n")
+with open(os.path.join(d, "hostile-links.md"), "w") as f:
+    for name, body in shapes.items():
+        with open(os.path.join(d, name), "w") as g:
+            g.write(body + "\n")
+        f.write("[x](%s#x)\n" % name)
 PY
 git -C "$work/r" add -A
 bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
@@ -343,7 +389,7 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
-ok "hostile input (unclosed comments, tags, quotes, backtick runs, brackets) finishes in bounded time"
+ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, in prose and headings) finishes in bounded time"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
@@ -369,5 +415,16 @@ rm "$work/r/docs/guide.md"
 run
 [ "$rc" = 2 ] || fail "a tracked file missing from the working tree must exit 2, got $rc: $out"
 ok "a tracked file deleted from the working tree: exit 2"
+
+# A directory swapped for a symlink in the working tree (git still tracks
+# the files under it) would read files from outside the checkout.
+new_tree
+mkdir -p "$work/elsewhere"
+printf '# Guide\n\n[broken](nowhere.md)\n' >"$work/elsewhere/guide.md"
+rm -rf "$work/r/docs"; ln -s "$work/elsewhere" "$work/r/docs"
+run
+[ "$rc" = 2 ] && grep -q 'reached through a symlink' <<<"$out" \
+  || fail "a tracked file reached through a swapped-in directory symlink must exit 2, got $rc: $out"
+ok "a directory swapped for a symlink in the working tree: exit 2"
 
 echo "linkcheck_test: $pass passed"
