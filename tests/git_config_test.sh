@@ -97,11 +97,17 @@ rm -f "$work/gitdir/config.local"
 # It must parse as git config, and must NOT hardcode a real identity/secret.
 ex="$repo_root/config/git/config.local.example"
 git config --file "$ex" --list >/dev/null 2>&1 || fail "config.local.example does not parse as git config"
-ck "example uses a placeholder name"  "$(git config --file "$ex" --get user.name)"  "Your Name"
-ck "example uses a placeholder email" "$(git config --file "$ex" --get user.email)" "you@example.com"
-# signingkey must be a placeholder .pub PATH - never a real key or private material
-exkey="$(git config --file "$ex" --get user.signingkey)"
-case "$exkey" in *.pub) : ;; *) fail "example signingkey is not a placeholder .pub path: $exkey" ;; esac
+# A copied example must not block `install.sh identity`: an ACTIVE placeholder
+# is a value already set, which the step keeps and then writes nothing beside.
+# So no identity or signing key is active, and the placeholders are comments.
+for k in user.name user.email user.signingkey commit.gpgsign tag.gpgsign tag.forceSignAnnotated \
+  gpg.ssh.allowedSignersFile gpg.ssh.revocationFile; do
+  ck "example leaves $k unset" "$(git config --file "$ex" --get "$k" || echo UNSET)" "UNSET"
+done
+for want in 'name = Your Name' 'email = you@example.com' 'signingkey = ~/.ssh/id_signing.pub'; do
+  grep -qE "^#[[:space:]]+$want\$" "$ex" || fail "example lacks the commented placeholder: $want"
+done
+pass=$((pass + 1))
 if grep -qiE 'BEGIN [A-Z ]*PRIVATE KEY|(ssh-(ed25519|rsa)|ecdsa-sha2-[a-z0-9-]+|sk-ssh-ed25519@openssh.com) AAAA' "$ex"; then
   fail "config.local.example embeds real key material"
 fi
@@ -130,8 +136,10 @@ ck "scrubbed global (/dev/null) + -c yields fsck ON" \
 # --- install-time signing advisory, ISOLATED via sourcing --------
 # install.sh guards its dispatch, so sourcing it runs no install; call
 # _signing_advisory directly against a scratch symlinked config (a COPY of
-# config/git). It reads the EFFECTIVE commit.gpgsign and never writes into the
-# real repo (where a host's real config.local - identity + signing key - lives).
+# config/git). It reads the EFFECTIVE commit.gpgsign (through
+# lib/host_identity.py's advisory(), so python3 must run) and never writes into
+# the real repo (where a host's real config.local - identity + signing key -
+# lives).
 adv="$work/adv"; mkdir -p "$adv/.config"
 cp -R "$repo_root/config/git" "$adv/gitdir"
 # Same as the copy above: on an installed host `cp -R` carries in the untracked,
@@ -158,11 +166,18 @@ grep -q 'config/git/config.local' <<<"$(run_advisory)" \
 printf '[commit]\n\tgpgsign = true\n' > "$adv/gitdir/config.local"
 [ -z "$(run_advisory)" ] || fail "advisory fired despite commit.gpgsign=true"
 pass=$((pass + 1))
-# config.local present but gpgsign=false -> must STILL FIRE (effective value, not
-# mere file existence) - the partial-config case the advisory exists to catch
+# config.local saying gpgsign=false -> SILENT: the host opted out of signing
+# on purpose, and only config.local can say so
 printf '[user]\n\tname = x\n[commit]\n\tgpgsign = false\n' > "$adv/gitdir/config.local"
-grep -qi 'commit signing is NOT enabled' <<<"$(run_advisory)" \
-  && pass=$((pass + 1)) || fail "advisory did not fire with commit.gpgsign=false"
+[ -z "$(run_advisory)" ] || fail "advisory fired on a host that opted out in config.local"
+pass=$((pass + 1))
+# ...while a false from any other level must STILL FIRE (effective value, not
+# mere file existence): it may be nobody's decision for this host
+printf '[user]\n\tname = x\n' > "$adv/gitdir/config.local"
+printf '[commit]\n\tgpgsign = false\n' > "$adv/sysconfig"
+grep -qi 'commit signing is NOT enabled' <<<"$(GIT_CONFIG_SYSTEM="$adv/sysconfig" run_advisory)" \
+  && pass=$((pass + 1)) || fail "advisory did not fire with a system commit.gpgsign=false"
+rm -f "$adv/sysconfig"
 # config.local with identity but gpgsign UNSET -> must STILL FIRE
 printf '[user]\n\tname = x\n\temail = x@y\n' > "$adv/gitdir/config.local"
 grep -qi 'commit signing is NOT enabled' <<<"$(run_advisory)" \
@@ -176,11 +191,12 @@ pass=$((pass + 1))
 # gpgsign still reads true). gpgsign=true keeps the first advisory silent.
 printf '[commit]\n\tgpgsign = true\n' > "$adv/gitdir/config.local"
 printf '[user]\n\tsigningkey = ABCD1234DEADBEEF\n' > "$adv/.gitconfig"
-grep -qi 'legacy ~/.gitconfig' <<<"$(run_advisory)" \
+grep -qF '~/.gitconfig sets user.signingkey' <<<"$(run_advisory)" \
   && pass=$((pass + 1)) || fail "advisory did not warn about a residual ~/.gitconfig with signing"
-# an innocuous ~/.gitconfig (no signing keys) must NOT warn
+# an innocuous ~/.gitconfig (no identity or signing keys) is named, never as
+# one that sets something
 printf '[alias]\n\tst = status\n' > "$adv/.gitconfig"
-grep -qi 'legacy ~/.gitconfig' <<<"$(run_advisory)" \
+grep -qF '~/.gitconfig sets' <<<"$(run_advisory)" \
   && fail "advisory warned about a signing-free ~/.gitconfig" || pass=$((pass + 1))
 rm -f "$adv/.gitconfig"
 

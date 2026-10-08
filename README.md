@@ -29,7 +29,8 @@ cd ~/.config/dotfiles
 ./install.sh && exec zsh
 ```
 
-Then give this machine its own git identity. If your allowed-signers file
+Then give this machine its own git identity. If your
+[allowed-signers file](docs/signing-key.md#list-a-hosts-key-in-the-allowed-signers-file)
 lists the key in this machine's ssh-agent, the installer derives it:
 
 ```sh
@@ -161,8 +162,9 @@ its own in the untracked `~/.config/git/config.local` (the
 Until commit signing is configured, the installer prints a warning that it is
 not enabled. Signing is optional: nothing on this machine refuses an unsigned
 commit, but GitHub will not show it as verified. To set it up, see
-[Provision a new mac host](docs/new-mac-host.md#4-set-identity-and-signing) and
-`config/git/config.local.example`.
+[Provision a new mac host](docs/new-mac-host.md#5-set-identity-and-signing).
+Rotating, revoking and opting a host out are in
+[Manage this host's signing key](docs/signing-key.md).
 
 ### Install the packages (optional)
 
@@ -180,7 +182,9 @@ Per-host additions go in the untracked `packages/Brewfile.local` and
 
 - `zsh -i -c exit` exits 0 with nothing on stderr.
 - `readlink ~/.zshenv` points into `~/.config/dotfiles`.
-- `git config --get user.email` returns the address you set.
+- `git -C ~ config --show-origin --get user.email` returns the address you
+  set, from `~/.config/git/config.local`.
+- `./install.sh doctor` prints nothing.
 
 For a bare machine, [Provision a new mac host](docs/new-mac-host.md) adds the
 prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
@@ -189,8 +193,10 @@ prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
 
 | Command | What it does |
 | --- | --- |
-| `./install.sh` | Create the state and cache directories, copy a pre-XDG `~/.zsh_history` over, create every link, initialize missing plugin submodules, and cache the shell integrations. Idempotent. |
-| `./install.sh link` | Recreate the links and the manifest, then refresh the cached shell integrations. This is what an upgrade re-runs. |
+| `./install.sh` | Create the state and cache directories, copy a pre-XDG `~/.zsh_history` over, create every link, initialize missing plugin submodules, cache the shell integrations, and run the automatic identity step. Idempotent. |
+| `./install.sh link` | Recreate the links and the manifest, refresh the cached shell integrations, and run the automatic identity step. This is what an upgrade re-runs. |
+| `./install.sh identity [--name "Full Name"] [--rotate]` | Set this machine's git identity and signing key from its allowed-signers file and ssh-agent; `--rotate` replaces a key that no longer verifies. |
+| `./install.sh doctor [--verbose]` | Check the identity, the signing key and the tools they need, without writing anything. Prints only problems, and exits 1 when it finds one. |
 | `./install.sh packages` | `brew bundle` over `packages/Brewfile`, then the pinned `gh` extensions. |
 | `./install.sh --help` | Print the usage (`-h` and `help` work too). |
 | `dotfiles-upgrade` | Fetch, fast-forward merge, update submodules, relink, recompile. Same as `./install.sh upgrade`. |
@@ -217,6 +223,10 @@ dotfiles-upgrade
   stash first. Untracked `.local` files never block it.
 - It trusts whatever the remote you cloned from serves; see
   [Security model](#security-model).
+- It runs the automatic identity step: a machine that does not sign yet gets
+  its identity as soon as its allowed-signers file and ssh-agent agree on a
+  key, and a machine that signs hears in one line when its key no longer
+  verifies. See [Manage this host's signing key](docs/signing-key.md).
 
 [The upgrade path](docs/architecture.md#the-upgrade-path) explains every step.
 
@@ -301,6 +311,11 @@ that reviewable:
   never needs `sudo`.
 - **Backups before overwrites.** No user file is overwritten without a `.bak`
   copy first, and uninstall restores it.
+- **A signing key only by exact agreement.** The identity step chooses or
+  writes a signing key only when the allowed-signers file and the ssh-agent
+  agree on exactly that key. It writes nothing automatically in an SSH
+  session, and never overwrites a value already set, except `--rotate`,
+  which replaces only a signing key that no longer verifies.
 - **Two secret scanners.** Two independent scanners run as gates over the tree
   in `make local-ci` and in CI on every push to `main` and every pull request.
 
@@ -321,6 +336,7 @@ To report a vulnerability, use the private advisory form linked from
 | [Architecture](docs/architecture.md) | You want to know how the framework works and why it is built this way. |
 | [Shell reference](docs/shell-reference.md) | You need the exact commands, aliases, variables and config files. |
 | [Provision a new mac host](docs/new-mac-host.md) | You are setting up a machine from nothing. |
+| [Manage this host's signing key](docs/signing-key.md) | You need to check, rotate or revoke a machine's signing key, or keep a machine from signing. |
 | [Troubleshooting](docs/troubleshooting.md) | Something is broken and you want the symptom, cause and fix. |
 | [Backup and restore](docs/backup-restore.md) | You are setting up or using the restic and rclone backups. |
 | [Development](docs/development.md) | You are changing the repository and need the quality gates. |

@@ -25,6 +25,11 @@ page no longer exists in the code.
 | `identity: python3 is not usable here - skipping` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `identity: not reading the git config:`, or `identity: cannot read` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
 | `identity: signing is off against`, or `sets it false and wins` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: not set automatically in an SSH session` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: <key> is false (<origin>) - kept as this host's exception`, or `tag.gpgsign is left unset` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
+| `identity: user.signingkey is set in <origin>, outside`, or `is a certificate or a private key without its .pub - not checked` | [The signing key is stale](#the-signing-key-is-stale) |
+| `commit signing is NOT enabled on this host`, or a warning about `~/.gitconfig` | [Unsigned commits](#unsigned-commits) |
+| `install.sh doctor` prints a line, or exits 1 | [Doctor reports a problem](#doctor-reports-a-problem) |
 | `git config --global user.email` prints nothing | [`git config --global` returns empty](#git-config---global-returns-empty) |
 | gpg cannot ask for the passphrase, no `pinentry-mac` window | [pinentry does not appear on Intel](#pinentry-does-not-appear-on-intel) |
 | `git pull` asks `Username for github.com` | [Git prompts for a username](#git-prompts-for-a-username) |
@@ -222,8 +227,22 @@ cache silently at every shell startup, with nothing printed, until the next
 
 ## Unsigned commits
 
-GitHub shows no Verified badge, or the installer warns
-`commit signing is NOT enabled on this host (commit.gpgsign is unset)`.
+GitHub shows no Verified badge, or the installer warns one of:
+
+```text
+install: commit signing is NOT enabled on this host (commit.gpgsign is unset).
+install: commit signing is NOT enabled on this host (commit.gpgsign is false).
+install: commit.gpgsign is not a boolean git reads (<error>) - git refuses every commit until it is fixed
+```
+
+When the `false` comes from a file other than `config.local`, the second is
+followed by `An explicit false from <origin> is kept as this host's
+exception`; when `config.local` says `false` but `tag.gpgsign` is `true`, by
+`tag.gpgsign is true, so tags are still signed`. A host that opted out of
+signing in `config.local` hears neither; the rule is in
+[opting a host out of signing](shell-reference.md#opting-a-host-out-of-signing),
+and the steps in
+[keep a host from signing](signing-key.md#keep-a-host-from-signing).
 
 **Cause.** Signing config lives in the untracked `config.local`, not in a global
 `~/.gitconfig`. Removing a legacy `~/.gitconfig` drops its global
@@ -250,12 +269,27 @@ git commit --amend --no-edit -S
 git cat-file commit HEAD | grep -c gpgsig     # want: 1
 ```
 
-**Also check for a shadowing `~/.gitconfig`.** The installer warns when one
-carries signing settings. A legacy GPG `signingkey` against the framework's
-`gpg.format = ssh` makes commits fail outright while `commit.gpgsign` still
-reads true. Remove the file, as in
-[new mac host, step 6](new-mac-host.md#6-remove-a-legacy-gitconfig). To stay on
-GPG for now, set `gpg.format = openpgp` in `config.local`.
+Amend only a commit you have not pushed yet; see
+[fix commits made with the wrong identity](signing-key.md#fix-commits-made-with-the-wrong-identity).
+
+**Also check for a shadowing `~/.gitconfig`.** The installer warns about any
+`~/.gitconfig`, with one of:
+
+```text
+install: ~/.gitconfig sets <keys>, and git reads it after ~/.config/git/config - move its settings into <path> and remove it
+install: ~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it
+install: a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it
+install: ~/.gitconfig is not a regular file - remove it
+```
+
+`install.sh doctor` prints the same lines after `doctor: ~/.gitconfig: `,
+the second only under `--verbose`, as a note.
+
+A legacy GPG `signingkey` against the framework's `gpg.format = ssh` makes
+commits fail outright while `commit.gpgsign` still reads true. Remove the
+file, as in
+[new mac host, step 4](new-mac-host.md#4-remove-a-legacy-gitconfig). To stay
+on GPG for now, set `gpg.format = openpgp` in `config.local`.
 
 ## The installer did not set the git identity
 
@@ -297,6 +331,20 @@ install: identity: <key> reads <value> from <origin> after the write, not the va
 install: identity: refusing to write through the symlink <path> - add the keys by hand
 install: identity: <path> is not a regular file - writing nothing
 install: identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run <path to install.sh> identity to set it on purpose
+install: identity: cannot read user.email (<reason>) - writing nothing
+install: identity: CANGA_HOST_ALLOWED_SIGNERS (<path>) differs from gpg.ssh.allowedSignersFile (<value>),
+install: identity: --rotate replaces only user.signingkey - run --name separately
+```
+
+The `CANGA_HOST_ALLOWED_SIGNERS` line is a note, not a refusal: the step
+continues with the file the variable names, while git verifies with the
+file `gpg.ssh.allowedSignersFile` names.
+
+A malformed allowed-signers line that names no ssh-agent key is skipped, not
+a refusal. A direct run names it:
+
+```text
+install: identity: skipped malformed allowed-signers line(s) <n> in <path>
 ```
 
 In the two revocation lines, `<where>` is `in <path>`, or
@@ -308,12 +356,17 @@ namespace, and it never replaces a value you set. The full rule is in
 [`install.sh identity`](shell-reference.md#installsh-identity).
 
 An explicit `commit.gpgsign = false` or `tag.gpgsign = false` that
-`config.local` does not contradict is not in this list: the step keeps it as
-the host's exception, writes the rest, and prints the first line below. A
-`false` in `config.local` that a later `true` overrides prints the second.
+`config.local` does not contradict is not in this list: `install.sh identity`
+keeps it as the host's exception, writes the rest, and prints the first line
+below. A `commit.gpgsign = false` in `config.local` itself opts the host out
+of signing: then `install.sh identity` leaves an unset `tag.gpgsign` unset
+and prints the second, and the automatic step prints nothing at all (see
+[opting a host out of signing](shell-reference.md#opting-a-host-out-of-signing)).
+A `false` in `config.local` that a later `true` overrides prints the third.
 
 ```text
 install: identity: <key> is false (<origin>) - kept as this host's exception, so it stays off
+install: identity: tag.gpgsign is left unset while commit.gpgsign is false (this host opted out of signing)
 install: identity: <key> is false in <path>, but <origin> sets it true and wins
 ```
 
@@ -344,7 +397,6 @@ install: identity: signing is off against <path>: <key> = false from <origin> - 
 - `cannot read <key>`: git failed to read your config, and its own error is in
   the parentheses. `git config --list --show-origin` run outside a repository
   shows the same error and the file it comes from.
-
 - No file, or one that cannot be read: list this host's key as
   `<email> <keytype> <key>` in `~/.config/git/allowed_signers`, or point
   `CANGA_HOST_ALLOWED_SIGNERS` or `gpg.ssh.allowedSignersFile` at your file.
@@ -390,6 +442,10 @@ install: identity: signing is off against <path>: <key> = false from <origin> - 
   step create the file.
 - An SSH session: the automatic step stays out of it on purpose. Run
   `install.sh identity` there only when the agent holds this host's own key.
+- `cannot read user.email`: git could not read the configuration; the reason
+  is git's own message. Fix the file `git -C ~ config --show-origin --list`
+  complains about.
+- `--rotate` with `--name`: run them as two commands, `--name` first.
 
 ```sh
 cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
@@ -403,6 +459,7 @@ cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
 install: identity: user.signingkey <fingerprint> is not valid for <email> in <path> (<reason>)
 install: identity: user.signingkey <fingerprint> is not loaded in the ssh-agent - signing will fail
 install: identity: user.signingkey is set in <origin>, outside <path>
+install: identity: user.signingkey (<value>) names no readable SSH public key - signing will fail
 ```
 
 `link` and `dotfiles-upgrade` print the first one alone, as one line that
@@ -436,18 +493,87 @@ cd ~/.config/dotfiles && ./install.sh identity --rotate
 
 It replaces `user.signingkey` only when exactly one agent key verifies for
 your email; the rule is in
-[rotating the signing key](shell-reference.md#rotating-the-signing-key). It
-prints one of these when it will not:
+[the `--rotate` rule](shell-reference.md#the---rotate-rule), and the full
+procedure is [rotate the signing key](signing-key.md#rotate-the-signing-key).
+It prints one of these when it will not:
 
 ```text
 install: identity: --rotate: <fingerprint> is still valid for <email> in <path> - nothing to rotate
 install: identity: --rotate: <n> ssh-agent keys are valid for <email> in <path> - refusing
 install: identity: --rotate: user.signingkey comes from <origin>, not <path> - edit it there
 install: identity: --rotate: user.signingkey is not set - nothing to rotate; run <path to install.sh> identity
+install: identity: --rotate needs user.email - run <path to install.sh> identity first
+install: identity: --rotate: user.signingkey (<value>) names no readable public key - refusing
 ```
 
 For a key missing from the agent, `ssh-add` it. For a competing value, delete
-the other file's `user.signingkey`.
+the other file's `user.signingkey`. For a value that names no readable key,
+point `user.signingkey` in `config.local` at this host's `.pub` file, or
+remove it and run `./install.sh identity`. For `--rotate needs user.email`,
+run `./install.sh identity` first.
+
+## Doctor reports a problem
+
+`install.sh doctor` prints one line per problem and exits 1. Each line names
+the check and what is wrong; most end in the fix, after the last ` - `. A
+healthy host prints nothing; `./install.sh doctor --verbose` shows every
+check and ends in a `doctor: verdict:` line. The checks and the verdicts are
+listed in [`install.sh doctor`](shell-reference.md#installsh-doctor).
+
+```text
+install: doctor: python3: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)
+install: doctor: git: git did not run (<reason>) - install the Command Line Tools (xcode-select --install)
+install: doctor: git: <git version> cannot sign with SSH keys (2.34 or later can) - upgrade git
+install: doctor: git: GIT_CONFIG_GLOBAL=<value> is not <path>, so git does not read <path> - unset it
+install: doctor: git: cannot read include.path (<error>) - check the file git -C ~ config --show-origin --get-all include.path names
+install: doctor: git: no [include] reaches <path>, so git never reads it - see "Framework git settings do not apply" in docs/troubleshooting.md
+install: doctor: git: <path> is not a regular file - git opens it through the include; remove it or make it a file
+install: doctor: git: not reading the git config: <reason>
+install: doctor: ssh-keygen: ssh-keygen was not found on PATH - git signs and verifies with it; install OpenSSH
+install: doctor: ssh-keygen: ssh-keygen did not run (<reason>) - git signs and verifies with it; install OpenSSH
+install: doctor: ssh-keygen: <path> does not support -Y, which git signs and verifies with - install OpenSSH 8.2 or later
+install: doctor: values: gpg.format is <value>, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md
+install: doctor: values: cannot read <key> (<error>) - check the file git -C ~ config --show-origin --get <key> names
+install: doctor: values: user.name is not set - run: <path to install.sh> identity --name "Full Name"
+install: doctor: values: user.name is not set - run: git config --file <path> user.name "Full Name"
+install: doctor: values: user.email is not set - run: git config --file <path> user.email <your email>
+install: doctor: values: <key> is not set - run: <path to install.sh> identity
+install: doctor: values: <key> is not a boolean git reads (<error>) - git refuses to <commit or tag> until it is; fix it in the file git -C ~ config --show-origin --get <key> names
+install: doctor: values: commit.gpgsign is not set, so commits are not signed - run: <path to install.sh> identity
+install: doctor: values: commit.gpgsign = false from <origin>, outside <path>, so commits are not signed - remove it there to sign, or set the false in <path> to opt out
+install: doctor: values: <key> is true in <path>, but <origin> sets it false and wins - remove the false there, or the true in <path>
+install: doctor: values: gpg.ssh.allowedSignersFile is not set, so git cannot verify signatures - run: <path to install.sh> identity
+install: doctor: trust root: <cause> - see docs/signing-key.md
+install: doctor: ssh-agent: <cause> - load this host's signing key with ssh-add
+install: doctor: ssh-agent: malformed allowed-signers line(s) <n> in <path> name an ssh-agent key - fix or remove them
+install: doctor: signing key: <cause>
+install: doctor: ~/.gitconfig: a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it
+install: doctor: ~/.gitconfig: ~/.gitconfig sets <keys>, and git reads it after ~/.config/git/config - move its settings into <path> and remove it
+install: doctor: ~/.gitconfig: ~/.gitconfig is not a regular file - remove it
+```
+
+The `git config --file` lines for `user.name` and `user.email` are the ones
+a host that opted out of signing gets, since `install.sh identity` needs a
+signing key there.
+
+`<cause>` is the cause the identity step would print, without its
+`identity: ` head and its `- writing nothing` tail: the trust root's and the
+agent's are in
+[the installer did not set the git identity](#the-installer-did-not-set-the-git-identity),
+and the signing key's, with its hint joined after a ` - `, in
+[the signing key is stale](#the-signing-key-is-stale).
+`not reading the git config: <reason>` is the identity step's refusal, and
+doctor stops there; its reasons and fixes are in
+[the installer did not set the git identity](#the-installer-did-not-set-the-git-identity).
+
+**Cause.** The identity or signing setup is incomplete, or a tool it needs is
+missing. On a host that opted out of signing, a problem that matters only to
+signing prints as a `note:` line under `--verbose` instead; which ones are
+listed in [`install.sh doctor`](shell-reference.md#installsh-doctor).
+
+**Fix.** Apply the fix the line names, then run `./install.sh doctor` again
+until it prints nothing. The recipes behind most fixes are in
+[manage this host's signing key](signing-key.md).
 
 ## `git config --global` returns empty
 

@@ -342,7 +342,7 @@ def git_units(mod, scratch):
         "import importlib.util, sys\n"
         "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-        "def run(host, mode, name, report_stale):\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
         "    m.git(['config', '--get', 'user.email'])\n"
         "    raise KeyboardInterrupt\n"
         "m.run = run\n"
@@ -462,6 +462,29 @@ def main(argv):
     check(reported and said_check == ["identity: cannot read gpg.format (fatal: bad config line 3) - user.signingkey not checked"],
           "check_signing_key names git's error instead of staying silent")
     check(included == (False, "fatal: bad config line 3"), "includes_local carries git's error, not a missing include")
+
+    # Doctor.git() on the same failed read: git itself runs, but the
+    # include.path read does not. GIT_CONFIG_GLOBAL is unset so the check
+    # reaches the include test instead of stopping at a custom global.
+    def only_version_runs(args):
+        if args == ["--version"]:
+            return 0, "git version 2.45.0", ""
+        return 128, "", "fatal: bad config line 3"
+
+    mod.git = only_version_runs
+    saved_global = os.environ.pop("GIT_CONFIG_GLOBAL", None)
+    try:
+        host = mod.Host(scratch, os.path.join(scratch, "config.local"), "INSTALLER")
+        d = mod.Doctor(host)
+        d.git()
+    finally:
+        mod.git = real_git
+        if saved_global is not None:
+            os.environ["GIT_CONFIG_GLOBAL"] = saved_global
+    check(("problem", "cannot read include.path (fatal: bad config line 3) - check the file "
+           "git -C ~ config --show-origin --get-all include.path names") in d.found
+          and not any(text.startswith("no [include] reaches") for _, text in d.found),
+          "doctor says it cannot read include.path, not that no include exists")
 
     def show_origin_fails(args):
         if "--show-origin" in args:

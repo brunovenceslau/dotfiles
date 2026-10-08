@@ -151,6 +151,7 @@ SECURITY.md|the branch ruleset that requires verified signatures|on_main and rul
 docs/architecture.md|The live `main-protection` branch ruleset on GitHub (`required_signatures`, no bypass actors)|on_main and branch_ruleset.name == "main-protection" and rule("required_signatures") and branch_ruleset.bypass_actors == []
 .github/ISSUE_TEMPLATE/config.yml|url: https://github.com/brunovenceslau/dotfiles/security/advisories/new|pvr
 .github/ISSUE_TEMPLATE/bug_report.yml|Use the private advisory|pvr
+docs/signing-key.md|The `main` ruleset refuses a force push to `main`|on_main and rule("non_fast_forward")
 docs/stacked-prs.md|With `delete_branch_on_merge` on, merging the parent deletes its head branch|.repo.delete_branch_on_merge == true
 docs/development.md|the repository'"'"'s Actions settings require SHA pinning|.actions_permissions.sha_pinning_required == true
 docs/development.md|Both legs are required status checks on `main`|on_main and rule("required_status_checks") and (branch_ruleset.required_status_checks | length) == 2

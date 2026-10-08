@@ -87,7 +87,18 @@ pushes to `main` and blocks deleting it, so published history cannot be
 rewritten or removed. Sign your commits before you push, not after: re-signing
 means rewriting the branch.
 
-This project signs with SSH. If you have no signing key yet:
+This project signs with SSH. How you set up a signing key depends on whether
+this framework is installed on the machine you contribute from.
+
+**With the framework installed**, do not use `git config --global`: it writes
+`~/.config/git/config` (or `~/.gitconfig`), not the `config.local` where the
+framework keeps each host's identity, and the identity step then reports
+the value as set outside `config.local`. Follow
+[set identity and signing](docs/new-mac-host.md#5-set-identity-and-signing),
+then check with
+[which identity and key git uses](docs/signing-key.md#check-which-identity-and-key-git-uses).
+
+**Without the framework**, a plain git setup works:
 
 ```sh
 ssh-keygen -t ed25519 -C "signing key" -f ~/.ssh/id_signing
@@ -96,13 +107,18 @@ gh ssh-key add ~/.ssh/id_signing.pub --type signing --title "signing"
 git config --global gpg.format ssh
 git config --global user.signingkey ~/.ssh/id_signing.pub
 git config --global commit.gpgsign true
+git config --global --get user.signingkey   # prints ~/.ssh/id_signing.pub
 ```
 
-The key must be registered on GitHub with type `signing`. An authentication key
-with the same bytes does not count, and GitHub will show the commit as
-Unverified. Check the result with `git log --show-signature`, and note that
-`%G?` reports `N` for a good SSH signature unless git can see an allowed-signers
-file. See `config/git/config.local.example` for that entry.
+Either way, the key must be registered on GitHub with type `signing`. An
+authentication key with the same bytes does not count, and GitHub will show
+the commit as Unverified. Check the result with `git log --show-signature`.
+`%G?` reports `N` for a good SSH signature unless git can see an
+allowed-signers file (`gpg.ssh.allowedSignersFile`), and a `G` alone does not
+tie the signer to the committer email: compare `%GS` and `%GF` with your email
+and `ssh-add -l`, as the
+[signing check](docs/signing-key.md#check-which-identity-and-key-git-uses)
+shows.
 
 ## Pull requests
 
