@@ -654,6 +654,35 @@ def main(argv):
         check(not mod.valid_name(bad), "name %r is refused" % bad)
     check(mod.valid_name('Zoë "Z" O\\Doe'), "a name with quotes and a backslash is accepted")
 
+    # --- the full name the missing-name line suggests ------------------------
+    class Pw(object):
+        def __init__(self, login, gecos):
+            self.pw_name, self.pw_gecos = login, gecos
+    for login, gecos, want in (("jane", "Jane Doe", "Jane Doe"),
+                               ("jane", "Jane Doe,Room 1,555,", "Jane Doe"),
+                               ("jdoe", "& Doe", "Jdoe Doe"),
+                               ("jdoe", "&,&", "Jdoe"),
+                               ("jane", "", ""),
+                               ("jane", ",Room 1", ""),
+                               ("jane", None, "")):
+        got = mod.gecos_name(Pw(login, gecos))
+        check(got == want, "gecos %r for %s reads as the full name %r (got %r)" % (gecos, login, want, got))
+    check(mod.suggested_name("Jane Doe") == "Jane Doe", "the line suggests the account's full name when gecos has one")
+    check(mod.suggested_name("") == "Full Name", "an account with no full name gets the placeholder")
+    for bad in ("Jane\x1b[2JDoe", "Jane‮Doe", "Jane <x>", 'Jane "JJ" Doe', "Jane $(id)", "Jane `id`",
+                "Jane\\Doe", "Jane!Doe"):
+        got = mod.suggested_name(bad)
+        check(got == "Full Name", "a full name %r that git, a shell or the terminal would not pass unchanged is not suggested (got %r)"
+              % (bad, got))
+    saved_account = mod.account_name
+    mod.account_name = lambda: "Jane\x1b[2JDoe"
+    try:
+        line = mod.missing_name_line(mod.Host(scratch, os.path.join(scratch, "c"), "INSTALLER"))
+    finally:
+        mod.account_name = saved_account
+    check(line == 'identity: user.name is not set - run: INSTALLER identity --name "Full Name"'
+          and mod._clean(line), "a control character in the account's full name never reaches the line")
+
     # --- files: the size cap; a KRL check with no usable TMPDIR -------------
     big = os.path.join(scratch, "big")
     with open(big, "wb") as fh:

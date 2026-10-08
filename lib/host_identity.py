@@ -75,6 +75,7 @@ import errno
 import hashlib
 import os
 import platform
+import pwd
 import re
 import shutil
 import signal
@@ -562,6 +563,50 @@ def valid_name(n):
     """A user.name git can put in an ident line: no `<>`, no control,
     invisible or line-separator characters."""
     return bool(n) and _clean(n) and not any(c in "<>" for c in n)
+
+
+def gecos_name(pw):
+    """The full name git itself would take from the account PW (a pwd
+    entry), as its ident.c does: the GECOS field up to its first comma, each
+    `&` replaced by the login with its first letter capitalized. Empty when
+    the account has none (a Linux account's GECOS often is)."""
+    field = (pw.pw_gecos or "").split(",", 1)[0]
+    login = pw.pw_name or ""
+    return field.replace("&", login[:1].upper() + login[1:]).strip()
+
+
+# Characters that a shell still interprets inside double quotes (`!` in an
+# interactive bash or zsh): a name holding one is not suggested, since the
+# suggested command would not pass it through unchanged.
+_SHELL_ACTIVE = '"\\$`!'
+
+
+def suggested_name(name):
+    """The value the missing-name line puts after --name: NAME when
+    install.sh identity would accept it and a shell passes it through double
+    quotes unchanged, else the placeholder. Through _shown() as well, so a
+    control character could never reach the terminal even if valid_name()
+    were loosened."""
+    if name and valid_name(name) and not any(c in _SHELL_ACTIVE for c in name):
+        return _shown(name)
+    return "Full Name"
+
+
+def account_name():
+    """gecos_name() of the account running this, or "" when it has none."""
+    try:
+        return gecos_name(pwd.getpwuid(os.getuid()))
+    except (KeyError, OSError):
+        return ""
+
+
+def missing_name_line(host):
+    """ONE literal, quoted by docs/signing-key.md: the hint for a host with no
+    user.name. The step never writes the name itself (only --name does): it
+    is the operator's to choose, so the account's full name is a
+    suggestion."""
+    return 'identity: user.name is not set - run: %s identity --name "%s"' % (
+        host.installer, suggested_name(account_name()))
 
 
 # --- reading files and running tools -----------------------------------------
@@ -1420,7 +1465,7 @@ def opted_out(host):
     return origin
 
 
-def already_configured(host):
+def signing_configured(host):
     """user.email, user.signingkey and commit.gpgsign are all set, the last
     true or false. A false is the host's exception (identity() kept it) or
     one overriding a true in config.local, which `auto --report-stale`
@@ -1430,6 +1475,12 @@ def already_configured(host):
     key = host.effective("user.signingkey")
     sign = host.effective("commit.gpgsign", typ="bool")
     return email.set and key.set and sign.set
+
+
+def already_configured(host):
+    """signing_configured(), and user.name is set too: the tracked
+    user.useConfigOnly = true makes git refuse every commit without it."""
+    return signing_configured(host) and host.effective("user.name").set
 
 
 def commits_fail_closed(host):
@@ -1636,7 +1687,7 @@ def identity(host, name):
     if conflicts:
         return 1
     if host.effective("user.name").unset:
-        warn('identity: user.name is not set - run: %s identity --name "Full Name"' % host.installer)
+        warn(missing_name_line(host))
     return 0
 
 
@@ -2091,8 +2142,8 @@ class Doctor(object):
         inst = host.installer
         cl = host.config_local
         off = self.opted_out_origin
-        for key in ("user.name", "user.email", "user.signingkey", "commit.gpgsign", "tag.gpgsign",
-                    "gpg.format", "gpg.ssh.allowedSignersFile", "gpg.ssh.revocationFile"):
+        for key in ("user.name", "user.email", "user.useConfigOnly", "user.signingkey", "commit.gpgsign",
+                    "tag.gpgsign", "gpg.format", "gpg.ssh.allowedSignersFile", "gpg.ssh.revocationFile"):
             origins = host.origins(key)
             if origins:
                 origin, value = origins[-1]
@@ -2103,24 +2154,45 @@ class Doctor(object):
         if not (fmt.set and fmt.text == "ssh"):
             self.problem('gpg.format is %s, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md'
                          % (repr(fmt.text) if fmt.set else "unset"), signing=True)
+        # The tracked config sets user.useConfigOnly = true: git then refuses
+        # every commit, signed or not, without a user.name and a user.email,
+        # so the lines for those two say so. A false (config.local may set
+        # one) lets git invent both from the account and host name instead.
+        only = host.effective("user.useConfigOnly", "bool")
+        refuses = only.set and only.text == "true"
+        if only.set and only.text == "false":
+            self.info("user.useConfigOnly = false from %s: git invents a name and an email from this account and host when none is set"
+                      % last_origin(host, "user.useConfigOnly"))
+        # Each line ONE literal, fix included: docs/troubleshooting.md quotes
+        # them. The `git config --file` fixes are an opted-out host's, where
+        # `install.sh identity` needs a signing key.
+        if refuses:
+            name_local = 'user.name is not set, so git refuses every commit - run: git config --file %s user.name "Full Name"'
+            name_step = 'user.name is not set, so git refuses every commit - run: %s identity --name "Full Name"'
+            email_local = "user.email is not set, so git refuses every commit - run: git config --file %s user.email <your email>"
+            email_step = "user.email is not set, so git refuses every commit - run: %s identity"
+        else:
+            name_local = 'user.name is not set - run: git config --file %s user.name "Full Name"'
+            name_step = 'user.name is not set - run: %s identity --name "Full Name"'
+            email_local = "user.email is not set - run: git config --file %s user.email <your email>"
+            email_step = "user.email is not set - run: %s identity"
         for key in ("user.name", "user.email", "user.signingkey"):
             signing = key == "user.signingkey"
             v = host.effective(key)
             if v.error:
                 self.problem("cannot read %s (%s) - check the file git -C ~ config --show-origin --get %s names"
                              % (key, v.err, key), signing=signing)
-            elif v.unset and key == "user.name" and off:
-                self.problem('user.name is not set - run: git config --file %s user.name "Full Name"' % cl)
             elif v.unset and key == "user.name":
-                self.problem('user.name is not set - run: %s identity --name "Full Name"' % inst)
-            elif v.unset and key == "user.email" and off:
-                self.problem("user.email is not set - run: git config --file %s user.email <your email>" % cl)
+                self.problem(name_local % cl if off else name_step % inst)
+            elif v.unset and key == "user.email":
+                self.problem(email_local % cl if off else email_step % inst)
             elif v.unset and signing and commits_fail_closed(host):
                 self.problem("user.signingkey is not set, so git refuses every commit - run: %s identity, or opt this host out of signing (see docs/signing-key.md)"
                              % inst, signing=True)
             elif v.unset:
                 self.problem("%s is not set - run: %s identity" % (key, inst), signing=signing)
-        for key, verb in (("commit.gpgsign", "commit"), ("tag.gpgsign", "tag")):
+        for key, verb in (("user.useConfigOnly", "run most commands"), ("commit.gpgsign", "commit"),
+                          ("tag.gpgsign", "tag")):
             v = host.effective(key, "bool")
             if v.error:
                 # git dies on such a value: `fatal: bad boolean config value`.
@@ -2320,6 +2392,17 @@ def run(host, mode, name, report_stale, verbose=False):
             return 0, None
         # One line at most: main() keeps only the first warning.
         return (overridden_line(host) or stale_line(host)), None
+    if mode == "auto" and signing_configured(host):
+        # Only user.name is missing, which the step never writes. Its line is
+        # the one line, ahead of a stale-key or override line: under the
+        # tracked user.useConfigOnly = true git refuses every commit without
+        # a name, while a stale key only leaves new signatures unverified.
+        # Not through identity(): with the email and key in place it would
+        # write nothing, and an unreachable agent would bury the name line
+        # under an agent line. The next run, once the name is set, reports
+        # the stale key.
+        warn(missing_name_line(host))
+        return 0, None
     if not global_reads_local(host):
         return 1, None
     if mode == "rotate":
@@ -2382,6 +2465,12 @@ def main(argv):
         lines, _captured = _captured, None
     if args.mode == "doctor":
         lines = []
+    # Precedence among auto's one-line warnings: a missing user.name or
+    # user.email comes first, since git refuses every commit without it
+    # (the tracked user.useConfigOnly). A missing email is never a line of
+    # its own: the step writes it, or the headline names why it cannot. A
+    # missing name on an otherwise configured host is printed alone by
+    # run(), ahead of a stale-key or override line.
     if lines:
         if rc == 0:
             for line in lines:

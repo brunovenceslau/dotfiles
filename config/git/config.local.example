@@ -26,6 +26,10 @@
 # docs/shell-reference.md ("install.sh identity"); rotating, revoking and
 # opting a host out are in docs/signing-key.md.
 
+# The tracked config sets user.useConfigOnly = true, so git refuses every
+# commit until user.name and user.email are set here; it never invents them
+# from this account and host name.
+#
 # Set by install.sh identity; uncomment only to set by hand.
 # [user]
 # 	name = Your Name

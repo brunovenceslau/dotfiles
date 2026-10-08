@@ -20,6 +20,8 @@ page no longer exists in the code.
 | `canga <TAB>` completes nothing | [canga has no completion](#canga-has-no-completion) |
 | `sbx <TAB>` completes nothing | [sbx has no completion](#sbx-has-no-completion) |
 | Commits go out unsigned, no Verified badge | [Unsigned commits](#unsigned-commits) |
+| `git commit` fails with `no email was given and auto-detection is disabled`, or `no name was given and auto-detection is disabled` | [Every commit fails with no name or email](#every-commit-fails-with-no-name-or-email) |
+| `user.name is not set, so git refuses every commit`, or the same for `user.email` | [Every commit fails with no name or email](#every-commit-fails-with-no-name-or-email) |
 | `git commit` fails with `either user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured` | [Every commit fails with no signing key](#every-commit-fails-with-no-signing-key) |
 | `every commit fails until this host has a signing key`, or `git refuses every commit` | [Every commit fails with no signing key](#every-commit-fails-with-no-signing-key) |
 | `identity: ... - writing nothing`, `is already set to a different value`, or `is overridden by` | [The installer did not set the git identity](#the-installer-did-not-set-the-git-identity) |
@@ -298,6 +300,56 @@ commits fail outright while `commit.gpgsign` still reads true. Remove the
 file, as in
 [new mac host, step 4](new-mac-host.md#4-remove-a-legacy-gitconfig). To stay
 on GPG for now, set `gpg.format = openpgp` in `config.local`.
+
+## Every commit fails with no name or email
+
+`git commit` stops, and no commit is made, with one of these lines (so do
+`git merge`, `git rebase`, and `git pull`, which rebases here, whenever they
+make a commit):
+
+```text
+fatal: no email was given and auto-detection is disabled
+fatal: no name was given and auto-detection is disabled
+```
+
+`install.sh doctor` says the same before it happens:
+
+```text
+install: doctor: values: user.name is not set, so git refuses every commit - run: <path to install.sh> identity --name "Full Name"
+install: doctor: values: user.email is not set, so git refuses every commit - run: <path to install.sh> identity
+```
+
+**Cause.** The tracked `config/git/config` sets `user.useConfigOnly = true`,
+so git never invents an identity from the account and host name. An address
+guessed that way matches no signing key on GitHub, so its commits would
+never show as Verified. git checks the name and email before the signing
+key: on a new host this comes before
+[every commit fails with no signing key](#every-commit-fails-with-no-signing-key).
+The identity step writes `user.email`, but never `user.name`, which is
+yours to choose.
+
+**Fix.** Set the missing value in this host's `config.local`. With the
+host's signing key in the ssh-agent and listed in the allowed-signers file:
+
+```sh
+cd ~/.config/dotfiles && ./install.sh identity --name "Your Name"
+```
+
+On a host that opted out of signing, where `install.sh identity` needs a
+signing key it does not have, set them by hand:
+
+```sh
+git config --file ~/.config/git/config.local user.name "Your Name"
+git config --file ~/.config/git/config.local user.email "you@example.com"
+```
+
+Do not follow the hint git prints above the `fatal:` line. Its
+`git config --global` writes `~/.gitconfig`, which git reads after
+`~/.config/git/config` and doctor reports as a problem (see
+[unsigned commits](#unsigned-commits)). Its "Omit --global" writes the
+repository's own `.git/config`: the identity then holds in that one
+repository only, and in a linked worktree it lands in the configuration
+every worktree of that repository shares.
 
 ## Every commit fails with no signing key
 
@@ -590,11 +642,12 @@ install: doctor: ssh-keygen: ssh-keygen did not run (<reason>) - git signs and v
 install: doctor: ssh-keygen: <path> does not support -Y, which git signs and verifies with - install OpenSSH 8.2 or later
 install: doctor: values: gpg.format is <value>, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md
 install: doctor: values: cannot read <key> (<error>) - check the file git -C ~ config --show-origin --get <key> names
-install: doctor: values: user.name is not set - run: <path to install.sh> identity --name "Full Name"
-install: doctor: values: user.name is not set - run: git config --file <path> user.name "Full Name"
-install: doctor: values: user.email is not set - run: git config --file <path> user.email <your email>
+install: doctor: values: user.name is not set, so git refuses every commit - run: <path to install.sh> identity --name "Full Name"
+install: doctor: values: user.name is not set, so git refuses every commit - run: git config --file <path> user.name "Full Name"
+install: doctor: values: user.email is not set, so git refuses every commit - run: <path to install.sh> identity
+install: doctor: values: user.email is not set, so git refuses every commit - run: git config --file <path> user.email <your email>
 install: doctor: values: <key> is not set - run: <path to install.sh> identity
-install: doctor: values: <key> is not a boolean git reads (<error>) - git refuses to <commit or tag> until it is; fix it in the file git -C ~ config --show-origin --get <key> names
+install: doctor: values: <key> is not a boolean git reads (<error>) - git refuses to <commit, tag, or run most commands> until it is; fix it in the file git -C ~ config --show-origin --get <key> names
 install: doctor: values: user.signingkey is not set, so git refuses every commit - run: <path to install.sh> identity, or opt this host out of signing (see docs/signing-key.md)
 install: doctor: values: commit.gpgsign is not set, so git does not read the framework git config and commits are not signed - see "Framework git settings do not apply" in docs/troubleshooting.md
 install: doctor: values: commit.gpgsign = false from <origin>, outside <path>, so commits are not signed - remove it there to sign, or set the false in <path> to opt out
@@ -611,7 +664,11 @@ install: doctor: ~/.gitconfig: ~/.gitconfig is not a regular file - remove it
 
 The `git config --file` lines for `user.name` and `user.email` are the ones
 a host that opted out of signing gets, since `install.sh identity` needs a
-signing key there.
+signing key there. Where `user.useConfigOnly` is `false`, git invents a
+missing name or email instead of refusing the commit, so those lines leave
+out `, so git refuses every commit`; `--verbose` names the file the `false`
+comes from in a `note:` line. The boolean line names
+`user.useConfigOnly` too: git refuses even `git status` until it is fixed.
 
 `<cause>` is the cause the identity step would print, without its
 `identity: ` head and its `- writing nothing` tail: the trust root's and the

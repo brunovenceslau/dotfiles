@@ -81,11 +81,31 @@ tracked="$repo_root/config/git/config"
 ck "the tracked config sets commit.gpgsign true and not tag.gpgsign" \
   "$(git config --file "$tracked" --get commit.gpgsign):$(git config --file "$tracked" --get tag.gpgsign || echo UNSET)" \
   "true:UNSET"
-for k in tag.forceSignAnnotated user.useConfigOnly; do
-  ck "the tracked config leaves $k unset" "$(git config --file "$tracked" --get "$k" || echo UNSET)" "UNSET"
-done
+ck "the tracked config leaves tag.forceSignAnnotated unset" \
+  "$(git config --file "$tracked" --get tag.forceSignAnnotated || echo UNSET)" "UNSET"
+ck "the tracked config sets user.useConfigOnly true" \
+  "$(git config --file "$tracked" --type=bool --get user.useConfigOnly)" "true"
 ck "the tracked config sets no gpg.ssh.* key" \
   "$(git config --file "$tracked" --get-regexp '^gpg\.ssh\.' || echo UNSET)" "UNSET"
+
+# --- user.useConfigOnly: git never invents an identity -----------------------
+# A commit through the tracked config (via the symlink, no config.local) with
+# no identity fails with git's own literal, the one docs/troubleshooting.md
+# keys its section on; with an email but no name, with the other literal.
+# Signing is off per command so only the identity can stop the commit, and
+# every variable git would otherwise take an identity from is unset.
+HOME="$work/home" XDG_CONFIG_HOME="$work/home/.config" git -C "$work" init -q repo
+commit_err() {
+  ( unset EMAIL GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+    HOME="$work/home" XDG_CONFIG_HOME="$work/home/.config" \
+      git -C "$work/repo" -c commit.gpgsign=false "$@" commit -q --allow-empty -m c 2>&1 ) || :
+}
+grep -qF 'fatal: no email was given and auto-detection is disabled' <<<"$(commit_err)" \
+  && pass=$((pass + 1)) || fail "a commit under the tracked config with no user.email fails with git's no-email literal: $(commit_err)"
+grep -qF 'fatal: no name was given and auto-detection is disabled' <<<"$(commit_err -c user.email=me@example.com)" \
+  && pass=$((pass + 1)) || fail "with an email but no user.name it fails with git's no-name literal"
+[ -z "$(git -C "$work/repo" rev-list --all)" ] || fail "an identity-less commit was made"
+pass=$((pass + 1))
 
 # --- the RELATIVE include resolves through the symlink ------------------------
 # Drop a config.local next to the config (in the copy the symlink points at) and
@@ -143,6 +163,10 @@ xgc() { HOME="$work/xhome" XDG_CONFIG_HOME="$xdg" git -C "$work/neutral" config 
 ck "the uncommented example is the identity it shows" "$(xgc --get user.email)" "you@example.com"
 ck "uncommenting every line of the example keeps commit signing on" \
   "$(xgc --type=bool --get commit.gpgsign)" "true"
+ck "uncommenting every line of the example keeps user.useConfigOnly true" \
+  "$(xgc --type=bool --get user.useConfigOnly)" "true"
+ck "the example carries no commented useConfigOnly opt-out line" \
+  "$(grep -ciE '^#[[:space:]]*(user\.)?useConfigOnly[[:space:]]*=' "$ex" || :)" "0"
 
 # --- dotfiles-upgrade re-asserts fsckObjects under its scrubbed config ---------
 # Part 2: vgit scrubs GLOBAL/SYSTEM config, so it must pass fsckObjects

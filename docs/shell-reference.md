@@ -75,7 +75,8 @@ which re-enters `link` on the new tree. The automatic step:
 
 - writes only when the effective config lacks `user.email`,
   `user.signingkey` or `commit.gpgsign` (`true`, or the explicit `false`
-  below), so a host that signs hears nothing from it while its key verifies;
+  below), so a host that signs, and has a `user.name`, hears nothing from it
+  while its key verifies;
 - on a host that already signs, in `link` and so in every `upgrade`, prints
   one line when a later file turns off the signing `config.local` turns on,
   or when the configured key no longer verifies for `user.email` (its entry
@@ -84,8 +85,13 @@ which re-enters `link` on the new tree. The automatic step:
   override or when the revocation file is the cause,
   `<checkout>/install.sh identity`. `install` leaves that to its advisory,
   which prints the full report below;
-- never rotates a key, and never writes `user.name`, which nothing on the host
-  can derive;
+- never rotates a key, and never writes `user.name`, which is yours to
+  choose. On a host where only the name is missing, it prints one line,
+  `identity: user.name is not set - run: <checkout>/install.sh identity
+  --name "<full name>"`, ahead of a stale-key or override line, since git
+  refuses every commit without a name (the tracked config sets
+  `user.useConfigOnly = true`). `<full name>` is this account's full name
+  when the system records one, and `Full Name` otherwise;
 - writes nothing in an SSH session (`SSH_CONNECTION` is set), where the agent
   is usually forwarded from another machine and holds that machine's keys,
   and prints one line saying so. `install.sh identity`, run on purpose,
@@ -346,7 +352,7 @@ Both are removed before it exits. The checks are a registry, `CHECKS` in
 | `git` | `git --version`, `GIT_CONFIG_GLOBAL`, the `[include]` chain | git does not run, is older than 2.34 (the first to sign with SSH keys), `GIT_CONFIG_GLOBAL` names a file other than `$XDG_CONFIG_HOME/git/config`, the `include.path` values cannot be read, or no `[include]` reaches `config.local` |
 | `python3` | the running interpreter | `python3 -I -c ''` fails (`install.sh` reports this itself, since the checks need python3) |
 | `ssh-keygen` | `ssh-keygen -Y find-principals` on empty input | `ssh-keygen` is missing, does not run, or does not know `-Y` |
-| `values` | `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read (an unset `user.signingkey` while commit signing is on is named as git refusing every commit; an unset `commit.gpgsign` as the tracked config not being read); `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
+| `values` | `user.name`, `user.email`, `user.useConfigOnly`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read (an unset `user.name` or `user.email` while `user.useConfigOnly` is true, and an unset `user.signingkey` while commit signing is on, are named as git refusing every commit; an unset `commit.gpgsign` as the tracked config not being read); `user.useConfigOnly`, `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; a `user.useConfigOnly = false` is a note naming its file, never a problem; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
 | `trust root` | the allowed-signers file, found the way [`install.sh identity`](#installsh-identity) finds it, and the revocation file | no allowed-signers file is found or readable, or the revocation file cannot be used |
 | `ssh-agent` | `ssh-add -L`, and which agent keys the allowed-signers file lists for the `git` namespace | the agent cannot be reached or holds no key while signing needs it, or a malformed line names an agent key |
 | `signing key` | the effective `user.signingkey`, as the [stale-key report](#the-stale-key-report) judges it | the key no longer verifies, is not in a reachable agent, names no readable key, or is set outside `config.local` |

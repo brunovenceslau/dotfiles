@@ -27,6 +27,15 @@
 [commit]
 	gpgsign = true
 
+# git never invents an identity: without this, a host with no user.email
+# commits under an address guessed from the login and host name, which
+# GitHub cannot match to a signing key, so the commit is never Verified.
+# With it, git refuses to commit until config.local sets user.name and
+# user.email (`install.sh identity`). config.local, read after this line,
+# may set it false; `install.sh doctor --verbose` then names that file.
+[user]
+	useConfigOnly = true
+
 # Reject malformed/malicious git objects at the untrusted-input
 # boundary (the fetch's index-pack). dotfiles-upgrade re-asserts these on its
 # fetch even though it scrubs ambient config, so it never ingests objects under a

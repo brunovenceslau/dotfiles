@@ -613,6 +613,17 @@ and `config.local` second (`_write_git_local_config` in `lib/link.sh`). A
 `tag.gpgsign` stays out of the tracked config and is written per host by the
 identity step, so an opted-out host never signs tags by surprise.
 
+The tracked config also sets `user.useConfigOnly = true`. Without it, a host
+with no `user.email` commits under an address git guesses from the login and
+host name, which matches no signing key on GitHub, so those commits never
+show as Verified. With it, wherever git reads the tracked config, git
+refuses the commit until `config.local` sets `user.name` and `user.email`,
+on a host opted out of signing too. The identity step writes the email but
+never the name, which only `--name` sets; the automatic step names a missing
+name in one line. A `false` read after the tracked `true` (from
+`config.local`) turns this off, and `install.sh doctor --verbose` names the
+file it comes from.
+
 Signing is mandatory only where git reads the tracked config, and some git
 paths do not sign even there; the list is in
 [where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).

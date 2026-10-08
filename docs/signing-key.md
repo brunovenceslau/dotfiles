@@ -108,8 +108,11 @@ printf '%s\n' "ssh-ed25519 AAAA..." | ssh-keygen -lf -   # the pasted key
 ## Add your name after an upgrade
 
 On a host where `dotfiles-upgrade` (or `./install.sh link`) set the identity,
-everything is in place except `user.name`, which nothing on the host can
-derive. If this prints your name, there is nothing to do:
+everything is in place except `user.name`, which the step never writes: the
+name is yours to choose. Until it is set, git refuses every commit, since the
+tracked config sets `user.useConfigOnly = true`, and every `link` and
+`dotfiles-upgrade` prints a `user.name is not set` line. If this
+prints your name, there is nothing to do:
 
 ```sh
 git -C ~ config --get user.name
@@ -325,7 +328,7 @@ that you already pushed, publish the rewrite with
 ```text
 install: identity: wrote <keys> to <path>
 install: identity: already configured for <email> (<fingerprint>)
-install: identity: user.name is not set - run: <path to install.sh> identity --name "Full Name"
+install: identity: user.name is not set - run: <path to install.sh> identity --name "<full name>"
 install: identity: <key> is false (<origin>) - kept as this host's exception, so it stays off
 install: identity: tag.gpgsign is left unset while commit.gpgsign is false (this host opted out of signing)
 install: identity: rotated user.signingkey for <email>: <old fingerprint> -> <new fingerprint> (old key: <reason>)
@@ -336,9 +339,13 @@ install: identity:   it was: <old value>
 changes a `config.local` that already exists, it keeps the old content in
 `config.local.bak`, and never replaces that `.bak` afterwards.
 `already configured` means every value was in place. The `user.name` line
-follows a successful run on a host with no name yet; see
-[add your name](#add-your-name-after-an-upgrade). The `false` lines name a
-setting the step left alone on purpose, as
+follows a successful run on a host with no name yet, and is the one line
+`link` and `dotfiles-upgrade` print while the name is all that is missing;
+see [add your name](#add-your-name-after-an-upgrade). Its `<full name>` is
+this account's full name when the system records one (the GECOS field git
+itself would read), and `Full Name` otherwise: a suggestion to check, never
+a value the step writes. The `false` lines name a setting the step left
+alone on purpose, as
 [`install.sh identity`](shell-reference.md#installsh-identity) describes.
 The rotation line is followed by the old value of `user.signingkey`. A
 message that ends in `writing nothing` or `refusing` is in
