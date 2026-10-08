@@ -153,8 +153,6 @@ GIT_LOCAL_ENV = frozenset(
 
 # In auto mode warnings are collected here and reduced to one line (main()).
 _captured = None
-# What auto() adds to that one line when the host is left unable to commit.
-_consequence = None
 
 
 def log(msg):
@@ -1449,8 +1447,12 @@ def commits_fail_closed(host):
     return host.effective("user.signingkey").unset and host.effective("gpg.ssh.defaultKeyCommand").unset
 
 
-# What the automatic step adds to its one line when commits_fail_closed():
-# ONE literal, quoted in docs/troubleshooting.md with its leading "; ".
+# What the automatic step adds to its one line when commits_fail_closed(),
+# quoted in docs/troubleshooting.md with its leading "; ". The SSH-session
+# line in auto() spells the same words out in a second literal: the docs
+# quote that line whole, and tests/troubleshooting_messages_test.sh looks
+# for each quoted fragment verbatim in the source, which a line joined at
+# run time would not match. Change both literals together.
 FAIL_CLOSED = "; every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
 
 
@@ -1594,9 +1596,10 @@ def identity(host, name):
         for line in kept:
             log(line)
     if conflicts:
-        # Nothing at all next to a conflict: commit.gpgsign = true beside a
-        # signing key this step did not choose could sign with a key that
-        # does not verify, or make every commit fail.
+        # Nothing at all next to a conflict: an email, or tag.gpgsign = true,
+        # written beside a signing key this step did not choose would pair
+        # this host's identity with a key that may not verify for it.
+        # Commit signing itself comes from the tracked config either way.
         warn("identity:   writing nothing; fix the value(s) above, or keep them on purpose")
         return 1
     if to_write:
@@ -1807,9 +1810,10 @@ def stale_line(host):
 
 def auto(host):
     """The automatic step on a host that does not sign yet: one line when it
-    cannot act. When it leaves the host with commit signing on and no key,
-    that line names the consequence (FAIL_CLOSED), through _consequence."""
-    global _consequence
+    cannot act. Returns (exit status, suffix): when it leaves the host with
+    commit signing on and no key, the suffix is FAIL_CLOSED, which main()
+    appends to that one line; otherwise None. Returned, not kept in module
+    state, so nothing carries over to a later main() in the same process."""
     # Over SSH the agent is usually forwarded from ANOTHER machine, whose
     # keys are not this host's to sign with. One literal each:
     # docs/troubleshooting.md quotes them verbatim.
@@ -1819,11 +1823,11 @@ def auto(host):
         else:
             msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
         warn(msg % host.installer)
-        return 1
+        return 1, None
     rc = identity(host, None)
     if rc != 0 and commits_fail_closed(host):
-        _consequence = FAIL_CLOSED % host.installer
-    return rc
+        return rc, FAIL_CLOSED % host.installer
+    return rc, None
 
 
 def global_reads_local(host):
@@ -2290,38 +2294,39 @@ def doctor(host, verbose):
 
 
 def run(host, mode, name, report_stale, verbose=False):
-    """Dispatch one mode; returns its exit status."""
+    """Dispatch one mode; returns (exit status, suffix for the automatic
+    step's one line, or None). Only auto() returns a suffix."""
     if mode == "doctor":
-        return doctor(host, verbose)
+        return doctor(host, verbose), None
     if not local_is_regular(host):
-        return 0 if mode == "check" else 1
+        return (0 if mode == "check" else 1), None
     # Before any git read, so a mode never acts on reads that only failed.
     reason = git_isolate()
     if reason is not None:
         warn(_shown("identity: not reading the git config: %s" % reason))
-        return 0 if mode == "check" else 1
+        return (0 if mode == "check" else 1), None
     if mode == "check":
-        return advisory(host)
+        return advisory(host), None
     # An opted-out host (commit.gpgsign = false in config.local, its own
     # decision; see opted_out()) hears nothing from the automatic step, and
     # nothing is written for it: not on install, not on link, so not on any
     # upgrade. `install.sh doctor` says why; `install.sh identity`, run on
     # purpose, still works.
     if mode == "auto" and opted_out(host):
-        return 0
+        return 0, None
     if mode == "auto" and already_configured(host):
         if not report_stale:
-            return 0
+            return 0, None
         # One line at most: main() keeps only the first warning.
-        return overridden_line(host) or stale_line(host)
+        return (overridden_line(host) or stale_line(host)), None
     if not global_reads_local(host):
-        return 1
+        return 1, None
     if mode == "rotate":
-        return rotate(host)
+        return rotate(host), None
     if mode == "auto":
         return auto(host)
     rc = identity(host, name)
-    return 1 if check_signing_key(host) else rc
+    return (1 if check_signing_key(host) else rc), None
 
 
 def headline(lines):
@@ -2333,8 +2338,7 @@ def headline(lines):
 
 
 def main(argv):
-    global _captured, _consequence
-    _consequence = None
+    global _captured
     ap = argparse.ArgumentParser(prog="install.sh identity", add_help=False)
     ap.add_argument("--config-local", required=True)
     ap.add_argument("--installer", default="./install.sh")
@@ -2371,7 +2375,7 @@ def main(argv):
     if args.mode in ("auto", "doctor"):
         _captured = []
     try:
-        rc = run(host, args.mode, args.name, args.report_stale, args.verbose)
+        rc, consequence = run(host, args.mode, args.name, args.report_stale, args.verbose)
     finally:
         git_release()
         lines, _captured = _captured, None
@@ -2383,8 +2387,8 @@ def main(argv):
                 warn(line)
         else:
             line = headline(lines)
-            if _consequence:
-                line += _consequence
+            if consequence:
+                line += consequence
             elif "%s identity" % host.installer not in line:
                 line += " (details: %s identity)" % host.installer
             warn(line)

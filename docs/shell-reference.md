@@ -226,21 +226,34 @@ since git opens it through the include.
 
 #### Where commit signing is mandatory
 
-The tracked `config/git/config` sets `commit.gpgsign = true`, so git signs
-every `git commit` wherever it reads that file, and refuses the commit while
-no `user.signingkey` is set (`fatal: either user.signingkey or
-gpg.ssh.defaultKeyCommand needs to be configured`). `tag.gpgsign` is not in
-the tracked config: the identity step writes it per host.
+The tracked `config/git/config` sets `commit.gpgsign = true`, so wherever
+git reads that file a plain `git commit` signs by default, and git refuses
+the commit while no `user.signingkey` is set (`fatal: either
+user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured`).
+`tag.gpgsign` is not in the tracked config: the identity step writes it per
+host.
 
 It is mandatory only where git reads the tracked config. A host whose own
 real `~/.config/git/config` does not include it, a `~/.config/git` that is a
 symlink to somewhere else, or an exported `GIT_CONFIG_GLOBAL` does not read
-it. And where git does read it, some paths still produce or allow an
-unsigned commit: `git stash`, `git commit-tree` and `git notes` do not read
-`commit.gpgsign`; `git -c commit.gpgsign=false`, a repository's own config
-and an `[includeIf]` override it; and a `git config --global` write lands in
-`~/.config/git/config` after both includes, so it overrides it too. What
-refuses an unsigned commit on `main` is in
+it. And where git does read it, the known paths that still produce or allow
+an unsigned commit are these (measured on git 2.53):
+
+- `git stash`, `git commit-tree` and `git notes` do not read
+  `commit.gpgsign`;
+- `--no-gpg-sign` turns signing off for one run of `git commit`,
+  `git merge`, `git rebase`, `git cherry-pick`, `git revert` and `git am`;
+- `git -c commit.gpgsign=false`, and its environment form
+  (`GIT_CONFIG_PARAMETERS`, or `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_<n>`
+  and `GIT_CONFIG_VALUE_<n>`), override it for one command;
+- a repository's own config and an `[includeIf]` override it;
+- a `false` in `~/.gitconfig` overrides it, since git reads that file
+  after `~/.config/git/config`;
+- `git config --global` writes to `~/.gitconfig` when that file exists,
+  and otherwise to `~/.config/git/config` after both includes, so a
+  `false` written that way overrides it either way.
+
+What refuses an unsigned commit on `main` is in
 [security properties](architecture.md#security-properties-and-where-they-are-enforced).
 
 #### Opting a host out of signing

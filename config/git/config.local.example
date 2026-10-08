@@ -12,7 +12,9 @@
 #   - run `./install.sh identity --name "Full Name"` from the checkout. It
 #     writes user.name, user.email, user.signingkey, tag.gpgsign and
 #     gpg.ssh.allowedSignersFile from this host's allowed-signers file and
-#     ssh-agent, never overwriting a value already set. No copy is needed;
+#     ssh-agent, never overwriting a value already set (and commit.gpgsign
+#     too, on a host where git does not read the tracked config). No copy
+#     is needed;
 #   - or copy this file and set every value by hand:
 #         cp ~/.config/dotfiles/config/git/config.local.example ~/.config/git/config.local
 #     then uncomment and edit each line below.
@@ -33,12 +35,15 @@
 # 	signingkey = ~/.ssh/id_signing.pub
 
 # The tracked config already sets commit.gpgsign = true, so with no
-# user.signingkey above every commit fails. A host that must not sign opts
-# out with an explicit false here, which git reads after the tracked true:
-# the automatic step then writes and prints nothing, and
-# `install.sh doctor --verbose` says so.
-# [commit]
-# 	gpgsign = false
+# user.signingkey above every commit fails. Opting this host out of signing
+# is not a line to uncomment here: it is a decision, made on purpose with
+#     git config --file ~/.config/git/config.local commit.gpgsign false
+# git reads that false after the tracked true, the automatic step then
+# writes and prints nothing, and `install.sh doctor --verbose` says so.
+# Leave tag.gpgsign below commented on such a host: a true there keeps tags
+# signed, and the host is not opted out. See "Keep a host from signing" in
+# docs/signing-key.md.
+#
 # Set by install.sh identity, unless this host opted out; uncomment only to
 # set by hand.
 # [tag]

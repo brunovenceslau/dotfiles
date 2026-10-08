@@ -254,7 +254,7 @@ config there, and points at
 commit goes out unsigned only where that does not apply: git does not read
 the tracked config at all (`commit.gpgsign` is unset), a `false` from another
 file turns it off, or the commit took a path the setting does not cover. The
-full list is in
+known paths are in
 [where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
 What refuses an unsigned commit on `main` is in
 [security properties](architecture.md#security-properties-and-where-they-are-enforced).

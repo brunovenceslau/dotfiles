@@ -122,6 +122,22 @@ pass=$((pass + 1))
 if grep -qiE 'BEGIN [A-Z ]*PRIVATE KEY|(ssh-(ed25519|rsa)|ecdsa-sha2-[a-z0-9-]+|sk-ssh-ed25519@openssh.com) AAAA' "$ex"; then
   fail "config.local.example embeds real key material"
 fi
+# tag.forceSignAnnotated defeats `git tag --no-sign` and the opt-out, so the
+# example does not suggest it, not even commented (git reads names in any case).
+ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignannotated "$ex" || :)" "0"
+# The example says to uncomment and edit each line: doing exactly that, with
+# the result included after the tracked config the way the link engine writes
+# ~/.config/git/config (lib/link.sh's _write_git_local_config), must leave
+# commit signing on. An opt-out is a decision, never a line to uncomment.
+# A commented config line is `# [section]` or `# <TAB>key = value`; awk's
+# \t in a regex is POSIX and macOS awk reads it.
+xdg="$work/xdg"; mkdir -p "$xdg/git" "$work/xhome"
+awk '/^# \[/ || /^# \t/ { sub(/^# /, "") } { print }' "$ex" > "$xdg/git/config.local"
+printf '[include]\n\tpath = %s\n[include]\n\tpath = config.local\n' "$work/gitdir/config" > "$xdg/git/config"
+xgc() { HOME="$work/xhome" XDG_CONFIG_HOME="$xdg" git -C "$work/neutral" config "$@"; }
+ck "the uncommented example is the identity it shows" "$(xgc --get user.email)" "you@example.com"
+ck "uncommenting every line of the example keeps commit signing on" \
+  "$(xgc --type=bool --get commit.gpgsign)" "true"
 
 # --- dotfiles-upgrade re-asserts fsckObjects under its scrubbed config ---------
 # Part 2: vgit scrubs GLOBAL/SYSTEM config, so it must pass fsckObjects
@@ -202,6 +218,15 @@ printf '[commit]\n\tgpgsign = false\n' > "$adv/.gitconfig"
 grep -qF 'commit signing is NOT enabled on this host (commit.gpgsign is false).' <<<"$(run_advisory)" \
   && pass=$((pass + 1)) || fail "advisory did not fire with a ~/.gitconfig commit.gpgsign=false"
 rm -f "$adv/.gitconfig"
+# A system-level false is read before the tracked true and loses: commits
+# stay signed, so the advisory still says a host with no key cannot commit,
+# and never calls signing off.
+printf '[user]\n\tname = x\n' > "$adv/gitdir/config.local"
+printf '[commit]\n\tgpgsign = false\n' > "$adv/system.gitconfig"
+out="$(GIT_CONFIG_SYSTEM="$adv/system.gitconfig" run_advisory)"
+grep -qF 'commit signing is on, but user.signingkey is not set, so git refuses every commit.' <<<"$out" \
+  && ! grep -qF 'commit signing is NOT enabled' <<<"$out" \
+  && pass=$((pass + 1)) || fail "a system-level false must lose to the tracked true in the advisory: $out"
 # config.local with identity but no key -> must STILL FIRE (fails closed)
 printf '[user]\n\tname = x\n\temail = x@y\n' > "$adv/gitdir/config.local"
 grep -qF 'git refuses every commit' <<<"$(run_advisory)" \

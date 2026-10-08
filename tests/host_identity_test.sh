@@ -1052,6 +1052,38 @@ lacks "kept as this host's exception" "a false that loses is not the exception"
 rm -f "$HOME/.gitconfig"
 ok
 
+# --- a false in the checkout's own config.local: the exception, not an opt-out
+# The layout older installs used put config.local beside the tracked config,
+# which still includes it by a relative path. Its false turns signing off but
+# is not this host's opt-out (Host.is_local_origin()): doctor reports it as a
+# problem, the advisory keeps it as the host's exception, and the automatic
+# step never says every commit fails, writes beside it, then stays quiet.
+fresh
+export FAKE_AGENT_KEYS="$K1"
+legacy="$work/tracked/config/git/config.local"
+printf '[commit]\n\tgpgsign = false\n' > "$legacy"
+rm -f "$signers"
+idrun
+expect_rc 1 "auto beside a repo-side false, no trust root"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "auto beside a repo-side false printed more than one line: $out"
+lacks "every commit fails" "a repo-side false leaves commits possible, so auto does not say they fail"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+idrun
+expect_rc 0 "auto beside a repo-side false"
+has "identity: wrote user.email" "a repo-side false is not an opt-out: auto still writes"
+has "identity: commit.gpgsign is false (file:$legacy) - kept as this host's exception, so it stays off" "auto names the repo-side false as the exception"
+idrun; expect_rc 0 "auto again beside a repo-side false"
+[ -z "$out" ] || fail "auto is not quiet on a configured host with a repo-side false: $out"
+rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
+expect_rc 0 "check beside a repo-side false"
+has "An explicit false from file:$legacy is kept as this host's exception" "check keeps a repo-side false as the exception"
+rc=0; out="$(cd "$HOME" && "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor beside a repo-side false"
+has "doctor: values: commit.gpgsign = false from file:$legacy, outside $local_cfg, so commits are not signed" "doctor reports a repo-side false as a problem"
+lacks "opt-out;" "doctor does not take a repo-side false for the opt-out"
+rm -f "$legacy"
+ok
+
 # --- config.local must be in the include chain BEFORE anything is written -----
 fresh
 printf 'me@example.com %s\n' "$K1" > "$signers"
@@ -1257,6 +1289,55 @@ printf '[tag]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
 rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?
 has "signing is off against $local_cfg: tag.gpgsign = false from file:$HOME/.gitconfig - see" "a tag.gpgsign override alone"
 rm -f "$HOME/.gitconfig"
+ok
+
+# --- commits_fail_closed() says "every commit fails" only when git does ------
+# A host with no user.signingkey still commits when git has another way to a
+# key (gpg.ssh.defaultKeyCommand), signs with a format other than ssh, or
+# cannot read commit.gpgsign at all (git then dies on the bad boolean, which
+# the advisory and doctor name by its own line). None of these gets the
+# fail-closed words from the automatic step, the advisory or doctor.
+for shape in keycmd format typo; do
+  fresh
+  rm -f "$signers"
+  case "$shape" in
+    keycmd) printf '[gpg "ssh"]\n\tdefaultKeyCommand = ssh-add -L\n' > "$local_cfg" ;;
+    format) printf '[gpg]\n\tformat = openpgp\n' > "$local_cfg" ;;
+    typo) printf '[commit]\n\tgpgsign = flase\n' > "$local_cfg" ;;
+  esac
+  idrun
+  expect_rc 1 "auto, $shape, no trust root"
+  lacks "every commit fails" "auto does not say every commit fails ($shape)"
+  rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
+  expect_rc 0 "check, $shape"
+  lacks "user.signingkey is not set, so git refuses every commit" "the advisory does not say every commit fails ($shape)"
+  rc=0; out="$(cd "$HOME" && "$installer" doctor 2>&1)" || rc=$?
+  expect_rc 1 "doctor, $shape"
+  lacks "user.signingkey is not set, so git refuses every commit" "doctor does not say every commit fails ($shape)"
+  if [ "$shape" = typo ]; then
+    has "doctor: values: commit.gpgsign is not a boolean git reads" "doctor names the unreadable commit.gpgsign"
+  fi
+done
+# The same in an SSH session: the line keeps its plain "to set it on
+# purpose" form when commits do not fail closed, for a host with a key but
+# no email, one whose false comes from ~/.gitconfig (the exception), and one
+# whose commit.gpgsign cannot be read.
+for shape in keyed exception typo; do
+  fresh
+  printf 'me@example.com %s\n' "$K1" > "$signers"
+  case "$shape" in
+    keyed) printf '[user]\n\tsigningkey = key::%s\n' "$K1" > "$local_cfg" ;;
+    exception) printf '[commit]\n\tgpgsign = false\n' > "$HOME/.gitconfig" ;;
+    typo) printf '[commit]\n\tgpgsign = flase\n' > "$local_cfg" ;;
+  esac
+  rc=0; out="$(SSH_CONNECTION='10.0.0.1 22 10.0.0.2 22' bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto' _ "$installer" 2>&1)" || rc=$?
+  expect_rc 1 "auto in an SSH session, $shape"
+  [ "$(grep -c . <<<"$out")" -eq 1 ] || fail "auto over SSH printed more than one line ($shape): $out"
+  has "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run $installer identity to set it on purpose" \
+    "auto over SSH keeps the plain line when commits do not fail closed ($shape)"
+  lacks "every commit fails" "auto over SSH does not say every commit fails ($shape)"
+  rm -f "$HOME/.gitconfig"
+done
 ok
 
 # --- .bak of an empty config.local --------------------------------------------

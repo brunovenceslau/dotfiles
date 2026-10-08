@@ -168,8 +168,8 @@ The tracked git config turns commit signing on, so until this machine has a
 signing key, git refuses every commit, and the installer says so. To set the
 key up, see
 [Provision a new mac host](docs/new-mac-host.md#5-set-identity-and-signing).
-Signing is mandatory only where git reads the tracked config; the paths that
-still produce an unsigned commit are in
+Signing is mandatory only where git reads the tracked config; the known
+paths that still produce an unsigned commit are in
 [where commit signing is mandatory](docs/shell-reference.md#where-commit-signing-is-mandatory).
 Rotating, revoking and opting a host out are in
 [Manage this host's signing key](docs/signing-key.md).
