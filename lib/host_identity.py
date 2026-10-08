@@ -591,12 +591,27 @@ def git_env(ceiling):
     return env
 
 
-# Where every git call runs: (TemporaryDirectory, its path as getcwd() spells
-# it, that path's parent), made once per process by git_isolate() and removed
-# by git_release(). _git_refusal is why git cannot run outside a repository
-# here, once git_isolate() has found a reason.
+class GitPlace(object):
+    """Where every git call of this process runs, decided once by
+    git_isolate() and undone by git_release().
+
+    made     the empty directory, recorded as soon as it exists, so
+             git_release() removes it whatever happens after
+    cwd      that directory as getcwd() spells it, and
+    ceiling  its parent: both set only once git has been proven to find
+             no repository from there
+    refusal  why git cannot run outside a repository here, or None
+
+    git() runs git only when refusal is None and cwd is set."""
+
+    def __init__(self):
+        self.made = None
+        self.cwd = None
+        self.ceiling = None
+        self.refusal = None
+
+
 _git_place = None
-_git_refusal = None
 
 
 def _run_git(args, cwd, env):
@@ -618,55 +633,51 @@ def _run_git(args, cwd, env):
 
 
 def _getcwd_in(path):
-    """PATH as getcwd() spells it for a process started there. git compares
-    exactly that string with its ceilings, and on a case-insensitive or
-    normalizing file system (APFS) neither PATH nor realpath(PATH) need spell
-    it the same way. Asked of a child, so this process's own working
-    directory never changes."""
-    p = subprocess.run(
-        [sys.executable, "-I", "-S", "-c", "import os, sys; sys.stdout.buffer.write(os.getcwdb())"],
-        cwd=path,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        timeout=30,
-    )
-    if p.returncode != 0 or not p.stdout.startswith(b"/"):
-        raise OSError(errno.EIO, "no working directory reported")
-    return os.fsdecode(p.stdout)
+    """PATH as getcwd() spells it from inside. git compares exactly that
+    string with its ceilings, and on a case-insensitive or normalizing file
+    system (APFS) neither PATH nor realpath(PATH) need spell it the same way.
+    This process steps in and back out: its working directory is restored
+    through a descriptor, so the way back does not depend on a path."""
+    back = os.open(".", os.O_RDONLY)
+    try:
+        os.chdir(path)
+        return os.getcwd()
+    finally:
+        try:
+            os.fchdir(back)
+        finally:
+            os.close(back)
 
 
-def _isolate():
-    """None once git can run outside any repository, else the reason."""
-    global _git_place
+def _isolate(place):
+    """None once git is proven to run outside any repository from PLACE,
+    else the reason it cannot."""
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         value = os.environ.get(name)
         if value and not os.path.isabs(value):
             return "%s=%s is not an absolute path, so git would look for it where git runs" % (name, value)
     try:
-        tmp = tempfile.TemporaryDirectory(prefix="host_identity.git.")
+        place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+        cwd = _getcwd_in(place.made)
     except OSError as e:
-        return "cannot make an empty directory for git: %s" % e
-    _git_place = (tmp, None, None)  # from here on git_release() removes it
-    try:
-        cwd = _getcwd_in(tmp.name)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        return "cannot read the working directory of %s: %s" % (tmp.name, e)
+        return "cannot make an empty directory for git and enter it: %s" % e
     ceiling = os.path.dirname(cwd)
     # ':' separates ceilings: a path holding one would be half-applied.
     if os.pathsep in ceiling:
         return "%s holds %r, which GIT_CEILING_DIRECTORIES cannot express" % (ceiling, os.pathsep)
-    # Another user who can rename entries here could swap the empty
-    # directory for one inside a repository after the check below.
+    # Anyone who can rename entries here could swap the empty directory for
+    # one inside a repository. Only the plain case is refused; the rest is a
+    # deferred decision (docs/architecture.md, "Deferred decisions").
     try:
         st = os.stat(ceiling)
     except OSError as e:
         return "cannot stat %s: %s" % (ceiling, e.strerror)
     if st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX:
         return "%s is writable by every user and not sticky" % ceiling
-    _git_place = (tmp, cwd, ceiling)
     # The proof, not the premise: git itself must find no repository from
-    # there. In the C locale, so its message can be matched.
+    # there. In the C locale, so its message can be matched; any other
+    # failure (a config file git cannot parse, a repository it refuses as
+    # dubiously owned) means git cannot start here at all.
     env = git_env(ceiling)
     env["LC_ALL"] = "C"
     env.pop("LANGUAGE", None)
@@ -674,7 +685,8 @@ def _isolate():
     if rc == 0:
         return "git finds a repository (%s) from the empty directory %s" % (out, cwd)
     if "not a git repository" not in err:
-        return "git rev-parse in %s did not report the absence of a repository: %s" % (cwd, err or "exit %d" % rc)
+        return "git cannot start in %s (%s)" % (cwd, err or "exit %d" % rc)
+    place.cwd, place.ceiling = cwd, ceiling
     return None
 
 
@@ -690,37 +702,39 @@ def git_isolate():
     and global levels are read. Not a GIT_DIR that cannot exist: git then
     dies on every read that evaluates an [includeIf "gitdir:..."] condition
     (rc 128, "Invalid path"). The parent is taken from the path getcwd()
-    gives a process started there (_getcwd_in()), the string git itself
+    gives inside the directory (_getcwd_in()), the string git itself
     compares with its ceilings, and git must then report that it finds no
     repository there (_isolate()). With the empty directory as git's working
     directory, a relative GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM would name a
     file inside it, so such a value is refused. Decided once, then
-    remembered."""
-    global _git_refusal
-    if _git_place is None and _git_refusal is None:
-        _git_refusal = _isolate()
-    return _git_refusal
+    remembered; an interrupted decision is a refusal."""
+    global _git_place
+    if _git_place is None:
+        _git_place = GitPlace()
+        try:
+            _git_place.refusal = _isolate(_git_place)
+        except BaseException:
+            _git_place.refusal = "the check that git runs outside any repository was interrupted"
+            raise
+    return _git_place.refusal
 
 
 def git_release():
-    """Remove the empty directory and forget the decision."""
-    global _git_place, _git_refusal
-    if _git_place is not None:
-        try:
-            _git_place[0].cleanup()
-        except OSError:
-            pass
-    _git_place = _git_refusal = None
+    """Remove the empty directory and forget the decision. Explicit, not a
+    finalizer's: the directory is gone when this returns."""
+    global _git_place
+    if _git_place is not None and _git_place.made is not None:
+        shutil.rmtree(_git_place.made, ignore_errors=True)
+    _git_place = None
 
 
 def git(args):
     """Run git outside any repository (git_isolate()); return (rc, stdout
     without the final newline, stderr)."""
     reason = git_isolate()
-    if reason is not None:
-        return 127, "", reason
-    _, cwd, ceiling = _git_place
-    return _run_git(args, cwd, git_env(ceiling))
+    if reason is not None or _git_place.cwd is None:
+        return 127, "", reason or "git has not been proven to run outside a repository"
+    return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
 
 
 class Value(object):
@@ -1293,7 +1307,9 @@ def select(host, pairs, email):
 
 
 def last_origin(host, key):
-    """The origin git reads KEY from last (the one that wins), or a stand-in."""
+    """The origin git reads KEY from last (the one that wins), or a stand-in.
+    Only ever names a file in a message, so a read error gets the stand-in
+    too."""
     origins = host.origins(key)
     return origins[-1][0] if origins else "another level"
 
@@ -1505,7 +1521,10 @@ def rotate(host):
         warn("identity: --rotate needs user.email - run %s identity first" % host.installer)
         return 1
     email = email_v.text
-    origins = host.origins("user.signingkey")
+    origins, err = host.origins_or_error("user.signingkey")
+    if err is not None:
+        warn("identity: --rotate: cannot read user.signingkey (%s) - writing nothing" % err)
+        return 1
     if not origins:
         warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % host.installer)
         return 1
@@ -1576,7 +1595,10 @@ def check_signing_key(host):
         return True
     if fmt.text != "ssh":
         return False  # a GPG key id is not ours to judge
-    origins = host.origins("user.signingkey")
+    origins, err = host.origins_or_error("user.signingkey")
+    if err is not None:
+        warn("identity: cannot read user.signingkey (%s) - not checked" % err)
+        return True
     if not origins:
         return False
     reported = False
@@ -1634,6 +1656,8 @@ def stale_line(host):
     report of _signing_advisory."""
     if host.effective("gpg.format").text != "ssh":
         return 0
+    # origins(): a read error is nothing to judge, and this report stays
+    # quiet on what it cannot judge (identity and check name the error).
     origins = host.origins("user.signingkey")
     key = resolve_signingkey(origins[-1][1], host.home)[0] if origins else None
     stale = stale_reason(host, key) if key is not None else None
@@ -1778,5 +1802,14 @@ def main(argv):
     return rc
 
 
+def entry(argv):
+    """main(), with an interrupt as the shell's 130 instead of a traceback.
+    main()'s finally has already removed git's empty directory by then."""
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        return 130
+
+
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(entry(sys.argv[1:]))

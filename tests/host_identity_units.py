@@ -88,13 +88,20 @@ def git_units(mod, scratch):
     os.mkdir(bindir)
     record = os.path.join(scratch, "git-env")
     cwd_record = os.path.join(scratch, "git-cwd")
+    # STUB_REVPARSE picks the answer to `git rev-parse`: git's own outside a
+    # repository by default, or a failure that is not that answer.
     stub(bindir, "git", 'if [ "$1" = rev-parse ]; then\n'
+         '  case "${STUB_REVPARSE:-}" in\n'
+         '    dubious) echo "fatal: detected dubious ownership in repository at \'/x\'" >&2; exit 128 ;;\n'
+         '    silent) exit 127 ;;\n'
+         '  esac\n'
          '  echo "fatal: not a git repository (or any of the parent directories): .git" >&2; exit 128\n'
          'fi\nenv > "%s"\npwd -P > "%s"\nls -A > "%s.ls"\nexit 1\n' % (record, cwd_record, cwd_record))
     os.environ["PATH"] = bindir + os.pathsep + real_path
     tmpdir = os.path.join(scratch, "tmp")
     os.mkdir(tmpdir, 0o700)
     use_tmpdir(mod, tmpdir)
+    here = os.getcwd()
     mod.git(["config", "--get", "user.email"])
     with open(record) as fh:
         seen = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
@@ -113,8 +120,17 @@ def git_units(mod, scratch):
     with open(cwd_record) as fh:
         check(fh.read().strip() == ran_in and os.listdir(tmpdir) == [os.path.basename(ran_in)],
               "every git call of one process shares that one directory")
+    made = mod._git_place.made
+    check(os.path.realpath(made) == ran_in, "the directory made is the one git ran from")
     mod.git_release()
-    check(not os.path.exists(ran_in) and os.listdir(tmpdir) == [], "git_release() removes it")
+    check(not os.path.exists(made) and os.listdir(tmpdir) == [] and mod._git_place is None,
+          "git_release() removes it at once, while this test still holds its path")
+    check(os.getcwd() == here, "deciding where git runs leaves this process's working directory as it was")
+    try:
+        mod._getcwd_in(os.path.join(scratch, "missing"))
+        check(False, "_getcwd_in() of a missing directory raises")
+    except OSError:
+        check(os.getcwd() == here, "a failed _getcwd_in() leaves the working directory as it was")
 
     def refused(what, needle):
         if os.path.exists(record):
@@ -144,16 +160,85 @@ def git_units(mod, scratch):
     os.chmod(open_dir, 0o700)
 
     use_tmpdir(mod, tmpdir)
-    real_tempdir = mod.tempfile.TemporaryDirectory
+    real_mkdtemp = mod.tempfile.mkdtemp
 
     def no_tempdir(*a, **k):
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    mod.tempfile.TemporaryDirectory = no_tempdir
+    mod.tempfile.mkdtemp = no_tempdir
     try:
         refused("no empty directory can be made", "No space left on device")
     finally:
-        mod.tempfile.TemporaryDirectory = real_tempdir
+        mod.tempfile.mkdtemp = real_mkdtemp
+
+    for answer, needle in (("dubious", "git cannot start in"), ("silent", "(exit 127)")):
+        use_tmpdir(mod, tmpdir)
+        os.environ["STUB_REVPARSE"] = answer
+        refused("git rev-parse failing with %s" % answer, needle)
+        check(answer != "dubious" or "detected dubious ownership" in mod.git_isolate(),
+              "the refusal quotes git's own error")
+        del os.environ["STUB_REVPARSE"]
+    mod.git_release()
+
+    real_stat = mod.os.stat
+
+    def no_stat(path, *a, **k):
+        if path == os.path.realpath(tmpdir):
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_stat(path, *a, **k)
+
+    use_tmpdir(mod, tmpdir)
+    mod.os.stat = no_stat
+    try:
+        refused("the ceiling cannot be stat()ed", "cannot stat %s: Permission denied" % os.path.realpath(tmpdir))
+    finally:
+        mod.os.stat = real_stat
+
+    # The decision is one state: git runs only once it is proven, and an
+    # interrupted decision stays a refusal.
+    mod.git_release()
+    mod._git_place = mod.GitPlace()
+    rc, _, err = mod.git(["config", "--get", "user.email"])
+    check(rc == 127 and "not been proven" in err and not os.path.exists(record),
+          "git() runs nothing for a place that has no proven directory")
+    mod.git_release()
+    real_isolate = mod._isolate
+
+    def interrupted(place):
+        place.made = mod.tempfile.mkdtemp(prefix="host_identity.git.")
+        raise KeyboardInterrupt
+
+    use_tmpdir(mod, tmpdir)
+    mod._isolate = interrupted
+    try:
+        try:
+            mod.git_isolate()
+            check(False, "an interrupt in the decision propagates")
+        except KeyboardInterrupt:
+            pass
+    finally:
+        mod._isolate = real_isolate
+    rc, _, err = mod.git(["config", "--get", "user.email"])
+    check(rc == 127 and "interrupted" in err, "an interrupted decision is a refusal, not a success")
+    mod.git_release()
+    check(os.listdir(tmpdir) == [], "the directory an interrupted decision made is removed")
+
+    # entry(): ^C is exit 130, and the directory is gone by then.
+    real_run = mod.run
+
+    def interrupt_run(host, mode, name, report_stale):
+        mod.git(["config", "--get", "user.email"])
+        raise KeyboardInterrupt
+
+    use_tmpdir(mod, tmpdir)
+    os.environ["HOME"] = scratch
+    mod.run = interrupt_run
+    try:
+        rc = mod.entry(["--config-local", os.path.join(scratch, "c.local"), "--mode", "check"])
+    finally:
+        mod.run = real_run
+    check(rc == 130 and os.listdir(tmpdir) == [] and mod._git_place is None,
+          "an interrupt exits 130 with git's directory removed")
 
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         use_tmpdir(mod, tmpdir)
@@ -180,7 +265,7 @@ def git_units(mod, scratch):
     link = os.path.join(scratch, "tmp-link")
     os.symlink(inside, link)
     use_tmpdir(mod, link)
-    check(mod.git_isolate() is None and mod._git_place[2] == os.path.realpath(inside),
+    check(mod.git_isolate() is None and mod._git_place.ceiling == os.path.realpath(inside),
           "a TMPDIR that is a symlink into a repository passes, its ceiling spelled as getcwd() spells it")
     real_env = mod.git_env
     mod.git_env = lambda ceiling: {k: v for k, v in real_env(ceiling).items() if k != "GIT_CEILING_DIRECTORIES"}
@@ -236,6 +321,32 @@ def main(argv):
     check(reported and said_check == ["identity: cannot read gpg.format (fatal: bad config line 3) - user.signingkey not checked"],
           "check_signing_key names git's error instead of staying silent")
     check(included == (False, "fatal: bad config line 3"), "includes_local carries git's error, not a missing include")
+
+    def show_origin_fails(args):
+        if "--show-origin" in args:
+            return 128, "", "fatal: bad config line 9"
+        if args[-1] == "gpg.format":
+            return 0, "ssh", ""
+        if args[-1] == "user.email":
+            return 0, "me@example.com", ""
+        return 1, "", ""
+
+    mod.git = show_origin_fails
+    try:
+        host = mod.Host(scratch, os.path.join(scratch, "config.local"), "INSTALLER")
+        mod._captured = []
+        reported = mod.check_signing_key(host)
+        said_check = mod._captured
+        mod._captured = []
+        rc = mod.rotate(host)
+        said_rotate = mod._captured
+    finally:
+        mod._captured = None
+        mod.git = real_git
+    check(reported and said_check == ["identity: cannot read user.signingkey (fatal: bad config line 9) - not checked"],
+          "check_signing_key names a failed user.signingkey read instead of taking it for unset")
+    check(rc == 1 and said_rotate == ["identity: --rotate: cannot read user.signingkey (fatal: bad config line 9) - writing nothing"],
+          "--rotate names a failed user.signingkey read instead of 'not set'")
 
     # --- keys: types, exact blob structure, agent noise ---------------------
     for kind in ("rsa", "ecdsa"):

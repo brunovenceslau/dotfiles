@@ -379,6 +379,20 @@ for setting in "TMPDIR=$work/co:lon" "GIT_CONFIG_GLOBAL=.config/git/config"; do
   expect_rc 0 "$setting, check"; has "identity: not reading the git config: " "$setting, check"
 done
 has "GIT_CONFIG_GLOBAL=.config/git/config is not an absolute path" "a relative GIT_CONFIG_GLOBAL is named"
+# A global config git cannot parse: git cannot start at all, and the step
+# quotes git's own error rather than calling it a repository question.
+fresh
+export FAKE_AGENT_KEYS="$K1"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+printf '[user\n' >> "$XDG_CONFIG_HOME/git/config"
+rc=0; out="$(cd "$HOME" && "$installer" identity 2>&1)" || rc=$?
+expect_rc 1 "an unparsable global config, identity"
+has "identity: not reading the git config: git cannot start in " "an unparsable global config, identity"
+has "bad config line" "an unparsable global config: git's error is quoted"
+lacks "absence of a repository" "an unparsable global config, identity"; unwritten "an unparsable global config"
+rc=0; out="$(cd "$HOME" && python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" \
+  --mode check 2>&1)" || rc=$?
+expect_rc 0 "an unparsable global config, check"; has "git cannot start in " "an unparsable global config, check"
 [ -z "$(ls -A "$work/co:lon")" ] || fail "a refused run left a directory in TMPDIR: $(ls -A "$work/co:lon")"
 ok
 
