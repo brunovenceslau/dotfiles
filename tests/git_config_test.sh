@@ -69,12 +69,23 @@ ck "core.pager degrades to less without it"  "$(gc --get core.pager | grep -cE '
 ck "diffFilter wires diff-so-fancy"          "$(gc --get interactive.diffFilter | grep -c diff-so-fancy)" "1"
 
 # --- NO identity or signing key baked into the tracked config -----------------
-# user.*/commit.gpgsign are per-host -> they must come only from config.local, so a
-# fresh clone with no key can still commit. Absent (get returns nonzero) = correct.
+# user.* are per-host -> they must come only from config.local. Absent (get
+# returns nonzero) = correct.
 ck "no user.name in tracked config"  "$(gc --get user.name || echo UNSET)" "UNSET"
 ck "no user.email in tracked config" "$(gc --get user.email || echo UNSET)" "UNSET"
 ck "no signingkey in tracked config" "$(gc --get user.signingkey || echo UNSET)" "UNSET"
-ck "no commit.gpgsign in tracked config" "$(gc --get commit.gpgsign || echo UNSET)" "UNSET"
+# Commit signing is mandatory in the tracked file itself; tags stay per host,
+# written by the identity step. Read from the file alone, without includes, so
+# only the tracked file can answer.
+tracked="$repo_root/config/git/config"
+ck "the tracked config sets commit.gpgsign true and not tag.gpgsign" \
+  "$(git config --file "$tracked" --get commit.gpgsign):$(git config --file "$tracked" --get tag.gpgsign || echo UNSET)" \
+  "true:UNSET"
+for k in tag.forceSignAnnotated user.useConfigOnly; do
+  ck "the tracked config leaves $k unset" "$(git config --file "$tracked" --get "$k" || echo UNSET)" "UNSET"
+done
+ck "the tracked config sets no gpg.ssh.* key" \
+  "$(git config --file "$tracked" --get-regexp '^gpg\.ssh\.' || echo UNSET)" "UNSET"
 
 # --- the RELATIVE include resolves through the symlink ------------------------
 # Drop a config.local next to the config (in the copy the symlink points at) and
@@ -85,10 +96,10 @@ cat > "$work/gitdir/config.local" <<'EOF'
 	name = Host Identity
 	email = id@host
 [commit]
-	gpgsign = true
+	gpgsign = false
 EOF
 ck "relative include resolves via symlink (user.name)" "$(gc --get user.name)" "Host Identity"
-ck "config.local can enable signing"                   "$(gc --get commit.gpgsign)" "true"
+ck "config.local can turn the tracked signing off"     "$(gc --get commit.gpgsign)" "false"
 # and it OVERRIDES nothing it shouldn't - fsck still on
 ck "config.local present, fsck still on"               "$(gc --get fetch.fsckObjects)" "true"
 rm -f "$work/gitdir/config.local"
@@ -147,6 +158,11 @@ cp -R "$repo_root/config/git" "$adv/gitdir"
 # case below start dirty. Drop it - each case from here plants its own config.local.
 rm -f "$adv/gitdir/config.local"
 ln -s "$adv/gitdir" "$adv/.config/git"
+# Never an agent of the caller's (a forwarded one holds another machine's
+# keys): the advisory asks the agent about a configured key.
+unset SSH_AUTH_SOCK SSH_AGENT_PID GIT_CONFIG_GLOBAL
+# A throwaway public key (the same fixture as host_identity_test's K1).
+K1='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7ZriufNPIzaGKLCOFNHpr6/MYnrT97GT7G1THBmdJR'
 run_advisory() {   # echoes the advisory's output (empty when silent)
   HOME="$adv" XDG_CONFIG_HOME="$adv/.config" \
     bash -c 'set -euo pipefail; . "$1/install.sh"; _signing_advisory' _ "$repo_root" 2>&1
@@ -156,39 +172,50 @@ run_advisory() {   # echoes the advisory's output (empty when silent)
 # and pipefail propagates that as the pipeline status - so a firing advisory would
 # intermittently read as "did not fire". A here-string has no upstream writer to
 # signal, so the result is the grep's alone.
-# no config.local -> commit.gpgsign unset -> advisory FIRES
-grep -qi 'commit signing is NOT enabled' <<<"$(run_advisory)" \
-  && pass=$((pass + 1)) || fail "advisory did not fire with no config.local"
-# …and it names WHERE to fix it (the untracked config.local), not a bare "enable it".
-grep -q 'config/git/config.local' <<<"$(run_advisory)" \
-  && pass=$((pass + 1)) || fail "advisory must point at ~/.config/git/config.local"
-# config.local enabling gpgsign -> SILENT (tests the effective value + --includes)
-printf '[commit]\n\tgpgsign = true\n' > "$adv/gitdir/config.local"
-[ -z "$(run_advisory)" ] || fail "advisory fired despite commit.gpgsign=true"
-pass=$((pass + 1))
+# no config.local -> the tracked commit.gpgsign = true with no key: git refuses
+# every commit, so the advisory FIRES and names both ways out
+out="$(run_advisory)"
+grep -qF 'commit signing is on, but user.signingkey is not set, so git refuses every commit.' <<<"$out" \
+  && pass=$((pass + 1)) || fail "the advisory says commits fail without a key: $out"
+grep -qF 'install.sh identity on this host, or opt it out of signing' <<<"$out" \
+  && pass=$((pass + 1)) || fail "the advisory names install.sh identity and the opt-out: $out"
+# config.local with a signing key -> no refusal line (the key's own checks are
+# host_identity_test's; no agent is reachable here, see above)
+printf '[user]\n\tsigningkey = key::%s\n' "$K1" > "$adv/gitdir/config.local"
+grep -qF 'git refuses every commit' <<<"$(run_advisory)" \
+  && fail "the advisory says commits fail beside a signing key" || pass=$((pass + 1))
 # config.local saying gpgsign=false -> SILENT: the host opted out of signing
 # on purpose, and only config.local can say so
 printf '[user]\n\tname = x\n[commit]\n\tgpgsign = false\n' > "$adv/gitdir/config.local"
 [ -z "$(run_advisory)" ] || fail "advisory fired on a host that opted out in config.local"
 pass=$((pass + 1))
-# ...while a false from any other level must STILL FIRE (effective value, not
-# mere file existence): it may be nobody's decision for this host
-printf '[user]\n\tname = x\n' > "$adv/gitdir/config.local"
-printf '[commit]\n\tgpgsign = false\n' > "$adv/sysconfig"
-grep -qi 'commit signing is NOT enabled' <<<"$(GIT_CONFIG_SYSTEM="$adv/sysconfig" run_advisory)" \
-  && pass=$((pass + 1)) || fail "advisory did not fire with a system commit.gpgsign=false"
-rm -f "$adv/sysconfig"
-# config.local with identity but gpgsign UNSET -> must STILL FIRE
-printf '[user]\n\tname = x\n\temail = x@y\n' > "$adv/gitdir/config.local"
-grep -qi 'commit signing is NOT enabled' <<<"$(run_advisory)" \
-  && pass=$((pass + 1)) || fail "advisory did not fire with gpgsign unset (identity-only config.local)"
-# --type=bool: a truthy variant (yes) must be SILENT, not a literal-string misfire
-printf '[commit]\n\tgpgsign = yes\n' > "$adv/gitdir/config.local"
-[ -z "$(run_advisory)" ] || fail "advisory misfired on commit.gpgsign=yes (needs --type=bool)"
+# --type=bool: a falsy variant (no) opts out too, not a literal-string misread
+printf '[commit]\n\tgpgsign = no\n' > "$adv/gitdir/config.local"
+[ -z "$(run_advisory)" ] || fail "advisory misread commit.gpgsign=no (needs --type=bool)"
 pass=$((pass + 1))
+# ...while a false from any other level must STILL FIRE (effective value, not
+# mere file existence): it may be nobody's decision for this host. From
+# ~/.gitconfig, which git reads after the tracked true; a system-level false
+# is read before it, and loses.
+printf '[user]\n\tname = x\n' > "$adv/gitdir/config.local"
+printf '[commit]\n\tgpgsign = false\n' > "$adv/.gitconfig"
+grep -qF 'commit signing is NOT enabled on this host (commit.gpgsign is false).' <<<"$(run_advisory)" \
+  && pass=$((pass + 1)) || fail "advisory did not fire with a ~/.gitconfig commit.gpgsign=false"
+rm -f "$adv/.gitconfig"
+# config.local with identity but no key -> must STILL FIRE (fails closed)
+printf '[user]\n\tname = x\n\temail = x@y\n' > "$adv/gitdir/config.local"
+grep -qF 'git refuses every commit' <<<"$(run_advisory)" \
+  && pass=$((pass + 1)) || fail "advisory did not fire with no key (identity-only config.local)"
+# git does not read the tracked config -> commit.gpgsign unset: the advisory
+# points at the include repair, not at the signing setup
+printf '[user]\n\tname = x\n' > "$adv/plain.gitconfig"
+out="$(GIT_CONFIG_GLOBAL="$adv/plain.gitconfig" run_advisory)"
+grep -qF 'commit signing is NOT enabled on this host (commit.gpgsign is unset).' <<<"$out" \
+  && grep -qF 'see "Framework git settings do not apply" in docs/troubleshooting.md.' <<<"$out" \
+  && pass=$((pass + 1)) || fail "an unset commit.gpgsign must point at the include repair: $out"
 # a residual ~/.gitconfig carrying signing settings warns (the XDG-only clash: a
 # legacy GPG key vs the framework's gpg.format=ssh makes commits fail closed while
-# gpgsign still reads true). gpgsign=true keeps the first advisory silent.
+# gpgsign still reads true).
 printf '[commit]\n\tgpgsign = true\n' > "$adv/gitdir/config.local"
 printf '[user]\n\tsigningkey = ABCD1234DEADBEEF\n' > "$adv/.gitconfig"
 grep -qF '~/.gitconfig sets user.signingkey' <<<"$(run_advisory)" \

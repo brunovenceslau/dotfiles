@@ -86,8 +86,10 @@ and records every link it creates in `$XDG_STATE_HOME/dotfiles/manifest`.
 
 The installer tries to set your git identity and signing key from this host's
 allowed-signers file and ssh-agent. On a fresh host it has neither yet, so it
-prints one `identity:` line saying what is missing, then a warning that commit
-signing is not enabled. Both are expected here: step 5 sets them up.
+prints one `identity:` line saying what is missing and that every commit fails
+until this host has a signing key, then a warning that git refuses every
+commit. Both are expected here: the tracked git config turns commit signing
+on, and step 5 sets the key up.
 
 ## 4. Remove a legacy `~/.gitconfig`
 
@@ -103,10 +105,9 @@ cp ~/.gitconfig ~/.gitconfig.bak && rm ~/.gitconfig
 test -e ~/.gitconfig || echo "removed"
 ```
 
-A legacy `~/.gitconfig` usually carried `commit.gpgsign = true`, so commits
-are unsigned from here until step 5 turns signing on in `config.local`. Move
-any other setting you still want, such as an alias, into
-`~/.config/git/config.local`.
+The framework's own git config turns commit signing on, so from here until
+step 5 sets this host's key, every commit fails. Move any other setting you
+still want, such as an alias, into `~/.config/git/config.local`.
 
 Other leftovers from a prezto or antidote setup are not touched by the installer
 and are safe to delete once the new shell works:
@@ -184,12 +185,13 @@ skip to item 5.
    On a fresh host it prints:
 
    ```text
-   install: identity: wrote user.name, user.email, user.signingkey, commit.gpgsign, tag.gpgsign, gpg.ssh.allowedSignersFile to /Users/you/.config/git/config.local
+   install: identity: wrote user.name, user.email, user.signingkey, tag.gpgsign, gpg.ssh.allowedSignersFile to /Users/you/.config/git/config.local
    ```
 
    It names only the keys it added, and never overwrites a value already
-   set. If it says it is writing nothing, its message names the missing
-   piece; the fixes are in
+   set. `commit.gpgsign` is not among them: the tracked config sets it. If
+   it says it is writing nothing, its message names the missing piece; the
+   fixes are in
    [the installer did not set the git identity](troubleshooting.md#the-installer-did-not-set-the-git-identity).
 
 6. Check the result. `doctor` prints nothing when the identity and signing
@@ -218,14 +220,14 @@ ssh-agent. Without them, set the values yourself:
 git config --file ~/.config/git/config.local user.name  "Your Name"
 git config --file ~/.config/git/config.local user.email "you@example.com"
 git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.pub
-git config --file ~/.config/git/config.local commit.gpgsign true
 git config --file ~/.config/git/config.local gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
 git -C ~ config --show-origin --get user.signingkey
 ```
 
 The last line names `~/.config/git/config.local`. The tracked config sets
-`gpg.format = ssh` and carries no key, so a clone without one can still
-commit. Verify with the scratch-repository commit in item 6.
+`gpg.format = ssh` and `commit.gpgsign = true` and carries no key, so until
+`user.signingkey` is set every commit fails. Verify with the
+scratch-repository commit in item 6.
 
 ## 6. Install the packages
 

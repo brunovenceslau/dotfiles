@@ -95,9 +95,9 @@ child's pull request. Only the branch contents need the rebase.
 
 `git rebase` rewrites commits, which strips their signatures. With
 `commit.gpgsign` off, a plain `git rebase` leaves the replayed commits unsigned
-and GitHub silently drops the Verified badge. This framework deliberately omits
-`commit.gpgsign` from the tracked config so a keyless clone can commit, so
-always pass `-c commit.gpgsign=true` explicitly.
+and GitHub silently drops the Verified badge. The tracked config turns it on,
+but only where git reads that config, and a host may opt out, so always pass
+`-c commit.gpgsign=true` explicitly.
 
 ## Retargeting a non-compliant PR
 

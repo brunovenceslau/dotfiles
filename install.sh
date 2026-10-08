@@ -598,7 +598,9 @@ EOF
 # `--mode auto` is the automatic step the `install` and `link` arms run (and so
 # every dotfiles-upgrade, which re-enters `link`): it writes only what is
 # absent, is quiet once the host signs, prints ONE line (naming
-# "$DOTFILES/install.sh identity" for the details) when it cannot act, does
+# "$DOTFILES/install.sh identity" for the details) when it cannot act, which
+# says every commit fails when the tracked commit.gpgsign = true is left with
+# no signing key, does
 # nothing in an SSH session (a forwarded agent holds another machine's keys),
 # writes and prints nothing on a host that opted out of signing (a
 # commit.gpgsign = false in config.local itself; `doctor` names it), never
@@ -648,7 +650,8 @@ do_doctor() {
 
 # authoring-side advisory, run by the `install` arm after the identity step.
 # What it says is decided in ONE place, lib/host_identity.py's advisory()
-# (`--mode check`): a host that commits unsigned, a ~/.gitconfig that shadows
+# (`--mode check`): a host that cannot commit for want of a signing key, one
+# that commits unsigned, a ~/.gitconfig that shadows
 # the XDG config, a stale key, a signing setting that a later file overrides.
 # It says nothing about signing on a host that opted out (a commit.gpgsign =
 # false in config.local). Non-fatal. Quiet when python3 is unusable: the

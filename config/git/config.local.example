@@ -10,7 +10,7 @@
 #
 # Pick one way to fill it, not both:
 #   - run `./install.sh identity --name "Full Name"` from the checkout. It
-#     writes user.name, user.email, user.signingkey, the two gpgsign keys and
+#     writes user.name, user.email, user.signingkey, tag.gpgsign and
 #     gpg.ssh.allowedSignersFile from this host's allowed-signers file and
 #     ssh-agent, never overwriting a value already set. No copy is needed;
 #   - or copy this file and set every value by hand:
@@ -32,18 +32,17 @@
 # 	# matching private key through the ssh-agent.
 # 	signingkey = ~/.ssh/id_signing.pub
 
-# Set by install.sh identity; uncomment only to set by hand. Kept in .local,
-# not the tracked config, so cloning on a machine without a key still lets
-# you commit. An explicit `gpgsign = false` under [commit] instead opts this
-# host out of signing: the automatic step then writes and prints nothing, and
+# The tracked config already sets commit.gpgsign = true, so with no
+# user.signingkey above every commit fails. A host that must not sign opts
+# out with an explicit false here, which git reads after the tracked true:
+# the automatic step then writes and prints nothing, and
 # `install.sh doctor --verbose` says so.
 # [commit]
-# 	gpgsign = true
+# 	gpgsign = false
+# Set by install.sh identity, unless this host opted out; uncomment only to
+# set by hand.
 # [tag]
 # 	gpgsign = true
-# 	# Refuse to create an ANNOTATED tag unsigned. It makes `git tag -a` fail on
-# 	# a host with no signing key, so set it only where tags are signed.
-# 	forceSignAnnotated = true
 
 # The allowed-signers file, one `<email> <keytype> <key>` line per trusted
 # key: git verifies signatures against it (`git log --show-signature`), and

@@ -245,8 +245,12 @@ The difference between retiring and revoking is explained in
 
 ## Keep a host from signing
 
-A host can choose not to sign. Set an explicit `false` in `config.local`,
-the one file that opts a host out:
+A host can choose not to sign. The tracked git config turns commit signing
+on, so without a signing key every commit fails, with
+`fatal: either user.signingkey or gpg.ssh.defaultKeyCommand needs to be configured`.
+A host that must commit without a key opts out with an explicit `false` in
+`config.local`, the one file that opts a host out. git reads it after the
+tracked `true`, so it wins:
 
 ```sh
 git config --file ~/.config/git/config.local commit.gpgsign false
@@ -271,13 +275,21 @@ it, is not an opt-out, and `doctor` reports what it finds. The full rule
 is in
 [opting a host out of signing](shell-reference.md#opting-a-host-out-of-signing).
 
-To sign again, remove the `false` and let the step fill in the rest:
+To sign again, remove the `false` and let the step fill in the rest. Run
+the three lines together: between the first and the second, the host has
+signing on and, if it had no key, cannot commit.
 
 ```sh
 git config --file ~/.config/git/config.local --unset commit.gpgsign
 cd ~/.config/dotfiles && ./install.sh identity
 ./install.sh doctor
 ```
+
+A `commit.gpgsign = false` in the checkout's own `config/git/config.local`, a
+layout older installs used, still turns signing off, since the tracked config
+includes that file. It is not an opt-out, though: it is the host's exception,
+which `install.sh doctor` reports as a problem. Move it to
+`~/.config/git/config.local` to opt out.
 
 ## Fix commits made with the wrong identity
 

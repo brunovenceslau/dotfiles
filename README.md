@@ -37,12 +37,17 @@ lists the key in this machine's ssh-agent, the installer derives it:
 ./install.sh identity --name "Your Name"
 ```
 
-Otherwise set it by hand:
+Otherwise set it by hand, with this machine's signing key:
 
 ```sh
 git config --file ~/.config/git/config.local user.name  "Your Name"
 git config --file ~/.config/git/config.local user.email "you@example.com"
+git config --file ~/.config/git/config.local user.signingkey ~/.ssh/id_signing.pub
 ```
+
+The tracked git config turns commit signing on, so until a signing key is
+set every commit fails. A machine that must commit without one opts out, as
+in [keep a host from signing](docs/signing-key.md#keep-a-host-from-signing).
 
 Bare Mac, no `git` yet? Start with
 [Provision a new mac host](docs/new-mac-host.md). Before you trust `install.sh`
@@ -156,13 +161,16 @@ run the installer.
 
 The tracked git config carries no identity or signing key, so every machine sets
 its own in the untracked `~/.config/git/config.local` (the
-[Quick start](#quick-start) shows both ways: `./install.sh identity` or two
+[Quick start](#quick-start) shows both ways: `./install.sh identity` or
 `git config` lines), and nothing commits as the maintainer.
 
-Until commit signing is configured, the installer prints a warning that it is
-not enabled. Signing is optional: nothing on this machine refuses an unsigned
-commit, but GitHub will not show it as verified. To set it up, see
+The tracked git config turns commit signing on, so until this machine has a
+signing key, git refuses every commit, and the installer says so. To set the
+key up, see
 [Provision a new mac host](docs/new-mac-host.md#5-set-identity-and-signing).
+Signing is mandatory only where git reads the tracked config; the paths that
+still produce an unsigned commit are in
+[where commit signing is mandatory](docs/shell-reference.md#where-commit-signing-is-mandatory).
 Rotating, revoking and opting a host out are in
 [Manage this host's signing key](docs/signing-key.md).
 

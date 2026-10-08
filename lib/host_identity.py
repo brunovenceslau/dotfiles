@@ -153,6 +153,8 @@ GIT_LOCAL_ENV = frozenset(
 
 # In auto mode warnings are collected here and reduced to one line (main()).
 _captured = None
+# What auto() adds to that one line when the host is left unable to commit.
+_consequence = None
 
 
 def log(msg):
@@ -1432,6 +1434,26 @@ def already_configured(host):
     return email.set and key.set and sign.set
 
 
+def commits_fail_closed(host):
+    """True when git refuses every commit on this host: commit.gpgsign is
+    effectively true (the tracked config sets it) under gpg.format = ssh,
+    and neither user.signingkey nor gpg.ssh.defaultKeyCommand is set, so
+    git dies with `either user.signingkey or gpg.ssh.defaultKeyCommand needs
+    to be configured`. False on anything it cannot read: it only chooses
+    the words of a report."""
+    sign = host.effective("commit.gpgsign", "bool")
+    if not (sign.set and sign.text == "true"):
+        return False
+    if host.effective("gpg.format").text != "ssh":
+        return False
+    return host.effective("user.signingkey").unset and host.effective("gpg.ssh.defaultKeyCommand").unset
+
+
+# What the automatic step adds to its one line when commits_fail_closed():
+# ONE literal, quoted in docs/troubleshooting.md with its leading "; ".
+FAIL_CLOSED = "; every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
+
+
 def equal_value(host, key, current, want, sigkey):
     """Whether a config value already says what the step would write."""
     if key == "user.signingkey":
@@ -1497,6 +1519,9 @@ def identity(host, name):
     desired += [
         ("user.email", email, None),
         ("user.signingkey", "key::%s %s" % sigkey, None),
+        # Effectively true already wherever git reads the tracked config, so
+        # this is written only where it does not (and an existing copy in
+        # config.local is left alone, like any equal value).
         ("commit.gpgsign", "true", "bool"),
     ]
     # A host that opted out of commit signing never has tag signing turned on
@@ -1782,15 +1807,23 @@ def stale_line(host):
 
 def auto(host):
     """The automatic step on a host that does not sign yet: one line when it
-    cannot act."""
+    cannot act. When it leaves the host with commit signing on and no key,
+    that line names the consequence (FAIL_CLOSED), through _consequence."""
+    global _consequence
     # Over SSH the agent is usually forwarded from ANOTHER machine, whose
-    # keys are not this host's to sign with. One literal: docs/troubleshooting.md
-    # quotes it verbatim.
+    # keys are not this host's to sign with. One literal each:
+    # docs/troubleshooting.md quotes them verbatim.
     if os.environ.get("SSH_CONNECTION"):
-        msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
+        if commits_fail_closed(host):
+            msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys); every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
+        else:
+            msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
         warn(msg % host.installer)
         return 1
-    return identity(host, None)
+    rc = identity(host, None)
+    if rc != 0 and commits_fail_closed(host):
+        _consequence = FAIL_CLOSED % host.installer
+    return rc
 
 
 def global_reads_local(host):
@@ -1861,12 +1894,12 @@ def gitconfig_finding(host):
 
 def advisory(host):
     """`check`: the install-time advisory (_signing_advisory), decided here
-    in one place. The tracked git config omits commit.gpgsign (a keyless
-    fresh clone must still commit), so a host with no config.local commits
-    UNSIGNED with no other signal until a push meets a rule that requires
-    signatures. Prints nothing about signing on a host that opted out
-    (opted_out()); ~/.gitconfig is reported either way, since it shadows
-    the identity of every commit, signed or not. Always returns 0."""
+    in one place. The tracked git config sets commit.gpgsign = true, so an
+    unset one means git does not read that config at all, and a host with
+    no signing key cannot commit (commits_fail_closed()). Prints nothing
+    about signing on a host that opted out (opted_out()); ~/.gitconfig is
+    reported either way, since it shadows the identity of every commit,
+    signed or not. Always returns 0."""
     level, text = gitconfig_finding(host)
     if level != "ok":
         warn(_shown(text))
@@ -1879,12 +1912,15 @@ def advisory(host):
              % _shown(sign.err))
         return 0
     if sign.unset:
+        # The tracked config sets it, so git does not read the tracked config.
         warn("commit signing is NOT enabled on this host (commit.gpgsign is unset).")
-        warn("  Run %s identity, or set user.signingkey +" % inst)
-        warn("  commit.gpgsign in ~/.config/git/config.local (see")
-        warn("  config/git/config.local.example). Optional: nothing refuses an unsigned")
-        warn("  commit, but GitHub will not show the Verified badge.")
+        warn("  The framework git config sets it, so git does not read that config here:")
+        warn('  see "Framework git settings do not apply" in docs/troubleshooting.md.')
         return 0
+    if commits_fail_closed(host):
+        warn("commit signing is on, but user.signingkey is not set, so git refuses every commit.")
+        warn("  Run %s identity on this host, or opt it out of signing" % inst)
+        warn("  (see docs/signing-key.md).")
     overridden = overridden_signing(host)
     if sign.text == "false":
         warn("commit signing is NOT enabled on this host (commit.gpgsign is false).")
@@ -2074,6 +2110,9 @@ class Doctor(object):
                 self.problem('user.name is not set - run: %s identity --name "Full Name"' % inst)
             elif v.unset and key == "user.email" and off:
                 self.problem("user.email is not set - run: git config --file %s user.email <your email>" % cl)
+            elif v.unset and signing and commits_fail_closed(host):
+                self.problem("user.signingkey is not set, so git refuses every commit - run: %s identity, or opt this host out of signing (see docs/signing-key.md)"
+                             % inst, signing=True)
             elif v.unset:
                 self.problem("%s is not set - run: %s identity" % (key, inst), signing=signing)
         for key, verb in (("commit.gpgsign", "commit"), ("tag.gpgsign", "tag")):
@@ -2089,7 +2128,8 @@ class Doctor(object):
             msg = "commit.gpgsign = false from %s: respected as this host's opt-out; the automatic step stays quiet and writes nothing"
             self.ok(msg % off)
         elif sign.unset:
-            self.problem("commit.gpgsign is not set, so commits are not signed - run: %s identity" % inst)
+            # The tracked config sets it: unset means that config is not read.
+            self.problem('commit.gpgsign is not set, so git does not read the framework git config and commits are not signed - see "Framework git settings do not apply" in docs/troubleshooting.md')
         elif sign.set and sign.text == "false" and not any(k == "commit.gpgsign" for k, _ in overridden):
             origin = last_origin(host, "commit.gpgsign")
             if host.is_local_origin(origin):
@@ -2293,7 +2333,8 @@ def headline(lines):
 
 
 def main(argv):
-    global _captured
+    global _captured, _consequence
+    _consequence = None
     ap = argparse.ArgumentParser(prog="install.sh identity", add_help=False)
     ap.add_argument("--config-local", required=True)
     ap.add_argument("--installer", default="./install.sh")
@@ -2342,7 +2383,9 @@ def main(argv):
                 warn(line)
         else:
             line = headline(lines)
-            if "%s identity" % host.installer not in line:
+            if _consequence:
+                line += _consequence
+            elif "%s identity" % host.installer not in line:
                 line += " (details: %s identity)" % host.installer
             warn(line)
     return rc

@@ -15,10 +15,17 @@
 	defaultBranch = main
 
 [gpg]
-	# SSH commit/tag signing. The key itself is per-host, so
-	# user.signingkey (and commit.gpgsign) live in config.local - a fresh clone
-	# with no key configured must still be able to commit.
 	format = ssh
+
+# Commits are signed wherever git reads this file. The key itself is per
+# host, so user.signingkey lives in config.local: a host with no key cannot
+# commit until `install.sh identity` sets one, or until config.local opts it
+# out with `commit.gpgsign = false`. That false wins only because it is read
+# after this line (both includes come later). Tags are left to the identity
+# step per host. The one statement of the opt-out rule is "Opting a host out
+# of signing" in docs/shell-reference.md.
+[commit]
+	gpgsign = true
 
 # Reject malformed/malicious git objects at the untrusted-input
 # boundary (the fetch's index-pack). dotfiles-upgrade re-asserts these on its
