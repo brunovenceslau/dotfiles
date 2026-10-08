@@ -335,9 +335,11 @@ ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
-long_name="$(printf 'x%.0s' $(seq 1 2100)).md"
+# The pattern spells the 2100 x's out: an interval such as x{2100} is past
+# RE_DUP_MAX (255) on BSD regex, so macOS grep cannot match it.
+long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
 expect_broken README.md "An <a href=\"docs/$long_name\">long</a>." \
-  "no such tracked file or directory: docs/x{2100}\\.md" \
+  "no such tracked file or directory: docs/$long_stem\\.md\$" \
   "an HTML href over 2048 characters is still checked"
 expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
   'docs/a\\u202eb\.md' \
