@@ -583,10 +583,12 @@ def git_env(ceiling):
     repository-local variables (GIT_DIR among them), and with
     GIT_CEILING_DIRECTORIES set to CEILING alone, never appended to: an
     inherited list is the caller's, and an empty entry in it would stop git
-    from resolving the entries after it."""
+    from resolving the entries after it. Without GIT_TRACE* too: a trace
+    sent to stderr would come before the line _isolate() matches."""
     env = dict(os.environ)
     for k in list(env):
-        if k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_"):
+        if (k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_")
+                or k.startswith("GIT_TRACE")):
             del env[k]
     env["GIT_CEILING_DIRECTORIES"] = ceiling
     return env
@@ -658,8 +660,9 @@ def _getcwd_in(path):
     string with its ceilings, and on a case-insensitive or normalizing file
     system (APFS) neither PATH nor realpath(PATH) need spell it the same way.
     This process steps in and back out: through a descriptor when it can
-    open its current directory, else by that directory's path. Raises
-    Refusal when there is no way back, before stepping anywhere."""
+    open its current directory, else by the path getcwd() gives for it.
+    Raises Refusal when it finds no way back (before stepping anywhere) or
+    cannot take the one it found."""
     back, back_path = None, None
     try:
         back = os.open(".", _BACK_FLAGS)
@@ -672,14 +675,15 @@ def _getcwd_in(path):
         os.chdir(path)
         return os.getcwd()
     finally:
-        # Should the way back fail, the error reaches _isolate() as a
-        # refusal, and this process stays in the empty directory, which
-        # git_release() then removes: its working directory may be gone.
         try:
             if back is not None:
                 os.fchdir(back)
             else:
                 os.chdir(back_path)
+        except OSError as e:
+            # This process stays in the empty directory, which
+            # git_release() then removes: its working directory may be gone.
+            raise Refusal("cannot return to the current directory (%s)" % e)
         finally:
             if back is not None:
                 os.close(back)

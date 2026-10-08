@@ -110,9 +110,11 @@ every repository and with your own config files. Among the causes: a relative
 `GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM`, a `$TMPDIR` whose path holds a `:`
 or that every user can write to without the sticky bit, a repository that git
 still finds, a git that cannot start there at all (such as on a config file it
-cannot parse), and a working directory the step cannot return to after stepping
-into the empty one (on macOS, one you may enter but not read). The writing modes
-then write nothing, and `install` still completes.
+cannot parse), and a working directory the step cannot name or re-enter after
+stepping into the empty one. The writing modes then write nothing, and `install`
+still completes. A directory you may enter but not read is not such a case:
+where the system cannot open it to return to it, as on macOS, the step returns
+by its path.
 
 A `GIT_CONFIG_GLOBAL` that names any file other than
 `$XDG_CONFIG_HOME/git/config` hides `config.local`, which that file includes,

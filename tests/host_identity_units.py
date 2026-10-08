@@ -137,6 +137,7 @@ def git_units(mod, scratch):
     check(not os.path.exists(made) and os.listdir(tmpdir) == [] and mod._git_place is None,
           "git_release() removes it at once, while this test still holds its path")
     check(cwd_now() == here, "deciding where git runs leaves this process's working directory as it was")
+    os.chdir(here)  # so a failure above does not take the checks below with it
     try:
         mod._getcwd_in(os.path.join(scratch, "missing"))
         check(False, "_getcwd_in() of a missing directory raises")
@@ -144,6 +145,30 @@ def git_units(mod, scratch):
         check(cwd_now() == here, "a failed _getcwd_in() leaves the working directory as it was")
     except Exception as e:
         check(False, "_getcwd_in() of a missing directory raises OSError, not %r" % e)
+    os.chdir(here)
+
+    # A way back found but not taken: from a working directory without any
+    # permission, "." cannot be opened, Linux's getcwd() still names it, and
+    # stepping back into it fails. (macOS's getcwd() may not name it: the
+    # refusal there is the one for no way back, tested below.)
+    if hasattr(os, "O_PATH"):
+        sealed = os.path.join(scratch, "sealed")
+        os.mkdir(sealed, 0o700)
+        os.chdir(sealed)
+        os.chmod(sealed, 0)
+        try:
+            use_tmpdir(mod, tmpdir)
+            try:
+                reason = mod.git_isolate()
+            except Exception as e:
+                reason = repr(e)
+            check(reason is not None and reason.startswith("cannot return to the current directory ("),
+                  "a way back that cannot be taken is a refusal of its own (%s)" % reason)
+            mod.git_release()
+            check(os.listdir(tmpdir) == [], "the empty directory is removed after a failed return")
+        finally:
+            os.chmod(sealed, 0o700)
+            os.chdir(here)
 
     # The way back: a descriptor that needs no read permission where the
     # platform has one, else the path; no way back at all is a refusal.
@@ -183,7 +208,7 @@ def git_units(mod, scratch):
                 seen = mod._getcwd_in(tmpdir)
             except Exception as e:
                 seen = repr(e)
-            check(seen == os.path.realpath(tmpdir) and real_getcwd() == xonly,
+            check(seen == os.path.realpath(tmpdir) and cwd_now() == xonly,
                   "without a descriptor, the way back is the path getcwd() names")
 
             def no_getcwd():
@@ -194,7 +219,7 @@ def git_units(mod, scratch):
             reason = mod.git_isolate()
             mod.os.getcwd = real_getcwd
             check(reason is not None and reason.startswith("cannot open the current directory to return to it (")
-                  and real_getcwd() == xonly,
+                  and cwd_now() == xonly,
                   "with no way back at all the step refuses, without stepping anywhere")
             mod.git_release()
         finally:
@@ -207,10 +232,13 @@ def git_units(mod, scratch):
     def refused(what, needle):
         if os.path.exists(record):
             os.unlink(record)
-        rc, _, err = mod.git(["config", "--get", "user.email"])
+        try:
+            rc, _, err = mod.git(["config", "--get", "user.email"])
+            again = mod.git(["config", "--get", "user.email"])
+        except Exception as e:
+            rc, err, again = None, repr(e), None
         check(rc == 127 and needle in err and not os.path.exists(record),
               "%s: git refuses (%s), the config is not read" % (what, err))
-        again = mod.git(["config", "--get", "user.email"])
         check(again == (127, "", err), "%s: the refusal is remembered" % what)
 
     colon = os.path.join(scratch, "a:b")
@@ -295,8 +323,11 @@ def git_units(mod, scratch):
             pass
     finally:
         mod._isolate = real_isolate
-    rc, _, err = mod.git(["config", "--get", "user.email"])
-    check(rc == 127 and "interrupted" in err, "an interrupted decision is a refusal, not a success")
+    try:
+        rc, _, err = mod.git(["config", "--get", "user.email"])
+    except Exception as e:
+        rc, err = None, repr(e)
+    check(rc == 127 and "interrupted" in err, "an interrupted decision is a refusal, not a success (%s)" % err)
     mod.git_release()
     check(os.listdir(tmpdir) == [], "the directory an interrupted decision made is removed")
 
@@ -342,6 +373,17 @@ def git_units(mod, scratch):
     os.mkdir(inside, 0o700)
     use_tmpdir(mod, inside)
     check(mod.git_isolate() is None, "a TMPDIR inside a repository passes: the ceiling holds")
+    os.environ.update({"GIT_TRACE": "1", "GIT_TRACE2": "1", "GIT_TRACE_SETUP": "1"})
+    env = mod.git_env("/c")
+    for trace in ("GIT_TRACE", "GIT_TRACE2", "GIT_TRACE_SETUP"):
+        del os.environ[trace]
+    check(not any(k.startswith("GIT_TRACE") for k in env), "git_env drops every GIT_TRACE* variable")
+    for trace in ("GIT_TRACE", "GIT_TRACE2"):
+        os.environ[trace] = "1"
+        use_tmpdir(mod, inside)
+        reason = mod.git_isolate()
+        del os.environ[trace]
+        check(reason is None, "%s=1 does not turn the guard into a refusal (%s)" % (trace, reason))
     link = os.path.join(scratch, "tmp-link")
     os.symlink(inside, link)
     use_tmpdir(mod, link)
