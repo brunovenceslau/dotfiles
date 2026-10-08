@@ -36,7 +36,10 @@ for t in git python3 ssh-keygen ssh-agent ssh-add; do
 done
 real_ssh_add="$(command -v ssh-add)"
 
-work="$(mktemp -d "${TMPDIR:-/tmp}/host_identity_test.XXXXXX")"
+# No trailing slash: macOS's TMPDIR ends in one, and a "T//" in $work would
+# not match the origins git prints, which may spell the path with one slash.
+tmp="${TMPDIR:-/tmp}"
+work="$(mktemp -d "${tmp%/}/host_identity_test.XXXXXX")"
 # Every run of the step makes an empty directory for git under TMPDIR: pinned
 # here so a case that leaves one behind fails the suite (checked at the end)
 # instead of littering the caller's /tmp. Cases that test TMPDIR set their own.
