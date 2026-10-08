@@ -224,7 +224,8 @@ stage_tree() {
     case "$e" in .git | .smoke | .forkgate) continue ;; esac
     names[${#names[@]}]="$e"
   done
-  _tar_copy "$src" "$dst" "${names[@]}" || return 1
+  # Same bash 3.2 empty-array guard as in _tar_copy: an empty tree leaves names unset.
+  _tar_copy "$src" "$dst" ${names[@]+"${names[@]}"} || return 1
   # `ls-files -s` lines are "<mode> <sha> <stage>\t<path>"; mode 160000 is a
   # gitlink. read splits on the tab too (no plugin path holds whitespace).
   links="$(git -C "$dst" ls-files -s)" || return 1

@@ -277,8 +277,17 @@ ok
 # as options (the entry is never copied, a.txt is silently dropped), the two
 # --checkpoint names make GNU tar run a command, and bsdtar reads `@x.tar` as
 # "add the entries of this archive". On GNU tar the `@` name is an ordinary
-# file either way, so its half is proven only on the macOS legs.
+# file either way, so its half is proven only on the macOS legs (a NOTE line
+# says so on a GNU host).
+# Measured against the pre-fix code (no ./ prefix): the case goes red at
+# "stage_tree failed" (tar rejects -v / --exclude= entries), before the PWNED
+# check is reached. The PWNED check is a belt: --checkpoint=1 makes GNU tar
+# reach a checkpoint on the first record even in this tiny tree, so a bare
+# --checkpoint-action name does run its command.
 c8="$work/c8"
+case "$(tar --version 2>/dev/null)" in
+  *"GNU tar"*) echo "NOTE: smoke_stage_test case 8 (GNU tar: the @x.tar half is not proven on this host)" ;;
+esac
 git clone -q "$super" "$c8"
 echo dash-entry > "$c8/--exclude=a.txt"
 echo dash-short > "$c8/-v"
