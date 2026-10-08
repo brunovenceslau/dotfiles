@@ -55,7 +55,7 @@ Four constraints shape every decision here.
 ```
 ~/.config/dotfiles
 ├── install.sh          bootstrap: install | link | packages | upgrade | uninstall | identity
-├── Makefile            quality gates: help, lint, check-patterns, test, reuse, gitleaks, smoke, secret-scan, forkgate, linkcheck, local-ci, repo-settings-check
+├── Makefile            quality gates: help, lint, check-patterns, py-syntax, test, test-env-scrub, reuse, gitleaks, smoke, secret-scan, forkgate, linkcheck, local-ci, repo-settings-check
 ├── lib/
 │   ├── os.sh           is-arm64 / is-amd64, fork-free, sourceable from bash and zsh
 │   ├── link.sh         the link() primitive, the convention walker, the manifest
