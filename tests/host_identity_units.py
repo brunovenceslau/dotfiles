@@ -688,7 +688,8 @@ def main(argv):
     # unassigned or private-use code point.
     for blank in ("\u3164", "Jane\u3164Doe", "\u115f", "\u1160", "Jane\uffa0Doe", "Jane\u00a0Doe",
                   "Jane\u3000Doe", "Jane\u2800Doe", "Jane\ufe0fDoe", "Jane\u034fDoe", "Jane\U000e0100Doe",
-                  "Jane\U000e0002Doe", "Jane\ue000Doe", "Jane\U00016fe4Doe", "-", "...", "&"):
+                  "Jane\U000e0002Doe", "Jane\ue000Doe", "Jane\U00016fe4Doe",
+                  "\U00013441", "Jane\U00013442Doe", "-", "...", "&"):
         got = mod.suggested_name(blank)
         check(got == "Full Name", "a full name %r a terminal does not show as it is is not suggested (got %r)"
               % (blank, got))

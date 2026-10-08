@@ -590,11 +590,12 @@ _SHELL_ACTIVE = '"\\$`!'
 # _BAD_CATEGORIES lets through (they are letters, marks or symbols, not
 # format characters): the Hangul fillers, the combining grapheme joiner,
 # the Khmer and Mongolian invisible vowels and selectors, the variation
-# selectors, and the braille blank. A suggested name holding one would look
-# like a different name than the one written.
+# selectors, the braille blank, the Egyptian hieroglyph blanks and the
+# Khitan small script filler. A suggested name holding one would look like
+# a different name than the one written.
 _INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
               (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
-              (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
 # Unassigned (Cn) and private-use (Co) code points have no agreed glyph, so
 # a suggestion holding one may render as another name. Only the suggestion
 # refuses them: valid_name(), which decides what is written, does not, and
