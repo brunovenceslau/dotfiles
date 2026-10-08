@@ -418,6 +418,7 @@ for setting in "TMPDIR=$work/co:lon" "GIT_CONFIG_GLOBAL=.config/git/config"; do
   rc=0; out="$(cd "$HOME" && env "$setting" "$installer" doctor 2>&1)" || rc=$?
   expect_rc 1 "$setting, doctor"; has "doctor: git: not reading the git config: " "$setting, doctor"
   [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || fail "$setting, doctor: more than one line: $out"
+  [ -z "$(ls -A "$work/co:lon")" ] || fail "$setting, doctor: left files in the refused TMPDIR: $(ls -A "$work/co:lon")"
 done
 has "GIT_CONFIG_GLOBAL=.config/git/config is not an absolute path" "a relative GIT_CONFIG_GLOBAL is named"
 # A global config git cannot parse: git cannot start at all, and the step
@@ -906,6 +907,19 @@ for spelling in false no off 0 FALSE; do
   [ "$(cat "$local_cfg")" = "$(printf '[commit]\n\tgpgsign = %s' "$spelling")" ] \
     || fail "auto wrote to a host opted out with $spelling: $(cat "$local_cfg")"
 done
+# A false in config.local beside tag.gpgsign = true is not an opt-out: tags
+# still sign, so the automatic step still writes the identity and reports
+# the false as the host's exception.
+fresh
+printf 'me@example.com %s\n' "$K1" > "$signers"
+export FAKE_AGENT_KEYS="$K1"
+printf '[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = true\n' > "$local_cfg"
+idrun
+expect_rc 0 "auto beside a config.local false and a true tag.gpgsign"
+has "identity: wrote user.email" "a true tag.gpgsign keeps the automatic step writing"
+has "identity: commit.gpgsign is false (file:$local_cfg) - kept as this host's exception" "auto reports the false beside a true tag.gpgsign"
+[ "$(get user.email)" = me@example.com ] && [ "$(get tag.gpgsign)" = true ] \
+  || fail "auto beside a config.local false and a true tag.gpgsign: $(cat "$local_cfg")"
 # A false at any other level is not an opt-out: the automatic step still
 # writes the identity and names the exception with its file, for
 # ~/.gitconfig, the system level and a file a plain [include] pulls in.
@@ -1394,6 +1408,15 @@ git config --file "$local_cfg" user.signingkey "$(printf '~/.ssh/x\033[2J')"
 advise
 has "user.signingkey ('~/.ssh/x\\x1b[2J') names no readable SSH public key" "the advisory escapes a control character"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw escape byte: $out"
+# A ~/.gitconfig key name with control bytes (ESC and BEL in a subsection) is
+# printed escaped by the advisory too, as doctor prints it.
+printf '[user "\033]0;PWNED\007"]\n\tx = 1\n' > "$HOME/.gitconfig"
+rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
+expect_rc 0 "advisory, a ~/.gitconfig key with control bytes"
+has "~/.gitconfig sets user.\\x1b]0;PWNED\\x07.x, and git reads it after" "the advisory escapes a ~/.gitconfig key name"
+! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw ESC from ~/.gitconfig: $out"
+! grep -q "$(printf '\007')" <<<"$out" || fail "the advisory printed a raw BEL from ~/.gitconfig: $out"
+rm -f "$HOME/.gitconfig"
 ok
 
 # --- install.sh doctor: read only, silent when healthy, one line a problem ---
@@ -1564,6 +1587,32 @@ expect_rc 1 "doctor, a system false"; one "doctor, a system false"
 has "doctor: values: commit.gpgsign = false from file:$HOME/sys, outside $local_cfg, so commits are not signed - remove it there to sign, or set the false in $local_cfg to opt out" "doctor names a false outside config.local"
 lacks "opt-out;" "a system false is not the opt-out"
 rm -f "$HOME/sys"
+# The same for a false from ~/.gitconfig and from a file a plain [include]
+# pulls in; ~/.gitconfig is a problem of its own beside it.
+for level in gitconfig include; do
+  dhealthy
+  git config --file "$local_cfg" --unset commit.gpgsign
+  case "$level" in
+    gitconfig) file="$HOME/.gitconfig" ;;
+    include) file="$HOME/included"
+      printf '[include]\n\tpath = %s\n' "$file" >> "$XDG_CONFIG_HOME/git/config" ;;
+  esac
+  printf '[commit]\n\tgpgsign = false\n' > "$file"
+  doc; expect_rc 1 "doctor, a false from $level"
+  has "doctor: values: commit.gpgsign = false from file:$file, outside $local_cfg, so commits are not signed" "doctor names a false from $level"
+  lacks "opt-out;" "a false from $level is not the opt-out"
+  rm -f "$file"
+done
+# A false in config.local that a later ~/.gitconfig false repeats: git reads
+# the last one from outside config.local, so it is not the opt-out.
+dhealthy
+git config --file "$local_cfg" commit.gpgsign false
+printf '[commit]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
+doc; expect_rc 1 "doctor, config.local false repeated in ~/.gitconfig"
+has "doctor: values: commit.gpgsign = false from file:$HOME/.gitconfig, outside $local_cfg" "doctor names the later false outside config.local"
+lacks "opt-out;" "a later false from ~/.gitconfig is not the opt-out"
+rm -f "$HOME/.gitconfig"
+git config --file "$local_cfg" --unset commit.gpgsign
 # commit.gpgsign unset: the run-identity line.
 doc; expect_rc 1 "doctor, commit.gpgsign unset"; one "doctor, commit.gpgsign unset"
 has "doctor: values: commit.gpgsign is not set, so commits are not signed - run: $installer identity" "doctor names an unset commit.gpgsign"

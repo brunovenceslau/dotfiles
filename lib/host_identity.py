@@ -1869,14 +1869,14 @@ def advisory(host):
     the identity of every commit, signed or not. Always returns 0."""
     level, text = gitconfig_finding(host)
     if level != "ok":
-        warn(text)
+        warn(_shown(text))
     if opted_out(host):
         return 0
     inst = host.installer
     sign = host.effective("commit.gpgsign", "bool")
     if sign.error:
         warn("commit.gpgsign is not a boolean git reads (%s) - git refuses every commit until it is fixed"
-             % sign.err)
+             % _shown(sign.err))
         return 0
     if sign.unset:
         warn("commit signing is NOT enabled on this host (commit.gpgsign is unset).")
@@ -2215,15 +2215,15 @@ def doctor(host, verbose):
     if not local_absent_or_regular(host):
         # Before any git read (see local_absent_or_regular()); one literal,
         # quoted in docs/troubleshooting.md.
-        log("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
-            % host.config_local)
+        log(_shown("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
+                   % host.config_local))
         return 1
     reason = git_isolate()
     if reason is not None:
         # Every check reads through git(), so each would report this one
         # cause as a problem of its own (an unset gpg.format, a git that
         # did not run). One literal, quoted in docs/troubleshooting.md.
-        log("doctor: git: not reading the git config: %s" % reason)
+        log(_shown("doctor: git: not reading the git config: %s" % reason))
         return 1
     d = Doctor(host)
     findings = []
@@ -2258,7 +2258,7 @@ def run(host, mode, name, report_stale, verbose=False):
     # Before any git read, so a mode never acts on reads that only failed.
     reason = git_isolate()
     if reason is not None:
-        warn("identity: not reading the git config: %s" % reason)
+        warn(_shown("identity: not reading the git config: %s" % reason))
         return 0 if mode == "check" else 1
     if mode == "check":
         return advisory(host)

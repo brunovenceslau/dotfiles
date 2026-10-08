@@ -243,6 +243,9 @@ writes the identity beside it and names it, the `install` advisory names
 it, and `install.sh doctor` reports it as a problem with its file. A
 `git -c` setting never reaches these reads, as described above.
 
+A `config.local` that is a symlink to a shared file is read like any other:
+whoever can write that file can turn signing off for this host.
+
 #### The `--rotate` rule
 
 `install.sh identity --rotate` replaces `user.signingkey`, and nothing else,
@@ -288,14 +291,15 @@ revocation files, `ssh-add -L` and `ssh-keygen`, and opens no network
 connection of its own. Each tool runs under a time limit; each file is
 opened without blocking and read up to 1 MiB. `ssh-add -L` asks the agent
 that `SSH_AUTH_SOCK` names for its public keys only; a forwarded agent
-answers over the SSH session that forwards it. The one file it can
-create is the temporary public key `ssh-keygen -Q` reads when
-`gpg.ssh.revocationFile` is a KRL, removed right after. The checks are a
-registry, `CHECKS` in `lib/host_identity.py`, run in this order:
+answers over the SSH session that forwards it. What it creates is
+temporary: the empty directory git runs in and, when
+`gpg.ssh.revocationFile` is a KRL, the public key `ssh-keygen -Q` reads.
+Both are removed before it exits. The checks are a registry, `CHECKS` in
+`lib/host_identity.py`, run in this order:
 
 | Check | What it reads | A problem when |
 | --- | --- | --- |
-| `git` | `git --version`, `GIT_CONFIG_GLOBAL`, the `[include]` chain | git does not run, is older than 2.34 (the first to sign with SSH keys), `GIT_CONFIG_GLOBAL` names a file other than `$XDG_CONFIG_HOME/git/config`, or no `[include]` reaches `config.local` |
+| `git` | `git --version`, `GIT_CONFIG_GLOBAL`, the `[include]` chain | git does not run, is older than 2.34 (the first to sign with SSH keys), `GIT_CONFIG_GLOBAL` names a file other than `$XDG_CONFIG_HOME/git/config`, the `include.path` values cannot be read, or no `[include]` reaches `config.local` |
 | `python3` | the running interpreter | `python3 -I -c ''` fails (`install.sh` reports this itself, since the checks need python3) |
 | `ssh-keygen` | `ssh-keygen -Y find-principals` on empty input | `ssh-keygen` is missing, does not run, or does not know `-Y` |
 | `values` | `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read; `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
