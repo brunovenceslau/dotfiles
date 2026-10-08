@@ -179,9 +179,16 @@ _local_modules_gitdir() {
 # tar and bsdtar accept different sets and an unknown flag is an error.
 _tar_copy() {
   local src="$1" dst="$2" errc="$2.tar-create.err" errx="$2.tar-extract.err" f
-  local -a skip
+  local -a skip ents
   shift 2
   skip=()
+  # Every NAME goes to tar as ./NAME: a working-tree entry whose name starts
+  # with `-`, or with `@` on bsdtar (`@x.tar` reads as "add this archive's
+  # entries"), is otherwise read as a tar OPTION, silently changing what is
+  # copied (or failing it, or running a GNU --checkpoint-action command)
+  # instead of naming a file.
+  ents=()
+  for f in "$@"; do ents[${#ents[@]}]="./$f"; done
   # The probe archives an empty directory: a real, portable create that every
   # tar accepts, so only an unknown flag can fail it.
   mkdir -p "$dst.tar-probe" || return 1
@@ -190,7 +197,7 @@ _tar_copy() {
   done
   rmdir "$dst.tar-probe" || return 1
   # ${skip[@]+...}: bash 3.2 under `set -u` treats an empty array as unbound.
-  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - "$@") 2>"$errc" \
+  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - ${ents[@]+"${ents[@]}"}) 2>"$errc" \
       | (cd "$dst" && tar ${skip[@]+"${skip[@]}"} -xpf -) 2>"$errx" \
       && [ ! -s "$errc" ] && [ ! -s "$errx" ]; then
     rm -f "$errc" "$errx"
