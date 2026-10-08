@@ -161,6 +161,30 @@ grep -q 'scope worktree' "$work/err" && grep -qF "$r/.git/config.worktree" "$wor
   || fail "the refusal must name scope worktree and config.worktree: $(err)"
 ok "a worktree-scoped user.email is refused"
 
+# author.* and committer.* at worktree scope are refused as well.
+for key in author.email committer.name; do
+  r="$work/r3-$key"; new_repo "$r"
+  git -C "$r" config extensions.worktreeConfig true
+  git -C "$r" config --worktree "$key" v
+  if try_commit "$r"; then
+    fail "a worktree-scoped $key must refuse the commit"
+  fi
+  grep -q "refusing: $key 'v' is set at scope worktree" "$work/err" \
+    || fail "the refusal must name $key at scope worktree: $(err)"
+done
+ok "a worktree-scoped author.email and committer.name are refused"
+
+# git folds the section and key to lower case, so a mixed-case spelling is
+# the same key.
+r="$work/r-case"; new_repo "$r"
+printf '[Author]\n\tEmail = m@x\n' >> "$r/.git/config"
+if try_commit "$r"; then
+  fail "a mixed-case [Author] Email must refuse the commit"
+fi
+grep -q "refusing: author.email 'm@x' is set at scope local" "$work/err" \
+  || fail "the refusal must name author.email: $(err)"
+ok "a mixed-case section and key spelling is refused"
+
 # The incident: `git config user.email` inside a LINKED worktree writes the
 # shared .git/config, so every worktree of the repository inherits it.
 r="$work/r4"; new_repo "$r"
@@ -383,14 +407,17 @@ ok "a bare repository is checked and names its config file"
 
 mkdir "$work/norepo"
 GIT_CEILING_DIRECTORIES="$work" check "$work/norepo"
-[ "$rc" -eq 2 ] && grep -q "^commit-identity: 'git rev-parse" "$work/err" \
+[ "$rc" -eq 2 ] && grep -q "^commit-identity: 'git rev-parse --absolute-git-dir' failed (exit [0-9]*): " "$work/err" \
   || fail "outside a repository it must exit 2 with its prefix, got $rc: $(err)"
+! grep -q 'not inside' "$work/err" \
+  || fail "the message must not guess at the cause: $(err)"
 ok "outside a repository it exits 2 and says why"
 
 r="$work/r-bad"; new_repo "$r"
 printf '[user]\n\temail\n' >> "$r/.git/config"
 check "$r"
-[ "$rc" -eq 2 ] && grep -q "missing value for 'user.email'" "$work/err" \
+[ "$rc" -eq 2 ] && grep -q "^commit-identity: 'git rev-parse --absolute-git-dir' failed (exit [0-9]*): .*missing value for 'user.email'" "$work/err" \
+  && ! grep -q 'not inside' "$work/err" \
   || fail "a config git refuses to parse must exit 2, got $rc: $(err)"
 ok "a valueless identity key (git refuses the config) exits 2"
 
@@ -405,6 +432,15 @@ for args in "" "bogus" "check extra"; do
     || fail "argv '$args' must exit 2 with the usage, got $rc: $(err)"
 done
 ok "a wrong argv exits 2 with the usage"
+
+# The error arms a real git cannot be made to hit, and the refusal text for a
+# non-absolute origin, with a fake subprocess.run.
+python3 -I -B "$repo_root/tests/commit_identity_units.py" \
+  "$repo_root/.githooks/commit_identity.py" >"$work/out" 2>&1 \
+  || fail "unit checks: $(cat "$work/out")"
+grep -q '^commit_identity_units: 0 failure(s)$' "$work/out" \
+  || fail "the unit checks did not run to the end: $(cat "$work/out")"
+ok "entries() error arms and a non-absolute origin (unit checks)"
 
 # --- The dispatcher contract from a linked worktree ---------------------------
 r="$work/r10"; new_repo "$r"

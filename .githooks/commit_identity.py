@@ -21,9 +21,10 @@ and cherry-pick skip pre-commit, pre-push reads config at push time only,
 and `--no-verify` or a repository core.hooksPath skips both hooks.
 
 Allowed, by design: `git -c user.email=...` per command (scope `command`,
-GIT_CONFIG_COUNT included; the recipe for a scratch commit), the GIT_AUTHOR_* and GIT_COMMITTER_* variables
-(not config at all), and the global and system scopes. Nothing else is
-checked: no trust root, no signature, no allowed-signers lookup.
+GIT_CONFIG_COUNT included; the recipe for a scratch commit), the
+GIT_AUTHOR_* and GIT_COMMITTER_* variables (not config at all), and the
+global and system scopes. Nothing else is checked: no trust root, no
+signature, no allowed-signers lookup.
 
 The argument names the caller, for the message. `pre-push` also drains stdin:
 git writes one line per pushed ref there, and the answer never depends on
@@ -90,8 +91,7 @@ def git_dir():
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = decode(p.stdout)
     if p.returncode != 0 or not out.endswith("\n") or "\n" in out[:-1]:
-        fail("'git rev-parse --absolute-git-dir' failed (exit %d), not "
-             "inside a git repository?: %s"
+        fail("'git rev-parse --absolute-git-dir' failed (exit %d): %s"
              % (p.returncode, decode(p.stderr).strip()))
     return out[:-1]
 
@@ -130,14 +130,16 @@ def entries(gdir):
                decode(value))
 
 
-def origin_file(origin, gdir):
-    """The config file an origin names, or None (`command line:`, `blob:`,
-    `standard input:`). A relative path is resolved against the git dir,
-    which is what git reports it relative to once GIT_DIR is absolute."""
+def origin_file(origin):
+    """The path of the config file an origin names, or None (`command line:`,
+    `blob:`, `standard input:`). The path is returned as git printed it: with
+    GIT_DIR absolute, git 2.26 and later print an absolute one, and a
+    relative one is never resolved here (a join or normpath could name
+    another file, `..` through a symlink)."""
     kind, sep, path = origin.partition(":")
     if not sep or kind != "file" or not path:
         return None
-    return os.path.normpath(os.path.join(gdir, path))
+    return path
 
 
 def refusals(gdir):
@@ -146,21 +148,22 @@ def refusals(gdir):
         if scope not in REFUSED_SCOPES or key not in KEYS:
             continue
         shown = "'%s'" % escape(value)
-        path = origin_file(origin, gdir)
+        path = origin_file(origin)
         if path is None:
             where = "from %s" % escape(origin)
             fix = "remove it from that source"
-        elif escape(path) == path:
-            # Quoted: the path escapes to itself, so it holds nothing a
-            # shell or a terminal would act on, and the quote keeps a space
-            # or a `$` in it one literal word.
+        elif os.path.isabs(path) and escape(path) == path:
+            # Quoted: the path is absolute and escapes to itself, so it
+            # holds nothing a shell or a terminal would act on, and the
+            # quote keeps a space or a `$` in it one literal word.
             where = "in %s" % path
             fix = "git config --file %s --unset-all %s" % (
                 shlex.quote(path), key)
         else:
             # No command: the printed path is escaped (a backslash doubled,
-            # a control character spelled out), so a command naming it
-            # would name another file, which may not exist.
+            # a control character spelled out) or is not absolute, so a
+            # command naming it would name another file, which may not
+            # exist.
             where = "in %s" % escape(path)
             fix = "remove %s from that file (path shown escaped)" % key
         lines.append("%s %s is set at scope %s %s; fix: %s"
