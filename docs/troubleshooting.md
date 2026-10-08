@@ -337,7 +337,9 @@ install: identity: signing is off against <path>: <key> = false from <origin> - 
   them. Point `TMPDIR` at a directory whose path holds no `:` and that only you
   can write to, or that has the sticky bit, as `/tmp` does. `git cannot start`
   quotes git's own error, most often a config file git cannot parse: fix the
-  line it names.
+  line it names. `cannot open the current directory to return to it` means
+  the step was run from a directory you may enter but not read: run it from
+  another one, such as your home directory.
 - `cannot read <key>`: git failed to read your config, and its own error is in
   the parentheses. `git config --list --show-origin` run outside a repository
   shows the same error and the file it comes from.

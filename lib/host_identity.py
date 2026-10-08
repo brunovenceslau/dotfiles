@@ -68,6 +68,7 @@ import hashlib
 import os
 import re
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -591,27 +592,40 @@ def git_env(ceiling):
     return env
 
 
+# GitPlace.refusal before git_isolate() has decided anything.
+UNDECIDED = "git has not been proven to run outside a repository"
+
+
 class GitPlace(object):
     """Where every git call of this process runs, decided once by
     git_isolate() and undone by git_release().
 
     made     the empty directory, recorded as soon as it exists, so
              git_release() removes it whatever happens after
-    cwd      that directory as getcwd() spells it, and
-    ceiling  its parent: both set only once git has been proven to find
-             no repository from there
-    refusal  why git cannot run outside a repository here, or None
+    cwd      that directory as getcwd() spells it, set only once git has
+             been proven to find no repository from there
+    refusal  why git cannot run outside a repository here: UNDECIDED until
+             git_isolate() decides, None once it is proven
 
-    git() runs git only when refusal is None and cwd is set."""
+    git() runs git only when refusal is None."""
 
     def __init__(self):
         self.made = None
         self.cwd = None
-        self.ceiling = None
-        self.refusal = None
+        self.refusal = UNDECIDED
+
+    @property
+    def ceiling(self):
+        """The one GIT_CEILING_DIRECTORIES entry: cwd's parent."""
+        return os.path.dirname(self.cwd)
 
 
 _git_place = None
+
+
+class Refusal(Exception):
+    """A reason git cannot run outside a repository here, raised where it
+    is found and returned by _isolate()."""
 
 
 def _run_git(args, cwd, env):
@@ -632,21 +646,43 @@ def _run_git(args, cwd, env):
     return p.returncode, out, p.stderr.decode("utf-8", "replace").strip()
 
 
+# Opens the current directory for fchdir() without reading it: O_PATH
+# (Linux) needs search permission only, so an execute-only directory is a
+# place to return to. macOS has no O_PATH, and O_RDONLY needs read
+# permission; there the way back is the path getcwd() names instead.
+_BACK_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | getattr(os, "O_DIRECTORY", 0)
+
+
 def _getcwd_in(path):
     """PATH as getcwd() spells it from inside. git compares exactly that
     string with its ceilings, and on a case-insensitive or normalizing file
     system (APFS) neither PATH nor realpath(PATH) need spell it the same way.
-    This process steps in and back out: its working directory is restored
-    through a descriptor, so the way back does not depend on a path."""
-    back = os.open(".", os.O_RDONLY)
+    This process steps in and back out: through a descriptor when it can
+    open its current directory, else by that directory's path. Raises
+    Refusal when there is no way back, before stepping anywhere."""
+    back, back_path = None, None
+    try:
+        back = os.open(".", _BACK_FLAGS)
+    except OSError as e:
+        try:
+            back_path = os.getcwd()
+        except OSError:
+            raise Refusal("cannot open the current directory to return to it (%s)" % e)
     try:
         os.chdir(path)
         return os.getcwd()
     finally:
+        # Should the way back fail, the error reaches _isolate() as a
+        # refusal, and this process stays in the empty directory, which
+        # git_release() then removes: its working directory may be gone.
         try:
-            os.fchdir(back)
+            if back is not None:
+                os.fchdir(back)
+            else:
+                os.chdir(back_path)
         finally:
-            os.close(back)
+            if back is not None:
+                os.close(back)
 
 
 def _isolate(place):
@@ -659,6 +695,8 @@ def _isolate(place):
     try:
         place.made = tempfile.mkdtemp(prefix="host_identity.git.")
         cwd = _getcwd_in(place.made)
+    except Refusal as e:
+        return str(e)
     except OSError as e:
         return "cannot make an empty directory for git and enter it: %s" % e
     ceiling = os.path.dirname(cwd)
@@ -675,18 +713,18 @@ def _isolate(place):
     if st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX:
         return "%s is writable by every user and not sticky" % ceiling
     # The proof, not the premise: git itself must find no repository from
-    # there. In the C locale, so its message can be matched; any other
-    # failure (a config file git cannot parse, a repository it refuses as
-    # dubiously owned) means git cannot start here at all.
+    # there. In the C locale, so its first line can be matched exactly; any
+    # other failure (a config file git cannot parse, a repository it refuses
+    # as dubiously owned) means git cannot start here at all.
     env = git_env(ceiling)
     env["LC_ALL"] = "C"
     env.pop("LANGUAGE", None)
     rc, out, err = _run_git(["rev-parse", "--git-dir"], cwd, env)
     if rc == 0:
         return "git finds a repository (%s) from the empty directory %s" % (out, cwd)
-    if "not a git repository" not in err:
-        return "git cannot start in %s (%s)" % (cwd, err or "exit %d" % rc)
-    place.cwd, place.ceiling = cwd, ceiling
+    if not err.startswith("fatal: not a git repository"):
+        return "git cannot start (%s)" % (err or "exit %d" % rc)
+    place.cwd = cwd
     return None
 
 
@@ -732,8 +770,8 @@ def git(args):
     """Run git outside any repository (git_isolate()); return (rc, stdout
     without the final newline, stderr)."""
     reason = git_isolate()
-    if reason is not None or _git_place.cwd is None:
-        return 127, "", reason or "git has not been proven to run outside a repository"
+    if reason is not None:
+        return 127, "", reason
     return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
 
 
@@ -1803,12 +1841,16 @@ def main(argv):
 
 
 def entry(argv):
-    """main(), with an interrupt as the shell's 130 instead of a traceback.
-    main()'s finally has already removed git's empty directory by then."""
+    """main(), with an interrupt reported without a traceback. main()'s
+    finally has already removed git's empty directory by then. The process
+    then dies of SIGINT itself, not a plain exit 130: a shell waiting on it
+    stops too, as it would for any command killed by ^C."""
     try:
         return main(argv)
     except KeyboardInterrupt:
-        return 130
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+        os.kill(os.getpid(), signal.SIGINT)
+        return 130  # only if SIGINT is blocked
 
 
 if __name__ == "__main__":

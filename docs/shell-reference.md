@@ -106,11 +106,13 @@ global or system config matches, as it does for plain git outside a repository.
 
 The step reads no git config at all, and says so in one line naming the cause
 (`identity: not reading the git config: ...`), when it cannot run git outside
-every repository and with your own config files: a relative `GIT_CONFIG_GLOBAL`
-or `GIT_CONFIG_SYSTEM`, a `$TMPDIR` whose path holds a `:` or that every user
-can write to without the sticky bit, a repository that git still finds, or a git
-that cannot start there at all, such as on a config file it cannot parse. The
-writing modes then write nothing, and `install` still completes.
+every repository and with your own config files. Among the causes: a relative
+`GIT_CONFIG_GLOBAL` or `GIT_CONFIG_SYSTEM`, a `$TMPDIR` whose path holds a `:`
+or that every user can write to without the sticky bit, a repository that git
+still finds, a git that cannot start there at all (such as on a config file it
+cannot parse), and a working directory the step cannot return to after stepping
+into the empty one (on macOS, one you may enter but not read). The writing modes
+then write nothing, and `install` still completes.
 
 A `GIT_CONFIG_GLOBAL` that names any file other than
 `$XDG_CONFIG_HOME/git/config` hides `config.local`, which that file includes,

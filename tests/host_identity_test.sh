@@ -344,6 +344,41 @@ expect_rc 0 "a TMPDIR that is a symlink into a repository"
 [ "$(get user.email)" = "me@example.com" ] || fail "TMPDIR through a symlink: $(get user.email)"
 ok
 
+# A platform case: on a case-insensitive file system (macOS's default APFS)
+# a TMPDIR spelled in other letters names the same directory, and git sees
+# the spelling getcwd() gives, which the ceiling must be.
+if [ "$(uname -s)" = Darwin ] && [ -d "$HOME/REPO/TMP" ]; then
+  rm -f "$local_cfg"
+  rc=0
+  out="$(cd "$HOME/repo" && TMPDIR="$HOME/REPO/TMP" "$installer" identity 2>&1)" || rc=$?
+  expect_rc 0 "a TMPDIR spelled in other letters, inside a repository"
+  [ "$(get user.email)" = "me@example.com" ] || fail "TMPDIR in other letters: $(get user.email)"
+  [ -z "$(ls -A "$HOME/repo/tmp")" ] || fail "TMPDIR in other letters: left $(ls -A "$HOME/repo/tmp")"
+  ok
+else
+  echo "SKIP: a TMPDIR spelled in other letters (not macOS on a case-insensitive file system)"
+fi
+
+# An execute-only working directory: the step steps into its empty
+# directory and back, and needs no read permission on where it started.
+# Linux returns through an O_PATH descriptor. macOS has none: it returns by
+# path, or refuses when it cannot tell that path; never anything else.
+rm -f "$local_cfg"
+mkdir "$HOME/xonly"
+chmod 0311 "$HOME/xonly"
+rc=0
+out="$(cd "$HOME/xonly" && "$installer" identity 2>&1)" || rc=$?
+chmod 0700 "$HOME/xonly"
+if [ "$(uname -s)" = Darwin ] && [ "$rc" -eq 1 ]; then
+  has "identity: not reading the git config: cannot open the current directory to return to it (" \
+    "an execute-only working directory on macOS"
+  unwritten "an execute-only working directory on macOS"
+else
+  expect_rc 0 "an execute-only working directory"
+  [ "$(get user.email)" = "me@example.com" ] || fail "an execute-only working directory: $(get user.email)"
+fi
+ok
+
 # An inherited GIT_CEILING_DIRECTORIES is replaced, never kept: neither one
 # that misses, nor one whose empty entry stops git resolving what follows.
 for inherited in /nonexistent ":$HOME/repo/tmp"; do
@@ -387,12 +422,12 @@ printf 'me@example.com %s\n' "$K1" > "$signers"
 printf '[user\n' >> "$XDG_CONFIG_HOME/git/config"
 rc=0; out="$(cd "$HOME" && "$installer" identity 2>&1)" || rc=$?
 expect_rc 1 "an unparsable global config, identity"
-has "identity: not reading the git config: git cannot start in " "an unparsable global config, identity"
+has "identity: not reading the git config: git cannot start (" "an unparsable global config, identity"
 has "bad config line" "an unparsable global config: git's error is quoted"
 lacks "absence of a repository" "an unparsable global config, identity"; unwritten "an unparsable global config"
 rc=0; out="$(cd "$HOME" && python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" \
   --mode check 2>&1)" || rc=$?
-expect_rc 0 "an unparsable global config, check"; has "git cannot start in " "an unparsable global config, check"
+expect_rc 0 "an unparsable global config, check"; has "git cannot start (" "an unparsable global config, check"
 [ -z "$(ls -A "$work/co:lon")" ] || fail "a refused run left a directory in TMPDIR: $(ls -A "$work/co:lon")"
 ok
 

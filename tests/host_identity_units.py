@@ -15,6 +15,7 @@ import base64
 import errno
 import importlib.util
 import os
+import signal
 import stat
 import struct
 import subprocess
@@ -50,6 +51,15 @@ def stub(directory, name, body):
     with open(path, "w") as fh:
         fh.write("#!/bin/sh\n" + body)
     os.chmod(path, stat.S_IRWXU)
+
+
+def cwd_now():
+    """os.getcwd(), or why it failed: a check on the working directory
+    reports a FAIL line, never a traceback, when that directory is gone."""
+    try:
+        return os.getcwd()
+    except OSError as e:
+        return repr(e)
 
 
 def use_tmpdir(mod, path):
@@ -94,6 +104,7 @@ def git_units(mod, scratch):
          '  case "${STUB_REVPARSE:-}" in\n'
          '    dubious) echo "fatal: detected dubious ownership in repository at \'/x\'" >&2; exit 128 ;;\n'
          '    silent) exit 127 ;;\n'
+         '    embedded) echo "fatal: refusing: not a git repository is not what happened" >&2; exit 128 ;;\n'
          '  esac\n'
          '  echo "fatal: not a git repository (or any of the parent directories): .git" >&2; exit 128\n'
          'fi\nenv > "%s"\npwd -P > "%s"\nls -A > "%s.ls"\nexit 1\n' % (record, cwd_record, cwd_record))
@@ -125,12 +136,73 @@ def git_units(mod, scratch):
     mod.git_release()
     check(not os.path.exists(made) and os.listdir(tmpdir) == [] and mod._git_place is None,
           "git_release() removes it at once, while this test still holds its path")
-    check(os.getcwd() == here, "deciding where git runs leaves this process's working directory as it was")
+    check(cwd_now() == here, "deciding where git runs leaves this process's working directory as it was")
     try:
         mod._getcwd_in(os.path.join(scratch, "missing"))
         check(False, "_getcwd_in() of a missing directory raises")
     except OSError:
-        check(os.getcwd() == here, "a failed _getcwd_in() leaves the working directory as it was")
+        check(cwd_now() == here, "a failed _getcwd_in() leaves the working directory as it was")
+    except Exception as e:
+        check(False, "_getcwd_in() of a missing directory raises OSError, not %r" % e)
+
+    # The way back: a descriptor that needs no read permission where the
+    # platform has one, else the path; no way back at all is a refusal.
+    fds = "/proc/self/fd"
+    if os.path.isdir(fds):
+        before = sorted(os.listdir(fds))
+        mod._getcwd_in(tmpdir)
+        check(sorted(os.listdir(fds)) == before, "_getcwd_in() closes the descriptor it returns through")
+    else:
+        print("SKIP: no /proc/self/fd here; the descriptor count is not checked")
+    xonly = os.path.join(scratch, "xonly")
+    os.mkdir(xonly, 0o700)
+    os.chdir(xonly)
+    os.chmod(xonly, 0o311)
+    try:
+        if hasattr(os, "O_PATH"):
+            try:
+                os.close(os.open(".", mod._BACK_FLAGS))
+                check(True, "an execute-only working directory opens as a place to return to (O_PATH)")
+            except OSError as e:
+                check(False, "an execute-only working directory opens as a place to return to (O_PATH): %s" % e)
+            use_tmpdir(mod, tmpdir)
+            check(mod.git_isolate() is None and cwd_now() == xonly,
+                  "from an execute-only working directory git still runs, and the directory is restored")
+            mod.git_release()
+        real_open = mod.os.open
+        real_getcwd = mod.os.getcwd
+
+        def no_dot(path, *a, **k):
+            if path == ".":
+                raise OSError(errno.EACCES, "Permission denied", ".")
+            return real_open(path, *a, **k)
+
+        mod.os.open = no_dot
+        try:
+            try:
+                seen = mod._getcwd_in(tmpdir)
+            except Exception as e:
+                seen = repr(e)
+            check(seen == os.path.realpath(tmpdir) and real_getcwd() == xonly,
+                  "without a descriptor, the way back is the path getcwd() names")
+
+            def no_getcwd():
+                raise OSError(errno.EACCES, "Permission denied")
+
+            mod.os.getcwd = no_getcwd
+            use_tmpdir(mod, tmpdir)
+            reason = mod.git_isolate()
+            mod.os.getcwd = real_getcwd
+            check(reason is not None and reason.startswith("cannot open the current directory to return to it (")
+                  and real_getcwd() == xonly,
+                  "with no way back at all the step refuses, without stepping anywhere")
+            mod.git_release()
+        finally:
+            mod.os.open = real_open
+            mod.os.getcwd = real_getcwd
+    finally:
+        os.chmod(xonly, 0o700)
+        os.chdir(here)
 
     def refused(what, needle):
         if os.path.exists(record):
@@ -171,7 +243,9 @@ def git_units(mod, scratch):
     finally:
         mod.tempfile.mkdtemp = real_mkdtemp
 
-    for answer, needle in (("dubious", "git cannot start in"), ("silent", "(exit 127)")):
+    for answer, needle in (("dubious", "git cannot start (fatal: detected dubious ownership"),
+                           ("silent", "git cannot start (exit 127)"),
+                           ("embedded", "git cannot start (fatal: refusing: not a git repository")):
         use_tmpdir(mod, tmpdir)
         os.environ["STUB_REVPARSE"] = answer
         refused("git rev-parse failing with %s" % answer, needle)
@@ -198,9 +272,12 @@ def git_units(mod, scratch):
     # interrupted decision stays a refusal.
     mod.git_release()
     mod._git_place = mod.GitPlace()
-    rc, _, err = mod.git(["config", "--get", "user.email"])
-    check(rc == 127 and "not been proven" in err and not os.path.exists(record),
-          "git() runs nothing for a place that has no proven directory")
+    try:
+        rc, _, err = mod.git(["config", "--get", "user.email"])
+    except Exception as e:
+        rc, err = None, repr(e)
+    check(rc == 127 and err == mod.UNDECIDED and not os.path.exists(record),
+          "git() runs nothing for a place that has no proven directory (%s)" % err)
     mod.git_release()
     real_isolate = mod._isolate
 
@@ -223,22 +300,25 @@ def git_units(mod, scratch):
     mod.git_release()
     check(os.listdir(tmpdir) == [], "the directory an interrupted decision made is removed")
 
-    # entry(): ^C is exit 130, and the directory is gone by then.
-    real_run = mod.run
-
-    def interrupt_run(host, mode, name, report_stale):
-        mod.git(["config", "--get", "user.email"])
-        raise KeyboardInterrupt
-
+    # entry(): ^C ends the process by SIGINT, with git's directory removed.
+    # In a child, since that is the point.
     use_tmpdir(mod, tmpdir)
-    os.environ["HOME"] = scratch
-    mod.run = interrupt_run
-    try:
-        rc = mod.entry(["--config-local", os.path.join(scratch, "c.local"), "--mode", "check"])
-    finally:
-        mod.run = real_run
-    check(rc == 130 and os.listdir(tmpdir) == [] and mod._git_place is None,
-          "an interrupt exits 130 with git's directory removed")
+    child = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "def run(host, mode, name, report_stale):\n"
+        "    m.git(['config', '--get', 'user.email'])\n"
+        "    raise KeyboardInterrupt\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    env = dict(os.environ, HOME=scratch, TMPDIR=tmpdir)
+    p = subprocess.run([sys.executable, "-I", "-B", "-c", child, mod.__file__, os.path.join(scratch, "c.local")],
+                       env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    check(p.returncode == -signal.SIGINT and b"Traceback" not in p.stderr and os.listdir(tmpdir) == [],
+          "an interrupt ends the process by SIGINT, without a traceback, git's directory removed (rc %d)"
+          % p.returncode)
 
     for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
         use_tmpdir(mod, tmpdir)
