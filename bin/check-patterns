@@ -1803,30 +1803,56 @@ function cols(s,   t) {
   if (u8) return length(s)
   t = s; gsub(/[\200-\277]/, "", t); return length(t)
 }
-function skipcode(s, i, n,   run, j, r) {
-  run = 0
-  while (i <= n && substr(s, i, 1) == "`") { run++; i++ }
-  j = i
-  while (j <= n) {
-    if (substr(s, j, 1) == "`") {
-      r = 0
-      while (j <= n && substr(s, j, 1) == "`") { r++; j++ }
-      if (r == run) return j
-    } else j++
+# runs: ONE pass listing every maximal backtick run of the line (its start
+# rs, its length rl, its index by start ri), then, right to left, the next
+# run of the same length (rn). A code span is a run up to the next run of
+# exactly its length, so skipcode looks the closer up instead of scanning:
+# a line of runs of every length 1..k, none closed, scanned the rest of the
+# line once per length (measured: 8 s at k=700 on mawk).
+function runs(s, n,   i, j, k, nr) {
+  split("", ri); split("", rs); split("", rl); split("", rn); split("", lastrun)
+  nr = 0; i = 1
+  while (i <= n) {
+    if (substr(s, i, 1) != "`") { i++; continue }
+    j = i
+    while (j <= n && substr(s, j, 1) == "`") j++
+    rs[++nr] = i; rl[nr] = j - i; ri[i] = nr
+    i = j
   }
-  return i
+  for (k = nr; k >= 1; k--) {
+    if (rl[k] in lastrun) rn[k] = lastrun[rl[k]]
+    lastrun[rl[k]] = k
+  }
+}
+# skipcode: the index after the code span opening at i, or after the run
+# at i when no run of its length follows (literal backticks). Every caller
+# lands on the FIRST backtick of a run: a walk reaches a backtick only from a
+# character that is not one, or from the end of a run or a link.
+function skipcode(s, i, n,   k) {
+  k = ri[i]
+  if (k in rn) return rs[rn[k]] + rl[k]
+  return i + rl[k]
 }
 # pairs: ONE pass over the line, pairing each `[` with its `]` (pb) and each
 # `(` with its `)` (pp) on two stacks, outside code spans and past a
 # backslash escape. skiplink then looks a partner up instead of scanning,
-# so a line of many brackets, nested or never closed, stays linear.
+# so a line of many brackets, nested or never closed, stays linear. An
+# escaped backtick makes its whole run literal (CommonMark would let the
+# rest of the run open a span): the walk never lands inside a run, which
+# keeps skipcode a lookup.
 function pairs(s, n,   i, c, nb, np) {
   split("", pb); split("", pp); split("", sb); split("", sp)
+  runs(s, n)
   nb = 0; np = 0; i = 1
   while (i <= n) {
     c = substr(s, i, 1)
     if (c == "`") { i = skipcode(s, i, n); continue }
-    if (c == "\\") { i += 2; continue }
+    if (c == "\\") {
+      i++
+      if (substr(s, i, 1) != "`") { i++; continue }
+      while (i <= n && substr(s, i, 1) == "`") i++
+      continue
+    }
     if (c == "[") sb[++nb] = i
     else if (c == "]") { if (nb) pb[sb[nb--]] = i }
     else if (c == "(") sp[++np] = i
