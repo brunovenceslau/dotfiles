@@ -93,8 +93,13 @@ Every git config read here asks for the effective value outside any
 repository: all system and global levels, includes on, with git's
 repository-local environment variables (`GIT_DIR`, `GIT_CONFIG_PARAMETERS`,
 `GIT_CONFIG_COUNT` and the rest of `git rev-parse --local-env-vars`) removed.
-A repository's own config, or a `git -c` in the calling environment, never
-steers it. A `GIT_CONFIG_GLOBAL` that names any file other than
+Git runs from a fresh, empty temporary directory, with
+`GIT_CEILING_DIRECTORIES` set to its parent, so it finds no repository: not the
+one you run the installer from, not a `$HOME` that is one, not one holding
+`$TMPDIR`. A repository's own config, or a `git -c` in the calling environment,
+never steers it. An `[includeIf "gitdir:..."]` or `[includeIf "onbranch:..."]`
+in your global config is read without error and never applies here, since no
+repository is open. A `GIT_CONFIG_GLOBAL` that names any file other than
 `$XDG_CONFIG_HOME/git/config` hides `config.local`, which that file includes,
 so the step writes nothing under it. Relative paths in `user.signingkey`,
 `gpg.ssh.allowedSignersFile` and `gpg.ssh.revocationFile` resolve against

@@ -78,8 +78,9 @@ def main(argv):
         "GIT_CONFIG_SYSTEM": "/custom/system",
         "GIT_CONFIG_NOSYSTEM": "1",
     })
-    env = mod.git_env()
-    check(env.get("GIT_DIR") == mod.NO_REPO, "git_env pins GIT_DIR to the no-repository path")
+    env = mod.git_env("/ceiling")
+    check("GIT_DIR" not in env, "git_env drops GIT_DIR rather than pointing it anywhere")
+    check(env.get("GIT_CEILING_DIRECTORIES") == "/ceiling", "git_env sets the one ceiling it is given")
     check(not any(k in env for k in ("GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
                                      "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")),
           "git_env drops the repository-local and -c variables")
@@ -88,14 +89,40 @@ def main(argv):
     bindir = os.path.join(scratch, "bin")
     os.mkdir(bindir)
     record = os.path.join(scratch, "git-env")
-    stub(bindir, "git", 'env > "%s"\nexit 1\n' % record)
+    cwd_record = os.path.join(scratch, "git-cwd")
+    stub(bindir, "git", 'env > "%s"\npwd -P > "%s"\nls -A > "%s.ls"\nexit 1\n'
+         % (record, cwd_record, cwd_record))
     os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+    os.environ["GIT_CEILING_DIRECTORIES"] = "/inherited"
+    tmpdir = os.path.join(scratch, "tmp")
+    os.mkdir(tmpdir)
+    os.environ["TMPDIR"] = tmpdir
+    mod.tempfile.tempdir = None
     mod.git(["config", "--get", "user.email"])
     with open(record) as fh:
         seen = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
-    check(seen.get("GIT_DIR") == mod.NO_REPO and "GIT_CONFIG_PARAMETERS" not in seen
+    check("GIT_DIR" not in seen and "GIT_WORK_TREE" not in seen and "GIT_CONFIG_PARAMETERS" not in seen
           and seen.get("GIT_CONFIG_GLOBAL") == "/custom/global" and seen.get("GIT_CONFIG_NOSYSTEM") == "1",
           "the git child process sees exactly the scrubbed environment")
+    with open(cwd_record) as fh:
+        ran_in = fh.read().strip()
+    with open(cwd_record + ".ls") as fh:
+        listing = fh.read()
+    check(os.path.dirname(ran_in) == os.path.realpath(tmpdir) and listing == "",
+          "git runs from a fresh, empty directory under $TMPDIR")
+    check(seen.get("GIT_CEILING_DIRECTORIES") == os.path.realpath(tmpdir),
+          "the ceiling is that directory's parent, replacing an inherited one")
+    check(not os.path.exists(ran_in) and os.listdir(tmpdir) == [], "the empty directory is removed afterwards")
+    colon = os.path.join(scratch, "a:b")
+    os.mkdir(colon)
+    os.environ["TMPDIR"] = colon
+    mod.tempfile.tempdir = None
+    os.unlink(record)
+    rc, _, err = mod.git(["config", "--get", "user.email"])
+    check(rc == 127 and "cannot run git outside a repository" in err and not os.path.exists(record)
+          and os.listdir(colon) == [],
+          "a ceiling holding ':' (git's list separator) is refused, git is not run, nothing is left")
+    mod.tempfile.tempdir = None
     os.environ.clear()
     os.environ.update(saved)
 

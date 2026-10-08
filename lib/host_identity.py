@@ -140,10 +140,6 @@ GIT_LOCAL_ENV = frozenset(
     ]
 )
 
-# GIT_DIR for every config read: a path that cannot exist (/dev/null is not
-# a directory), so git finds no repository and reads only the system and
-# global levels, even when $HOME itself is a git repository.
-NO_REPO = "/dev/null/no-repository"
 
 # In auto mode warnings are collected here and reduced to one line (main()).
 _captured = None
@@ -581,27 +577,46 @@ def read_small_file(path):
             os.close(fd)
 
 
-def git_env():
+def git_env(ceiling):
+    """The environment of every git call: the caller's, without git's
+    repository-local variables (GIT_DIR among them), and with
+    GIT_CEILING_DIRECTORIES set to CEILING alone."""
     env = dict(os.environ)
     for k in list(env):
         if k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_") or k.startswith("GIT_CONFIG_VALUE_"):
             del env[k]
-    env["GIT_DIR"] = NO_REPO
+    env["GIT_CEILING_DIRECTORIES"] = ceiling
     return env
 
 
-def git(args, cwd=None):
-    """Run git; return (rc, stdout without the final newline, stderr)."""
+def git(args):
+    """Run git; return (rc, stdout without the final newline, stderr).
+
+    git runs with no repository: its working directory is a fresh, empty
+    temporary directory, and GIT_CEILING_DIRECTORIES names that directory's
+    parent, so discovery looks at the empty directory alone and never climbs
+    to the caller's repository, a $HOME that is one, or one holding $TMPDIR.
+    Only the system and global levels are read. Not a GIT_DIR that cannot
+    exist: git then dies on every read that evaluates an
+    [includeIf "gitdir:..."] condition (rc 128, "Invalid path"). Both paths
+    are resolved, as git resolves its working directory before comparing it
+    with a ceiling; ':' separates ceilings, so a path holding one is refused
+    rather than half-applied."""
     try:
-        p = subprocess.run(
-            ["git"] + args,
-            cwd=cwd,
-            env=git_env(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-        )
+        with tempfile.TemporaryDirectory(prefix="host_identity.git.") as empty:
+            empty = os.path.realpath(empty)
+            ceiling = os.path.dirname(empty)
+            if os.pathsep in ceiling:
+                return 127, "", "cannot run git outside a repository: %s holds %r" % (ceiling, os.pathsep)
+            p = subprocess.run(
+                ["git"] + args,
+                cwd=empty,
+                env=git_env(ceiling),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+            )
     except (OSError, subprocess.TimeoutExpired) as e:
         return 127, "", str(e)
     out = p.stdout.decode("utf-8", "replace")
@@ -777,12 +792,12 @@ class Host(object):
         args = ["config", "--includes"]
         if typ:
             args.append("--type=" + typ)
-        rc, out, err = git(args + ["--get", key], cwd=self.home)
+        rc, out, err = git(args + ["--get", key])
         return Value(rc, out, err)
 
     def origins(self, key):
         """[(origin, value)] for every effective value of KEY, in git's order."""
-        rc, out, _ = git(["config", "--includes", "--show-origin", "--null", "--get-all", key], cwd=self.home)
+        rc, out, _ = git(["config", "--includes", "--show-origin", "--null", "--get-all", key])
         if rc != 0:
             return []
         parts = out.split("\0")
@@ -803,7 +818,9 @@ class Host(object):
     def includes_local(self):
         """True when some file git reads has an [include] path that resolves
         to config.local, so a value written there is read. includeIf is not
-        counted: outside a repository its conditions do not hold."""
+        counted: these reads run outside any repository (git()), where a
+        gitdir: or onbranch: condition never holds, and leaving out a
+        hasconfig: one can only make the writing modes write nothing."""
         for origin, value in self.origins("include.path"):
             if not origin.startswith("file:") or not value:
                 continue

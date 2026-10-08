@@ -318,6 +318,56 @@ out="$(cd "$HOME/repo" && GIT_DIR="$HOME/repo/.git" GIT_CONFIG_COUNT=1 \
 expect_rc 0 "ambient repository and -c config ignored"
 [ "$(get user.email)" = "me@example.com" ] || fail "ambient config steered the identity: $(get user.email)"
 ok
+# A $TMPDIR inside a repository: git runs from an empty directory there, and
+# GIT_CEILING_DIRECTORIES keeps it from climbing into that repository.
+rm -f "$local_cfg"
+mkdir -p "$HOME/repo/tmp"
+rc=0
+out="$(cd "$HOME/repo" && GIT_WORK_TREE="$HOME/repo" TMPDIR="$HOME/repo/tmp" "$installer" identity 2>&1)" || rc=$?
+expect_rc 0 "a TMPDIR inside a repository"
+[ "$(get user.email)" = "me@example.com" ] || fail "the repository around TMPDIR steered the identity: $(get user.email)"
+[ -z "$(ls -A "$HOME/repo/tmp")" ] || fail "the empty git directory was left in TMPDIR: $(ls -A "$HOME/repo/tmp")"
+ok
+
+# --- includeIf gitdir: in the global config is read, and never applies -------
+# git once died on these reads (rc 128, "Invalid path") when the step pointed
+# GIT_DIR at a path that cannot exist, so the step wrote nothing and blamed a
+# missing include. Each condition here would hold for a repository under
+# ~/work, and the one on the empty directory's parent would hold if that
+# directory were a repository; none may reach the trust root or the identity.
+for cond in gitdir gitdir/i; do
+  fresh
+  export FAKE_AGENT_KEYS="$K1"
+  printf 'me@example.com %s\n' "$K1" > "$signers"
+  printf 'evil@example.com %s\n' "$K1" > "$HOME/evil_signers"
+  printf '[user]\n\temail = evil@example.com\n[gpg "ssh"]\n\tallowedSignersFile = %s\n' "$HOME/evil_signers" \
+    > "$XDG_CONFIG_HOME/git/evil.inc"
+  mkdir -p "$HOME/tmp"
+  printf '[includeIf "%s:~/work/"]\n\tpath = evil.inc\n[includeIf "%s:%s/tmp/**"]\n\tpath = evil.inc\n[includeIf "%s:**"]\n\tpath = evil.inc\n' \
+    "$cond" "$cond" "$HOME" "$cond" >> "$XDG_CONFIG_HOME/git/config"
+  git init -q "$HOME/work/r"
+  [ "$(git -C "$HOME/work/r" config --get user.email)" = evil@example.com ] \
+    || fail "$cond: the fixture's condition does not hold inside ~/work/r, so this case proves nothing"
+  for where in "$HOME" "$HOME/work/r"; do
+    rm -f "$local_cfg"
+    rc=0
+    out="$(cd "$where" && TMPDIR="$HOME/tmp" "$installer" identity 2>&1)" || rc=$?
+    expect_rc 0 "includeIf $cond, run from $where"
+    lacks "Invalid path" "includeIf $cond, run from $where"
+    [ "$(get user.email)" = "me@example.com" ] || fail "includeIf $cond from $where: $(get user.email)"
+  done
+  # The two quiet modes read the same way: auto finds the host signing, and
+  # check has no stale key to report.
+  rc=0
+  out="$(cd "$HOME/work/r" && python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" \
+    --mode auto 2>&1)" || rc=$?
+  expect_rc 0 "includeIf $cond, auto mode"; [ -z "$out" ] || fail "includeIf $cond, auto mode spoke: $out"
+  rc=0
+  out="$(cd "$HOME/work/r" && python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" \
+    --mode check 2>&1)" || rc=$?
+  expect_rc 0 "includeIf $cond, check mode"; [ -z "$out" ] || fail "includeIf $cond, check mode spoke: $out"
+  ok
+done
 
 # --- D2: two principals, two keys, and the user.email filter -----------------
 fresh
