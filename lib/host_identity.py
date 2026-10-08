@@ -10,8 +10,11 @@
 # `python3 -I lib/host_identity.py --config-local PATH --installer PATH
 #  --mode MODE ...`:
 #   auto      the `install` and `link` arms (so every upgrade too): quiet when
-#             the host already signs, one line when it cannot act, never
-#             rotates, never writes user.name, never writes in an SSH session,
+#             the host already signs and has a user.name, one line when it
+#             cannot act, one line naming `identity --name` while only
+#             user.name is missing, never rotates, never writes user.name
+#             (the operator's to choose; the line only suggests the
+#             account's full name), never writes in an SSH session,
 #             silent on a host that opted out of signing (a false in
 #             config.local, opted_out());
 #             with --report-stale (the `link` arm) one line when the
@@ -572,6 +575,9 @@ def gecos_name(pw):
     the account has none (a Linux account's GECOS often is)."""
     field = (pw.pw_gecos or "").split(",", 1)[0]
     login = pw.pw_name or ""
+    # git capitalizes with an ASCII toupper(); str.upper() differs from it
+    # only when the login's first letter is not ASCII, which a login never
+    # is in practice. Either way the result is only a suggestion.
     return field.replace("&", login[:1].upper() + login[1:]).strip()
 
 
@@ -580,14 +586,34 @@ def gecos_name(pw):
 # suggested command would not pass it through unchanged.
 _SHELL_ACTIVE = '"\\$`!'
 
+# Code points a terminal shows as nothing or as a plain space that
+# _BAD_CATEGORIES lets through (they are letters, marks or symbols, not
+# format characters): the Hangul fillers, the combining grapheme joiner,
+# the Khmer and Mongolian invisible vowels and selectors, the variation
+# selectors, and the braille blank. A suggested name holding one would look
+# like a different name than the one written.
+_INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+              (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+              (0xE0100, 0xE01EF))
+
+
+def _invisible(c):
+    o = ord(c)
+    return any(lo <= o <= hi for lo, hi in _INVISIBLE)
+
 
 def suggested_name(name):
     """The value the missing-name line puts after --name: NAME when
-    install.sh identity would accept it and a shell passes it through double
-    quotes unchanged, else the placeholder. Through _shown() as well, so a
-    control character could never reach the terminal even if valid_name()
-    were loosened."""
-    if name and valid_name(name) and not any(c in _SHELL_ACTIVE for c in name):
+    install.sh identity would accept it, a shell passes it through double
+    quotes unchanged, and it reads on screen as what it is (a letter or a
+    digit, no space but U+0020, no invisible code point), else the
+    placeholder. Through _shown() as well, so a control character could
+    never reach the terminal even if valid_name() were loosened."""
+    if (name and valid_name(name)
+            and not any(c in _SHELL_ACTIVE for c in name)
+            and any(c.isalnum() for c in name)
+            and not any(c.isspace() and c != " " for c in name)
+            and not any(_invisible(c) for c in name)):
         return _shown(name)
     return "Full Name"
 
@@ -2392,7 +2418,7 @@ def run(host, mode, name, report_stale, verbose=False):
             return 0, None
         # One line at most: main() keeps only the first warning.
         return (overridden_line(host) or stale_line(host)), None
-    if mode == "auto" and signing_configured(host):
+    if mode == "auto" and signing_configured(host) and host.effective("user.name").unset:
         # Only user.name is missing, which the step never writes. Its line is
         # the one line, ahead of a stale-key or override line: under the
         # tracked user.useConfigOnly = true git refuses every commit without
@@ -2400,7 +2426,8 @@ def run(host, mode, name, report_stale, verbose=False):
         # Not through identity(): with the email and key in place it would
         # write nothing, and an unreachable agent would bury the name line
         # under an agent line. The next run, once the name is set, reports
-        # the stale key.
+        # the stale key. A user.name git cannot read is not "not set": it
+        # falls through to identity(), like any other failed read.
         warn(missing_name_line(host))
         return 0, None
     if not global_reads_local(host):
@@ -2470,7 +2497,11 @@ def main(argv):
     # (the tracked user.useConfigOnly). A missing email is never a line of
     # its own: the step writes it, or the headline names why it cannot. A
     # missing name on an otherwise configured host is printed alone by
-    # run(), ahead of a stale-key or override line.
+    # run(), ahead of a stale-key or override line. A host missing both
+    # hears the cause first: a run that writes the email prints its `wrote`
+    # line (log(), not a warning) and then the name line, since rc 0 keeps
+    # every warning; a run that cannot write prints its one cause line, and
+    # the name line comes on a later run.
     if lines:
         if rc == 0:
             for line in lines:

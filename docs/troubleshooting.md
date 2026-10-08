@@ -305,7 +305,7 @@ on GPG for now, set `gpg.format = openpgp` in `config.local`.
 
 `git commit` stops, and no commit is made, with one of these lines (so do
 `git merge`, `git rebase`, and `git pull`, which rebases here, whenever they
-make a commit):
+make a commit, and `git tag -a`, which records a tagger):
 
 ```text
 fatal: no email was given and auto-detection is disabled

@@ -669,7 +669,7 @@ def main(argv):
         check(got == want, "gecos %r for %s reads as the full name %r (got %r)" % (gecos, login, want, got))
     check(mod.suggested_name("Jane Doe") == "Jane Doe", "the line suggests the account's full name when gecos has one")
     check(mod.suggested_name("") == "Full Name", "an account with no full name gets the placeholder")
-    for bad in ("Jane\x1b[2JDoe", "Jane‮Doe", "Jane <x>", 'Jane "JJ" Doe', "Jane $(id)", "Jane `id`",
+    for bad in ("Jane\x1b[2JDoe", "Jane\u202eDoe", "Jane <x>", 'Jane "JJ" Doe', "Jane $(id)", "Jane `id`",
                 "Jane\\Doe", "Jane!Doe"):
         got = mod.suggested_name(bad)
         check(got == "Full Name", "a full name %r that git, a shell or the terminal would not pass unchanged is not suggested (got %r)"
@@ -682,6 +682,79 @@ def main(argv):
         mod.account_name = saved_account
     check(line == 'identity: user.name is not set - run: INSTALLER identity --name "Full Name"'
           and mod._clean(line), "a control character in the account's full name never reaches the line")
+    # A name a terminal shows as blank, or as a different name than the one
+    # written: no letter or digit, a space other than U+0020, a Hangul
+    # filler, or another invisible code point _clean() lets through.
+    for blank in ("\u3164", "Jane\u3164Doe", "\u115f", "\u1160", "Jane\uffa0Doe", "Jane\u00a0Doe",
+                  "Jane\u3000Doe", "Jane\u2800Doe", "Jane\ufe0fDoe", "Jane\u034fDoe", "Jane\U000e0100Doe",
+                  "-", "...", "&"):
+        got = mod.suggested_name(blank)
+        check(got == "Full Name", "a full name %r a terminal does not show as it is is not suggested (got %r)"
+              % (blank, got))
+    for good in ("Jos\u00e9 \u00d1\u00fa\u00f1ez", "Jane Doe 3rd", "\u674e\u5c0f\u9f8d", "O'Brien-Smith"):
+        got = mod.suggested_name(good)
+        check(got == good, "a full name %r is suggested as it is (got %r)" % (good, got))
+    # account_name(): an account the password database cannot name (KeyError)
+    # or a failed lookup (OSError) has no full name, never a traceback.
+    real_getpwuid = mod.pwd.getpwuid
+    for exc in (KeyError("getpwuid(): uid not found: 4242"), OSError(errno.EIO, "I/O error")):
+        def raising(uid, exc=exc):
+            raise exc
+        mod.pwd.getpwuid = raising
+        try:
+            got = mod.account_name()
+        finally:
+            mod.pwd.getpwuid = real_getpwuid
+        check(got == "", "account_name() is empty when getpwuid() raises %s (got %r)" % (type(exc).__name__, got))
+
+    # --- a configured host: signing_configured() and already_configured() ---
+    class Fixed(mod.Host):
+        """effective() answers from VALUES: rc 0 when the key is there, 1
+        when it is not, the rc given for a (rc, err) tuple."""
+
+        def __init__(self, values):
+            mod.Host.__init__(self, scratch, os.path.join(scratch, "c"), "INSTALLER")
+            self.values = values
+
+        def effective(self, key, typ=None):
+            v = self.values.get(key)
+            if v is None:
+                return mod.Value(1, "", "")
+            if isinstance(v, tuple):
+                return mod.Value(v[0], "", v[1])
+            return mod.Value(0, v, "")
+
+    signing = {"user.email": "me@example.com", "user.signingkey": "key::x", "commit.gpgsign": "true"}
+    for values, want_signing, want_configured, what in (
+            (dict(signing, **{"user.name": "Jane Doe"}), True, True, "every key and a name"),
+            (signing, True, False, "every signing key but no name"),
+            (dict(signing, **{"user.name": (128, "boom")}), True, False, "every signing key and an unreadable name"),
+            ({"user.name": "Jane Doe", "user.email": "me@example.com"}, False, False, "a name but no signing key")):
+        host = Fixed(values)
+        got = (mod.signing_configured(host), mod.already_configured(host))
+        check(got == (want_signing, want_configured),
+              "%s: signing_configured, already_configured = %r, want %r" % (what, got, (want_signing, want_configured)))
+
+    # run(): an unreadable user.name on a host that otherwise signs is not
+    # "not set". It falls through to identity()'s path (stopped here at
+    # global_reads_local()), never the missing-name line.
+    reached = []
+    patched = {"local_is_regular": lambda h: True, "git_isolate": lambda: None, "opted_out": lambda h: None,
+               "global_reads_local": lambda h: reached.append(True) or False}
+    saved_fns = dict((k, getattr(mod, k)) for k in patched)
+    for k, f in patched.items():
+        setattr(mod, k, f)
+    mod._captured = []
+    try:
+        rc, _ = mod.run(Fixed(dict(signing, **{"user.name": (128, "fatal: boom")})), "auto", None, False)
+        said = mod._captured
+    finally:
+        mod._captured = None
+        for k, f in saved_fns.items():
+            setattr(mod, k, f)
+    check(rc == 1 and reached and not any("user.name is not set" in line for line in said),
+          "auto with an unreadable user.name goes on to identity(), not the missing-name line (rc %d, %r)"
+          % (rc, said))
 
     # --- files: the size cap; a KRL check with no usable TMPDIR -------------
     big = os.path.join(scratch, "big")
