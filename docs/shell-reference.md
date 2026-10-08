@@ -12,6 +12,7 @@ variables and files. For the reasoning behind any of it, see
 
 - [`install.sh` subcommands](#installsh-subcommands)
   - [`install.sh identity`](#installsh-identity)
+  - [`install.sh doctor`](#installsh-doctor)
 - [Lifecycle commands](#lifecycle-commands)
 - [restic wrappers](#restic-wrappers)
 - [Helper functions](#helper-functions)
@@ -43,7 +44,8 @@ given.
 | `packages` | none | `brew bundle` over `packages/Brewfile`, then `packages/Brewfile.local` if present, then the pinned `gh` extensions. Never runs a remote bootstrap script. |
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink (which runs the automatic [identity step](#installsh-identity)), recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
-| `identity` | `[--name "Full Name"]`, `[--rotate]` | Sets `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
+| `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
+| `doctor` | `[--verbose]` | Checks the identity, the signing key and the tools they need, and writes nothing. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
 
@@ -53,8 +55,9 @@ plugin: it then runs `git submodule update --init` to repair a non-recursive
 clone. On a healthy checkout it is a strict no-op.
 
 Exit codes: `2` for a usage error (unknown subcommand, an argument to a
-subcommand that takes none, unknown uninstall or identity option), `1` when
-the work could not complete, `0` on success. A refused link makes `install`
+subcommand that takes none, unknown uninstall, identity or doctor option),
+`1` when the work could not complete (or, for `doctor`, when it found a
+problem), `0` on success. A refused link makes `install`
 and `link` exit 1, but only after the other links and the cached integrations
 are in place.
 `install` then skips the plugin submodule step (its one network step) until a
@@ -73,20 +76,24 @@ which re-enters `link` on the new tree. The automatic step:
 - writes only when the effective config lacks `user.email`,
   `user.signingkey` or `commit.gpgsign` (`true`, or the explicit `false`
   below), so a host that signs hears nothing from it while its key verifies;
-- on such a host, in `link` and so in every `upgrade`, prints one line when
-  a later file turns off the signing `config.local` turns on, or when the
-  configured key no longer verifies for `user.email` (its entry is gone or
-  expired, the key is revoked, or the revocation file cannot be checked),
-  naming `<checkout>/install.sh identity --rotate` or, for an override or
-  when the revocation file is the cause, `<checkout>/install.sh identity`.
-  `install` leaves that to its advisory, which prints the full report below;
+- on a host that already signs, in `link` and so in every `upgrade`, prints
+  one line when a later file turns off the signing `config.local` turns on,
+  or when the configured key no longer verifies for `user.email` (its entry
+  is gone or expired, the key is revoked, or the revocation file cannot be
+  checked), naming `<checkout>/install.sh identity --rotate` or, for an
+  override or when the revocation file is the cause,
+  `<checkout>/install.sh identity`. `install` leaves that to its advisory,
+  which prints the full report below;
 - never rotates a key, and never writes `user.name`, which nothing on the host
   can derive;
 - writes nothing in an SSH session (`SSH_CONNECTION` is set), where the agent
-  is usually forwarded from another machine and holds that machine's keys.
-  `install.sh identity`, run on purpose, still works there;
+  is usually forwarded from another machine and holds that machine's keys,
+  and prints one line saying so. `install.sh identity`, run on purpose,
+  still works there;
 - prints one line when it cannot act, naming the cause and
   `<checkout>/install.sh identity`, which prints the details;
+- writes nothing and prints nothing on a host that opted out of signing (see
+  [opting a host out of signing](#opting-a-host-out-of-signing));
 - never changes the exit status of `install`, `link` or `upgrade`.
 
 Every git config read here asks for the effective value outside any
@@ -139,8 +146,8 @@ so the step writes nothing under it. Relative paths in `user.signingkey`,
    now, and it is not a `cert-authority` line. A key that the effective
    `gpg.ssh.revocationFile` lists (a key list or a KRL) never counts, and a
    revocation file that is set but cannot be read writes nothing, and so does
-   a key list that holds a line, other than a comment, that is not a key or
-   holds a NUL byte. A principal
+   a key list that holds a line, other than a blank line or a comment, that
+   is not a key or holds a NUL byte. A principal
    counts only when it is a literal address, never a pattern such as
    `*@example.com`, and holds no space, `<>`, `[]`, quote, control or
    invisible character. Malformed lines are skipped and named, and a line
@@ -179,10 +186,10 @@ that is right in `config.local` but overridden by a later file, such as
 
 One exception: an effective `commit.gpgsign = false` or `tag.gpgsign =
 false`, set in `config.local` or at any other level, is this host's exception
-to signing, unless `config.local` itself says `true`. The step keeps it,
-prints `identity: <key> is false (<origin>) - kept as this host's exception,
-so it stays off`, and still writes the email, the key and whatever else is
-absent. A conflicting `user.email`, `user.signingkey` or
+to signing, unless `config.local` itself says `true`. `install.sh identity`
+keeps it, prints `identity: <key> is false (<origin>) - kept as this host's
+exception, so it stays off`, and still writes the email, the key and
+whatever else is absent. A conflicting `user.email`, `user.signingkey` or
 `gpg.ssh.allowedSignersFile` still makes it write nothing.
 
 A `true` in `config.local` that a later file turns `false` is not the
@@ -208,7 +215,35 @@ and every signed commit would fail.
 is not a regular file (a FIFO, a directory) is refused before any git read,
 since git opens it through the include.
 
-#### Rotating the signing key
+#### Opting a host out of signing
+
+This is the one statement of the rule; other pages link here. A host opts
+out of signing with a `commit.gpgsign = false` that git reads last from
+`config.local` itself, while `tag.gpgsign` is not effectively `true` (with
+it, tags still sign, so the key still matters). Every spelling git reads as
+false counts: `false`, `no`, `off`, `0`. On an opted-out host:
+
+- the automatic step writes nothing and prints nothing, on `install`, `link`
+  and every `upgrade`;
+- the `install` advisory says nothing about signing, and still names a
+  `~/.gitconfig` (see [the stale-key report](#the-stale-key-report));
+- no mode turns `tag.gpgsign` on: when it is unset, `install.sh identity`
+  leaves it unset and prints `identity: tag.gpgsign is left unset while
+  commit.gpgsign is false (this host opted out of signing)`;
+- `install.sh doctor` prints the problems that matter only to signing as
+  notes, and `--verbose` names the opt-out (see
+  [`install.sh doctor`](#installsh-doctor)).
+
+`install.sh identity` and `--rotate`, run on purpose, still work there.
+
+A `false` from any other level, such as `/etc/gitconfig`, `~/.gitconfig` or
+a file an `[include]` pulls in, is not an opt-out: that file may be nobody's
+decision for this host. It is the exception above. The automatic step
+writes the identity beside it and names it, the `install` advisory names
+it, and `install.sh doctor` reports it as a problem with its file. A
+`git -c` setting never reaches these reads, as described above.
+
+#### The `--rotate` rule
 
 `install.sh identity --rotate` replaces `user.signingkey`, and nothing else,
 when two things hold: the configured key no longer verifies for the effective
@@ -233,11 +268,81 @@ is in [architecture](architecture.md#rotating-the-signing-key).
 - a `user.signingkey` set in any file other than `config.local`;
 - a dangling or present `~/.gitconfig` (the advisory only, signing on or off),
   since git reads it after `~/.config/git/config` and `git config --global`
-  then reads and writes only it.
+  then reads and writes only it;
+- a `commit.gpgsign` that is unset, `false` or not a boolean (the advisory
+  only).
 
-`install.sh identity` exits `0` when the identity is in place, `1` when it wrote
-nothing, kept a different value, or reported a stale key, and `2` on a usage
-error.
+The advisory is `--mode check` of `lib/host_identity.py`, so it prints
+nothing when `python3` does not run; the identity step, which runs first,
+says so. On a host that opted out of signing it reports only `~/.gitconfig`.
+
+`install.sh identity` exits `0` when the identity is in place, written now or
+already there; `1` when it refused to write, kept a different value, or
+reported a stale key; and `2` on a usage error.
+
+### `install.sh doctor`
+
+Checks this host's git identity, its signing key, and the tools they depend
+on, and changes nothing. It reads git config, the allowed-signers and
+revocation files, `ssh-add -L` and `ssh-keygen`, and opens no network
+connection of its own. Each tool runs under a time limit; each file is
+opened without blocking and read up to 1 MiB. `ssh-add -L` asks the agent
+that `SSH_AUTH_SOCK` names for its public keys only; a forwarded agent
+answers over the SSH session that forwards it. The one file it can
+create is the temporary public key `ssh-keygen -Q` reads when
+`gpg.ssh.revocationFile` is a KRL, removed right after. The checks are a
+registry, `CHECKS` in `lib/host_identity.py`, run in this order:
+
+| Check | What it reads | A problem when |
+| --- | --- | --- |
+| `git` | `git --version`, `GIT_CONFIG_GLOBAL`, the `[include]` chain | git does not run, is older than 2.34 (the first to sign with SSH keys), `GIT_CONFIG_GLOBAL` names a file other than `$XDG_CONFIG_HOME/git/config`, or no `[include]` reaches `config.local` |
+| `python3` | the running interpreter | `python3 -I -c ''` fails (`install.sh` reports this itself, since the checks need python3) |
+| `ssh-keygen` | `ssh-keygen -Y find-principals` on empty input | `ssh-keygen` is missing, does not run, or does not know `-Y` |
+| `values` | `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.format`, `gpg.ssh.allowedSignersFile`, `gpg.ssh.revocationFile`: the effective value and the file it comes from | `gpg.format` is not `ssh`; `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign` or `gpg.ssh.allowedSignersFile` is unset or cannot be read; `commit.gpgsign` or `tag.gpgsign` is not a boolean git reads; `commit.gpgsign = false` comes from a file other than `config.local`; a `true` in `config.local` is overridden by a later `false` |
+| `trust root` | the allowed-signers file, found the way [`install.sh identity`](#installsh-identity) finds it, and the revocation file | no allowed-signers file is found or readable, or the revocation file cannot be used |
+| `ssh-agent` | `ssh-add -L`, and which agent keys the allowed-signers file lists for the `git` namespace | the agent cannot be reached or holds no key while signing needs it, or a malformed line names an agent key |
+| `signing key` | the effective `user.signingkey`, as the [stale-key report](#the-stale-key-report) judges it | the key no longer verifies, is not in a reachable agent, names no readable key, or is set outside `config.local` |
+| `ssh session` | `SSH_CONNECTION` | never; with `--verbose` it notes that the automatic step writes nothing in the session |
+| `~/.gitconfig` | `~/.gitconfig` | it is a dangling symlink, not a regular file, or sets `user.*`, `gpg.*`, `commit.gpgsign` or `tag.gpgsign` |
+
+By default it prints one line per problem, `install: doctor: <check>: <what
+is wrong> - <the fix>`, and nothing else, so a host in good shape prints
+nothing. Before any check, a `config.local` that is not a regular file is
+reported in one line, `doctor: git: <path> is not a regular file`, and
+doctor stops there: git would block on it. A git that cannot be kept outside
+every repository, which the identity step refuses, stops doctor the same way,
+in one line: `doctor: git: not reading the git config: <reason>`.
+
+`--verbose` prints every finding: a problem or a passing check as is, and
+`note:` before one that is neither. Its last line is one of:
+
+```text
+install: doctor: verdict: nothing needs action
+install: doctor: verdict: signing is off on purpose on this host; nothing needs action
+install: doctor: verdict: <n> problem(s) need action
+```
+
+On a host that opted out of signing (see
+[opting a host out of signing](#opting-a-host-out-of-signing)), a problem
+that matters only to signing prints as a note: the git version,
+`ssh-keygen`, `gpg.format`, `user.signingkey`, `gpg.ssh.allowedSignersFile`,
+the trust root, the ssh-agent and the signing key. Every other problem still
+counts, since it shapes every commit, signed or not: `user.name`,
+`user.email` (the fix then names `git config --file`, since
+`install.sh identity` needs a signing key), a `commit.gpgsign` or
+`tag.gpgsign` git cannot read, the `[include]` chain, `GIT_CONFIG_GLOBAL`,
+`python3` and `~/.gitconfig`. `--verbose` names the opt-out:
+`commit.gpgsign = false from <origin>: respected as this host's opt-out;
+the automatic step stays quiet and writes nothing`.
+
+It prints no file's contents. A `user.signingkey` that names a private key
+file is recognised by its first line and judged by the `.pub` beside it.
+Config values print as git returns them, with a control or invisible
+character escaped, and agent keys print as `SHA256:` fingerprints.
+
+`install.sh doctor` exits `0` when it found no problem (a host that opted out
+included), `1` when it found one (a `python3` that does not run included),
+and `2` on a usage error.
 
 ## Lifecycle commands
 
@@ -495,7 +600,7 @@ Read as configuration:
 | `DOTFILES_UPDATE_DISABLE` | unset | Any non-empty value disables the update sentinel. `DOTFILES_UPDATE_DISABLE=0` disables it too, because the test is `-n`, not a comparison against `1`. |
 | `FZF_SHELL_DIR` | unset | Where to find fzf's `key-bindings.zsh` and `completion.zsh`. |
 | `STRICT` | unset | Set by CI. Turns a skipped gate into a hard failure. |
-| `CANGA_HOST_ALLOWED_SIGNERS` | unset | Read by [`install.sh identity`](#installsh-identity) as the first place to look for the allowed-signers file. |
+| `CANGA_HOST_ALLOWED_SIGNERS` | unset | Set by you, for canga, to the allowed-signers file. [`install.sh identity`](#installsh-identity) and `install.sh doctor` read it as the first place to look for that file, before `gpg.ssh.allowedSignersFile`. |
 
 ## Generated files
 

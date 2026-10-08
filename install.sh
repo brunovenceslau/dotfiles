@@ -22,6 +22,8 @@
 #                                    signing from the host's allowed_signers and
 #                                    ssh-agent (install runs it too); --rotate
 #                                    replaces a signing key that no longer verifies
+#   install.sh doctor [--verbose]    read only: print each identity or signing
+#                                    problem in one line (--verbose: every check)
 #   install.sh -h | --help | help    print a short usage line
 #
 # reseed-settings is retired: kept as a no-op, cross-version ABI only (see
@@ -598,7 +600,9 @@ EOF
 # absent, is quiet once the host signs, prints ONE line (naming
 # "$DOTFILES/install.sh identity" for the details) when it cannot act, does
 # nothing in an SSH session (a forwarded agent holds another machine's keys),
-# never rotates a key and never writes user.name (no source can derive it;
+# writes and prints nothing on a host that opted out of signing (a
+# commit.gpgsign = false in config.local itself; `doctor` names it), never
+# rotates a key and never writes user.name (no source can derive it;
 # `identity --name` does). With --report-stale (the `link` arm only, since
 # `install` runs the fuller _signing_advisory right after), a host that already
 # signs gets ONE line when its configured key no longer verifies (retired,
@@ -628,15 +632,28 @@ do_identity() {
     --installer "$DOTFILES/install.sh" "$@"
 }
 
-# authoring-side advisory. The tracked git config deliberately omits
-# commit.gpgsign (a keyless fresh clone must still be able to commit), so a host
-# with no config.local commits UNSIGNED with no other signal: nothing local
-# refuses the commit, and it surfaces only after the push, as a missing Verified
-# badge or a remote branch rule that requires signatures. Warn once at install
-# time, pointing at the fix. Non-fatal; reads the global config (the linked
-# ~/.config/git/config + its config.local include).
+# do_doctor [--verbose] - `install.sh doctor`: lib/host_identity.py's
+# read-only checks (its CHECKS registry). It writes nothing, prints only the
+# problems (every check with --verbose) and returns 1 when it found one. A
+# python3 that does not run is the one problem reported here, since the checks
+# themselves need it.
+do_doctor() {
+  if ! _python_ok; then
+    log "doctor: python3: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)"
+    return 1
+  fi
+  python3 -I "$DOTFILES/lib/host_identity.py" --config-local "$xdg_config/git/config.local" \
+    --installer "$DOTFILES/install.sh" --mode doctor "$@"
+}
+
+# authoring-side advisory, run by the `install` arm after the identity step.
+# What it says is decided in ONE place, lib/host_identity.py's advisory()
+# (`--mode check`): a host that commits unsigned, a ~/.gitconfig that shadows
+# the XDG config, a stale key, a signing setting that a later file overrides.
+# It says nothing about signing on a host that opted out (a commit.gpgsign =
+# false in config.local). Non-fatal. Quiet when python3 is unusable: the
+# identity step, which runs first, already said so.
 _signing_advisory() {
-  local gpgsign
   command -v git >/dev/null 2>&1 || return 0
   # Before ANY git call: git opens the global chain at startup, config.local
   # include and all, even for a `git config --file` read, and a config.local
@@ -645,60 +662,6 @@ _signing_advisory() {
   if [ -e "$xdg_config/git/config.local" ] && [ ! -f "$xdg_config/git/config.local" ]; then
     return 0
   fi
-  # ~/.gitconfig first, signing on or off: git reads it AFTER the XDG config, so
-  # whatever it sets wins, and `git config --global` then reads and writes only
-  # that file. A DANGLING one is inert today but comes back to life, old
-  # settings and all, the day its target is restored from a backup. One that
-  # carries signing settings can, for example, pit a legacy GPG signingkey
-  # against the framework's gpg.format=ssh and make every commit FAIL CLOSED.
-  if [ -L "$HOME/.gitconfig" ] && [ ! -e "$HOME/.gitconfig" ]; then
-    warn "a dangling ~/.gitconfig symlink is in place - if its target ever comes back, its"
-    warn "  settings override ~/.config/git/config. Remove it (XDG-only model)."
-  elif [ -f "$HOME/.gitconfig" ] \
-     && git config --file "$HOME/.gitconfig" --get-regexp '^(user\.signingkey|gpg\.|commit\.gpgsign)' >/dev/null 2>&1; then
-    warn "a legacy ~/.gitconfig carries signing settings and may override the"
-    warn "  framework's XDG config (e.g. a GPG signingkey vs gpg.format=ssh),"
-    warn "  which can make commits fail. Migrate host-specific settings into"
-    warn "  ~/.config/git/config.local and remove ~/.gitconfig (XDG-only model)."
-    warn "  To STAY on GPG during the interim, set gpg.format=openpgp in config.local."
-  elif [ -f "$HOME/.gitconfig" ]; then
-    warn "a ~/.gitconfig exists: its values override ~/.config/git/config, and"
-    warn "  \`git config --global\` reads and writes only it. Move its settings into"
-    warn "  ~/.config/git/config.local and remove it (XDG-only model)."
-  fi
-  # Read the EFFECTIVE commit.gpgsign as a real commit would - ALL levels combined
-  # (system + XDG global + ~/.gitconfig) - from a non-repo cwd ($HOME) so the
-  # dotfiles repo's own local config can't skew it. NOT --global: that selects a
-  # SINGLE global file (~/.gitconfig when it exists) and ignores the framework's
-  # XDG config where config.local lives - so a --global read would false-fire when
-  # a residual ~/.gitconfig sits alongside a signing-enabled config.local. Includes
-  # are on by default without --global; --type=bool normalizes yes/on/1/True.
-  # An explicit false is the host's exception, which the identity step keeps
-  # (lib/host_identity.py, identity()), so the advisory names it and says how to
-  # undo it rather than pointing at a step that will leave it alone. A false
-  # that overrides a true in config.local is not an exception but an override,
-  # which the check below names with its file (tag.gpgsign's too). Either way
-  # the check still runs: a key can go stale while commit signing is off.
-  gpgsign="$(git -C "$HOME" config --includes --type=bool --get commit.gpgsign 2>/dev/null)" || gpgsign=""
-  if [ "$gpgsign" = false ]; then
-    warn "commit signing is NOT enabled on this host (commit.gpgsign is false)."
-    if [ "$(git config --file "$xdg_config/git/config.local" --type=bool --get commit.gpgsign 2>/dev/null)" != true ]; then
-      warn "  An explicit false is kept as this host's exception, and"
-      warn "  $DOTFILES/install.sh identity leaves it. To sign, remove the false"
-      warn "  from the file that sets it (git -C ~ config --show-origin --get commit.gpgsign)."
-    fi
-  elif [ "$gpgsign" != true ]; then
-    warn "commit signing is NOT enabled on this host (commit.gpgsign is unset)."
-    warn "  Run $DOTFILES/install.sh identity, or set user.signingkey +"
-    warn "  commit.gpgsign in ~/.config/git/config.local (see"
-    warn "  config/git/config.local.example). Optional: nothing refuses an unsigned"
-    warn "  commit, but GitHub will not show the Verified badge."
-    return 0
-  fi
-  # A stale key (no longer valid in the trust root, revoked, or not in the
-  # agent), a user.signingkey set outside config.local, and a gpgsign that a
-  # later file turns off against config.local. Quiet when python3 is unusable:
-  # the identity step already said so.
   if _python_ok; then do_identity --mode check || :; fi
 }
 
@@ -851,12 +814,29 @@ case "$cmd" in
     fi
     exit "$id_rc"
     ;;
+  doctor)
+    # Read only, so it is safe at any time; a problem found exits 1, so a
+    # script can gate on it. --verbose is the only option.
+    shift
+    doc_args=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --verbose)
+          [ -z "$doc_args" ] || { warn "doctor: --verbose given more than once"; exit 2; }
+          doc_args=--verbose; shift ;;
+        *) warn "doctor: unknown option: $1 (expected: --verbose)"; exit 2 ;;
+      esac
+    done
+    doc_rc=0
+    if [ -n "$doc_args" ]; then do_doctor --verbose || doc_rc=$?; else do_doctor || doc_rc=$?; fi
+    exit "$doc_rc"
+    ;;
   -h | --help | help)
-    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]|identity [--name NAME] [--rotate]]"
+    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]|identity [--name NAME] [--rotate]|doctor [--verbose]]"
     printf '%s\n' "       (retired, kept for cross-version compatibility: reseed-settings)"
     ;;
   *)
-    warn "unknown command: $cmd (expected: install | link | packages | upgrade | uninstall | identity | reseed-settings)"
+    warn "unknown command: $cmd (expected: install | link | packages | upgrade | uninstall | identity | doctor | reseed-settings)"
     exit 2
     ;;
 esac

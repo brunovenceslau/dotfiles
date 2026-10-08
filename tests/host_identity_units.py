@@ -342,7 +342,7 @@ def git_units(mod, scratch):
         "import importlib.util, sys\n"
         "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
         "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
-        "def run(host, mode, name, report_stale):\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
         "    m.git(['config', '--get', 'user.email'])\n"
         "    raise KeyboardInterrupt\n"
         "m.run = run\n"

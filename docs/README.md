@@ -16,19 +16,20 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, why the installer refuses root, the authoritative list of security properties (what is in scope for a report, and where each is enforced), platform differences. |
+| [architecture.md](architecture.md) | Anyone reading the framework | Design goals, repository layout, the link engine and its manifest, the `.local` layer, the interactive startup path, the pinned plugins and their supply chain, the upgrade path, why the installer refuses root, the host's signing identity (why the key is static, rotation versus revocation, the automatic step, deferred decisions), the authoritative list of security properties (what is in scope for a report, and where each is enforced), platform differences. |
 
 ## Look something up
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [shell-reference.md](shell-reference.md) | A user of the shell | `install.sh` subcommands, lifecycle commands, the restic wrappers, every helper function and alias, commands on `PATH`, key bindings, shell options, environment variables, generated files, `.local` files, config surfaces. |
+| [shell-reference.md](shell-reference.md) | A user of the shell | `install.sh` subcommands (the identity rule and `doctor` included), lifecycle commands, the restic wrappers, every helper function and alias, commands on `PATH`, key bindings, shell options, environment variables, generated files, `.local` files, config surfaces. |
 
 ## Do a task
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [new-mac-host.md](new-mac-host.md) | An operator setting up a machine | Prerequisites, authentication, clone and install, identity and signing, packages, legacy cleanup, verification. |
+| [new-mac-host.md](new-mac-host.md) | An operator setting up a machine | Prerequisites, authentication, clone and install, legacy cleanup, identity and signing, packages, verification. |
+| [signing-key.md](signing-key.md) | An operator running the framework on a host | One recipe per problem: check which identity and key git uses, list a key in the allowed-signers file, add your name after an upgrade, rotate or revoke the key, keep a host from signing, fix commits made with the wrong identity, and what the identity step prints when it works. |
 | [backup-restore.md](backup-restore.md) | An operator running backups | The secret model, rclone and restic setup, the `restic-pass-cli` and `restic-op` wrappers, backup, verify, restore, retention. |
 | [troubleshooting.md](troubleshooting.md) | Anyone with a broken shell | Symptom, cause and fix for the messages you are most likely to see. `tests/troubleshooting_messages_test.sh` checks that each quoted message still exists in the code. |
 
@@ -36,5 +37,5 @@ Each page has one primary reader and one purpose.
 
 | Page | Reader | Covers |
 | --- | --- | --- |
-| [development.md](development.md) | A maintainer | The quality gates and what each proves (every `check-patterns` rule included), `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config or bumping a plugin pin, cutting a release and which version number to bump, and lessons from past reviews. |
+| [development.md](development.md) | A maintainer | The quality gates and what each proves (every `check-patterns` rule included), `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config, bumping a plugin pin or changing the identity step, the maintainers' deferred decisions, cutting a release and which version number to bump, and lessons from past reviews. |
 | [stacked-prs.md](stacked-prs.md) | A maintainer landing a large change | Why every PR targets `main`, the workflow, re-syncing after a merge, keeping signatures through a rebase. |

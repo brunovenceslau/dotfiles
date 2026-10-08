@@ -11,12 +11,18 @@
 #  --mode MODE ...`:
 #   auto      the `install` and `link` arms (so every upgrade too): quiet when
 #             the host already signs, one line when it cannot act, never
-#             rotates, never writes user.name, never writes in an SSH session;
+#             rotates, never writes user.name, never writes in an SSH session,
+#             silent on a host that opted out of signing (a false in
+#             config.local, opted_out());
 #             with --report-stale (the `link` arm) one line when the
 #             configured key no longer verifies
 #   identity  `install.sh identity`: write what is absent, then report a stale key
 #   rotate    `install.sh identity --rotate`: replace ONLY user.signingkey
-#   check     _signing_advisory: report a stale key or a shadowing signingkey
+#   check     _signing_advisory (advisory()): an unsigned host, a ~/.gitconfig,
+#             a stale key or a shadowing signingkey; silent on signing for a
+#             host that opted out
+#   doctor    `install.sh doctor [--verbose]`: read only; print each problem
+#             in one line (every check with --verbose), exit 1 on a problem
 # `-I` keeps the current directory and PYTHON* variables out of sys.path, so a
 # planted module beside the cwd cannot run. It is never linked onto PATH: lib/
 # is not a tree the link engine walks. The behaviour (lookup order, matching
@@ -44,20 +50,22 @@
 # field of 61 and spaces inside a date field (leniencies of glibc's strptime()
 # that macOS does not share), a repeated cert-authority, a NUL byte in a line
 # that is not a comment (ssh-keygen reads a line only up to its first NUL),
-# and key type names other than the canonical ones and rsa-sha2-256/512.
+# and key type names other than those in KEY_TYPES and rsa-sha2-256/512.
 # Such an allowed-signers line is malformed here. A malformed line that spells
 # an ssh-agent key anywhere, read as C reads it or word by word
 # (keys_named()), makes the writing modes write nothing
 # (Host.unclear_lines()), since ssh-keygen may read it as a valid entry for
-# that key. In a flat revocation list, a line that is not a comment and is
-# not a key, or holds a NUL byte, makes them write nothing as well.
+# that key. In a flat revocation list, a line that is not blank, not a
+# comment and not a key, or holds a NUL byte, makes them write nothing as
+# well.
 # tests/host_identity_conformance.py holds this to
 # ssh-keygen over fixed vectors and a generated corpus: no line ssh-keygen
 # refuses is accepted, and no line it accepts is missed without being named.
 #
 # Exit status: 0 the identity is in place (written now or already there);
 # 1 nothing could be decided, a value was left as it was, or a stale key was
-# reported; 2 a usage error. `check` always exits 0.
+# reported; 2 a usage error. `check` always exits 0. `doctor` exits 0 when it
+# found no problem (an explicitly opted-out host included), 1 when it did.
 
 import argparse
 import base64
@@ -66,6 +74,7 @@ import calendar
 import errno
 import hashlib
 import os
+import platform
 import re
 import shutil
 import signal
@@ -523,6 +532,12 @@ _BAD_CATEGORIES = frozenset(["Cc", "Cf", "Zl", "Zp", "Cs"])
 
 def _clean(s):
     return not any(unicodedata.category(c) in _BAD_CATEGORIES for c in s)
+
+
+def _shown(text):
+    """TEXT as it can be printed: repr() when it holds a control or invisible
+    character, so a config value cannot rewrite the terminal."""
+    return text if _clean(text) else repr(text)
 
 
 def usable_principal(p):
@@ -1055,6 +1070,12 @@ class Host(object):
                  % (", ".join(str(n) for n in bad), path))
         return path, source, entries
 
+    def malformed_lines(self):
+        """The line numbers of the allowed-signers file this step skipped as
+        malformed (see the header)."""
+        self.signers()
+        return [n for n, _ in self._bad_keys]
+
     def unclear_lines(self, keys):
         """Malformed allowed-signers line numbers that name one of KEYS.
 
@@ -1374,11 +1395,37 @@ def overridden_signing(host):
     return out
 
 
+def opted_out(host):
+    """The origin (config.local) of the commit.gpgsign = false that opts this
+    host out of signing, or None.
+
+    ONLY a false that git reads last from config.local itself opts out: that
+    file is this host's own, written on purpose. A false from any other level
+    (/etc/gitconfig, ~/.gitconfig, a file an [include] pulls in) may be
+    nobody's decision for this host, so it must never silence the step: it
+    stays the host's exception, which identity() writes beside and reports,
+    and which doctor reports as a problem (Doctor.values()). A true in
+    config.local that a later level turns false is an override, reported by
+    overridden_line(). While tag.gpgsign is effectively true the host still
+    signs tags, so the signing checks still matter: not an opt-out either."""
+    eff = host.effective("commit.gpgsign", "bool")
+    if not (eff.set and eff.text == "false"):
+        return None
+    origin = last_origin(host, "commit.gpgsign")
+    if not host.is_local_origin(origin):
+        return None
+    tag = host.effective("tag.gpgsign", "bool")
+    if tag.set and tag.text == "true":
+        return None
+    return origin
+
+
 def already_configured(host):
     """user.email, user.signingkey and commit.gpgsign are all set, the last
-    true or false: an explicit false that is the host's exception (kept by
-    identity()), or one overriding a true in config.local, which is not an
-    exception and which `auto --report-stale` reports (overridden_line())."""
+    true or false. A false is the host's exception (identity() kept it) or
+    one overriding a true in config.local, which `auto --report-stale`
+    reports (overridden_line()); the opted-out host never gets this far
+    (run())."""
     email = host.effective("user.email")
     key = host.effective("user.signingkey")
     sign = host.effective("commit.gpgsign", typ="bool")
@@ -1451,8 +1498,16 @@ def identity(host, name):
         ("user.email", email, None),
         ("user.signingkey", "key::%s %s" % sigkey, None),
         ("commit.gpgsign", "true", "bool"),
-        ("tag.gpgsign", "true", "bool"),
     ]
+    # A host that opted out of commit signing never has tag signing turned on
+    # for it: tag.gpgsign = true there would sign tags only, which is not
+    # what an operator who said false asked for. A tag.gpgsign it already set
+    # is still compared below, like any other value.
+    tag_kept = None
+    if opted_out(host) and host.effective("tag.gpgsign", "bool").unset:
+        tag_kept = "identity: tag.gpgsign is left unset while commit.gpgsign is false (this host opted out of signing)"
+    else:
+        desired.append(("tag.gpgsign", "true", "bool"))
     # So a git that does not inherit this shell's environment (a GUI client)
     # verifies against the same trust root. A value set at some level is the
     # operator's, even when the environment pointed this step elsewhere: that
@@ -1508,6 +1563,8 @@ def identity(host, name):
             warn("identity: %s is already set to a different value - leaving it: %s" % (key, cur.text))
             conflicts += 1
 
+    if tag_kept:
+        kept.append(tag_kept)
     if _captured is None:
         for line in kept:
             log(line)
@@ -1550,7 +1607,7 @@ def identity(host, name):
     if conflicts:
         return 1
     if host.effective("user.name").unset:
-        warn("identity: user.name is not set - run: %s identity --name \"Full Name\"" % host.installer)
+        warn('identity: user.name is not set - run: %s identity --name "Full Name"' % host.installer)
     return 0
 
 
@@ -1632,9 +1689,12 @@ def stale_reason(host, key):
     return None if why is None else (email_v.text, path, why)
 
 
-def check_signing_key(host):
+def check_signing_key(host, agent_said=False):
     """Report an effective user.signingkey that will not work, or that comes
-    from outside config.local. Returns True when something was reported."""
+    from outside config.local. Returns True when something was reported.
+    AGENT_SAID: the caller already reports an agent it cannot read (doctor's
+    ssh-agent check), so a key "not loaded" there would be a second line for
+    the same cause."""
     fmt = host.effective("gpg.format")
     if fmt.error:
         warn("identity: cannot read gpg.format (%s) - user.signingkey not checked" % fmt.err)
@@ -1651,16 +1711,16 @@ def check_signing_key(host):
     outside = [o for o, _ in origins if not host.is_local_origin(o)]
     for origin in outside:
         tail = " - the last one git reads wins" if len(origins) > 1 else ""
-        warn("identity: user.signingkey is set in %s, outside %s%s" % (origin, host.config_local, tail))
+        warn("identity: user.signingkey is set in %s, outside %s%s" % (_shown(origin), host.config_local, tail))
         reported = True
     value = origins[-1][1]
     key, needs_agent = resolve_signingkey(value, host.home)
     if key is None and signingkey_uncheckable(value, host.home):
         warn("identity: user.signingkey (%s) is a certificate or a private key without its .pub - not checked"
-             % value)
+             % _shown(value))
         return reported
     if key is None:
-        warn("identity: user.signingkey (%s) names no readable SSH public key - signing will fail" % value)
+        warn("identity: user.signingkey (%s) names no readable SSH public key - signing will fail" % _shown(value))
         return True
     _, rev_err = host.revocation()
     stale = None if rev_err else stale_reason(host, key)
@@ -1674,7 +1734,7 @@ def check_signing_key(host):
         reported = True
     if needs_agent:
         keys, _ = host.agent()
-        if keys is None or key not in keys:
+        if (keys is None and not agent_said) or (keys is not None and key not in keys):
             warn("identity: user.signingkey %s is not loaded in the ssh-agent - signing will fail"
                  % fingerprint(key))
             warn("identity:   ssh-add this host's signing key (ssh-add -L lists what the agent holds)")
@@ -1747,22 +1807,452 @@ def global_reads_local(host):
     return False
 
 
-def local_is_regular(host):
-    """False, with the reason, when config.local exists and is not a regular
-    file. Checked before any git read: git opens it through the include, and
-    a FIFO there would hold every read to its 30 s timeout."""
+def local_absent_or_regular(host):
+    """False when config.local exists and is not a regular file. Checked
+    before any git read: git opens it through the include, and a FIFO there
+    would hold every read to its 30 s timeout."""
     try:
         st = os.stat(host.config_local)
     except OSError:
         return True  # absent, or unreachable: write_keys() reports that
-    if stat.S_ISREG(st.st_mode):
+    return stat.S_ISREG(st.st_mode)
+
+
+def local_is_regular(host):
+    """local_absent_or_regular(), saying why when it is False."""
+    if local_absent_or_regular(host):
         return True
     warn("identity: %s is not a regular file - writing nothing" % host.config_local)
     return False
 
 
-def run(host, mode, name, report_stale):
+# --- ~/.gitconfig and the install-time advisory -------------------------------
+
+# The keys that make a ~/.gitconfig shadow the identity or signing settings.
+# ONE list: the advisory and doctor both read ~/.gitconfig through
+# gitconfig_finding().
+GITCONFIG_IDENTITY = r"^(user\.|gpg\.|commit\.gpgsign|tag\.gpgsign)"
+
+
+def gitconfig_finding(host):
+    """(level, text) about ~/.gitconfig, level ok, info or problem.
+
+    git reads ~/.gitconfig AFTER the XDG config, so whatever it sets wins,
+    and `git config --global` then reads and writes only that file. A
+    DANGLING one is inert today but comes back to life, old settings and all,
+    the day its target is restored from a backup. One that carries signing
+    settings can pit a legacy GPG signingkey against the framework's
+    gpg.format = ssh and make every commit fail closed. Each text is ONE
+    literal: docs/troubleshooting.md quotes them."""
+    path = os.path.join(host.home, ".gitconfig")
+    if not os.path.lexists(path):
+        return "ok", "no ~/.gitconfig"
+    if not os.path.exists(path):
+        return "problem", "a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it"
+    if not os.path.isfile(path):
+        return "problem", "~/.gitconfig is not a regular file - remove it"
+    rc, out, _ = git(["config", "--file", path, "--name-only", "--get-regexp", GITCONFIG_IDENTITY])
+    names = sorted(set(out.split("\n"))) if rc == 0 and out else []
+    if names:
+        return "problem", ("~/.gitconfig sets %s, and git reads it after ~/.config/git/config - move its settings into %s and remove it"
+                           % (", ".join(names), host.config_local))
+    return "info", "~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it"
+
+
+def advisory(host):
+    """`check`: the install-time advisory (_signing_advisory), decided here
+    in one place. The tracked git config omits commit.gpgsign (a keyless
+    fresh clone must still commit), so a host with no config.local commits
+    UNSIGNED with no other signal until a push meets a rule that requires
+    signatures. Prints nothing about signing on a host that opted out
+    (opted_out()); ~/.gitconfig is reported either way, since it shadows
+    the identity of every commit, signed or not. Always returns 0."""
+    level, text = gitconfig_finding(host)
+    if level != "ok":
+        warn(text)
+    if opted_out(host):
+        return 0
+    inst = host.installer
+    sign = host.effective("commit.gpgsign", "bool")
+    if sign.error:
+        warn("commit.gpgsign is not a boolean git reads (%s) - git refuses every commit until it is fixed"
+             % sign.err)
+        return 0
+    if sign.unset:
+        warn("commit signing is NOT enabled on this host (commit.gpgsign is unset).")
+        warn("  Run %s identity, or set user.signingkey +" % inst)
+        warn("  commit.gpgsign in ~/.config/git/config.local (see")
+        warn("  config/git/config.local.example). Optional: nothing refuses an unsigned")
+        warn("  commit, but GitHub will not show the Verified badge.")
+        return 0
+    overridden = overridden_signing(host)
+    if sign.text == "false":
+        warn("commit signing is NOT enabled on this host (commit.gpgsign is false).")
+        origin = last_origin(host, "commit.gpgsign")
+        if host.is_local_origin(origin):
+            # config.local says false, but tag.gpgsign = true keeps it from
+            # being an opt-out (opted_out()).
+            warn("  tag.gpgsign is true, so tags are still signed and the key below is checked.")
+        elif not any(k == "commit.gpgsign" for k, _ in overridden):
+            warn("  An explicit false from %s is kept as this host's exception, and" % _shown(origin))
+            warn("  %s identity leaves it. To sign, remove it there; to keep" % inst)
+            warn("  this host from signing on purpose, set the false in %s." % host.config_local)
+    # A stale key, a user.signingkey set outside config.local, and a gpgsign
+    # that a later file turns off against config.local. identity() reports
+    # the last itself, as a conflict; only check says it here.
+    check_signing_key(host)
+    for key, origin in overridden:
+        warn("identity: %s is true in %s, but %s sets it false and wins - signing stays off"
+             % (key, host.config_local, _shown(origin)))
+    return 0
+
+
+# --- doctor: read-only checks -------------------------------------------------
+#
+# `install.sh doctor` runs every check in CHECKS, in order. A check is one
+# method of Doctor: it only reads (git config, files, `ssh-add -L`,
+# `ssh-keygen`) and records findings. It opens no network connection of its
+# own, though a forwarded agent answers over its SSH session. Each tool runs
+# under a timeout; each file is opened without blocking and read up to a
+# size cap (read_small_file()). A finding is ok, info or a problem; a
+# problem is one line naming what is wrong, where it comes from and the fix,
+# written as ONE literal so docs/troubleshooting.md can quote it
+# (tests/troubleshooting_messages_test.sh). By default only the problems
+# print; --verbose prints every finding and a verdict. On a host that opted
+# out of signing (opted_out()), a problem marked signing-only is recorded as
+# info instead: that host chose not to sign. A new dependency joins as one
+# more method and one more CHECKS entry.
+
+# git signs with SSH keys from 2.34 on (gpg.format = ssh).
+GIT_SSH_SIGNING = (2, 34)
+TOOL_TIMEOUT = 15
+
+
+def _bare(msg):
+    """A refusal message without its `identity: ` head and its
+    ` - writing nothing` tail: the cause alone."""
+    if msg.startswith("identity: "):
+        msg = msg[len("identity: "):]
+    return msg.replace(" - writing nothing", "")
+
+
+def _capture(fn, *args):
+    """Run FN with warn() collecting instead of printing: (result, lines)."""
+    global _captured
+    saved, _captured = _captured, []
+    try:
+        result = fn(*args)
+    finally:
+        lines, _captured = _captured, saved
+    return result, lines
+
+
+def _grouped(lines):
+    """Warning lines folded into one line per cause: each indented hint joins
+    the line before it."""
+    out = []
+    for line in lines:
+        if line.startswith("identity:   ") and out:
+            out[-1] += " - " + line[len("identity:   "):]
+        else:
+            out.append(_bare(line))
+    return out
+
+
+class Doctor(object):
+    """The checks of `install.sh doctor`. A check method records what it
+    found in self.found; doctor() runs CHECKS and labels each finding with
+    the name of the check that recorded it."""
+
+    def __init__(self, host):
+        self.host = host
+        self.found = []  # (level, text)
+        self.opted_out_origin = opted_out(host)
+
+    def ok(self, text):
+        self.found.append(("ok", text))
+
+    def info(self, text):
+        self.found.append(("info", text))
+
+    def problem(self, line, signing=False):
+        """LINE is a problem. SIGNING marks one that matters only to signing:
+        on a host that opted out of signing it is a note instead. The name,
+        the email, the include chain and ~/.gitconfig shape every commit,
+        signed or not, so they never pass SIGNING."""
+        level = "info" if signing and self.opted_out_origin else "problem"
+        self.found.append((level, line))
+
+    # One method per dependency or value group; CHECKS orders them.
+
+    def git(self):
+        host = self.host
+        rc, out, err = git(["--version"])
+        if rc != 0:
+            self.problem("git did not run (%s) - install the Command Line Tools (xcode-select --install)"
+                         % (err or out or "exit %d" % rc))
+            return
+        m = re.match(r"git version (\d+)\.(\d+)", out)
+        if m and (int(m.group(1)), int(m.group(2))) < GIT_SSH_SIGNING:
+            self.problem("%s cannot sign with SSH keys (2.34 or later can) - upgrade git" % out, signing=True)
+        else:
+            self.ok(out)
+        glob = os.environ.get("GIT_CONFIG_GLOBAL")
+        xdg_config = os.path.join(os.path.dirname(host.config_local), "config")
+        if glob is not None and not same_file(glob, xdg_config):
+            self.problem("GIT_CONFIG_GLOBAL=%s is not %s, so git does not read %s - unset it"
+                         % (glob, xdg_config, host.config_local))
+            return
+        included, err = host.includes_local()
+        if included:
+            self.ok("an [include] reaches %s" % host.config_local)
+        elif err is not None:
+            self.problem("cannot read include.path (%s) - check the file git -C ~ config --show-origin --get-all include.path names"
+                         % err)
+        else:
+            self.problem('no [include] reaches %s, so git never reads it - see "Framework git settings do not apply" in docs/troubleshooting.md'
+                         % host.config_local)
+
+    def python3(self):
+        # Reached only through a python3 that runs: install.sh reports one
+        # that does not before calling this file.
+        self.ok("%s (%s)" % (platform.python_version(), sys.executable))
+
+    def ssh_keygen(self):
+        path = shutil.which("ssh-keygen")
+        if path is None:
+            self.problem("ssh-keygen was not found on PATH - git signs and verifies with it; install OpenSSH",
+                         signing=True)
+            return
+        # -Y against empty inputs: a build that knows -Y fails on the input,
+        # one that does not rejects the option itself.
+        try:
+            p = subprocess.run(
+                [path, "-Y", "find-principals", "-s", os.devnull, "-f", os.devnull],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=TOOL_TIMEOUT,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            self.problem("ssh-keygen did not run (%s) - git signs and verifies with it; install OpenSSH" % e,
+                         signing=True)
+            return
+        said = (p.stdout + p.stderr).decode("utf-8", "replace")
+        if "option -- Y" in said or "usage:" in said:
+            self.problem("%s does not support -Y, which git signs and verifies with - install OpenSSH 8.2 or later"
+                         % path, signing=True)
+        else:
+            self.ok("%s supports -Y" % path)
+
+    def values(self):
+        host = self.host
+        inst = host.installer
+        cl = host.config_local
+        off = self.opted_out_origin
+        for key in ("user.name", "user.email", "user.signingkey", "commit.gpgsign", "tag.gpgsign",
+                    "gpg.format", "gpg.ssh.allowedSignersFile", "gpg.ssh.revocationFile"):
+            origins = host.origins(key)
+            if origins:
+                origin, value = origins[-1]
+                self.ok("%s = %s (%s)" % (key, value, origin))
+            else:
+                self.ok("%s is unset" % key)
+        fmt = host.effective("gpg.format")
+        if not (fmt.set and fmt.text == "ssh"):
+            self.problem('gpg.format is %s, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md'
+                         % (repr(fmt.text) if fmt.set else "unset"), signing=True)
+        for key in ("user.name", "user.email", "user.signingkey"):
+            signing = key == "user.signingkey"
+            v = host.effective(key)
+            if v.error:
+                self.problem("cannot read %s (%s) - check the file git -C ~ config --show-origin --get %s names"
+                             % (key, v.err, key), signing=signing)
+            elif v.unset and key == "user.name" and off:
+                self.problem('user.name is not set - run: git config --file %s user.name "Full Name"' % cl)
+            elif v.unset and key == "user.name":
+                self.problem('user.name is not set - run: %s identity --name "Full Name"' % inst)
+            elif v.unset and key == "user.email" and off:
+                self.problem("user.email is not set - run: git config --file %s user.email <your email>" % cl)
+            elif v.unset:
+                self.problem("%s is not set - run: %s identity" % (key, inst), signing=signing)
+        for key, verb in (("commit.gpgsign", "commit"), ("tag.gpgsign", "tag")):
+            v = host.effective(key, "bool")
+            if v.error:
+                # git dies on such a value: `fatal: bad boolean config value`.
+                self.problem("%s is not a boolean git reads (%s) - git refuses to %s until it is; fix it in the file git -C ~ config --show-origin --get %s names"
+                             % (key, v.err, verb, key))
+        sign = host.effective("commit.gpgsign", "bool")
+        overridden = overridden_signing(host)
+        if off:
+            # One literal: docs/signing-key.md quotes it verbatim.
+            msg = "commit.gpgsign = false from %s: respected as this host's opt-out; the automatic step stays quiet and writes nothing"
+            self.ok(msg % off)
+        elif sign.unset:
+            self.problem("commit.gpgsign is not set, so commits are not signed - run: %s identity" % inst)
+        elif sign.set and sign.text == "false" and not any(k == "commit.gpgsign" for k, _ in overridden):
+            origin = last_origin(host, "commit.gpgsign")
+            if host.is_local_origin(origin):
+                self.info("commit.gpgsign = false from %s, but tag.gpgsign is true: tags are signed, so the signing checks apply"
+                          % origin)
+            else:
+                # Not an opt-out (opted_out()): a file outside config.local
+                # may be nobody's decision for this host.
+                self.problem("commit.gpgsign = false from %s, outside %s, so commits are not signed - remove it there to sign, or set the false in %s to opt out"
+                             % (origin, cl, cl))
+        for key, origin in overridden:
+            self.problem("%s is true in %s, but %s sets it false and wins - remove the false there, or the true in %s"
+                         % (key, cl, origin, cl))
+        if host.effective("gpg.ssh.allowedSignersFile", "path").unset:
+            self.problem("gpg.ssh.allowedSignersFile is not set, so git cannot verify signatures - run: %s identity"
+                         % inst, signing=True)
+
+    def trust_root(self):
+        host = self.host
+        path, source, entries = host.signers()
+        if path is None:
+            self.problem("%s - see docs/signing-key.md" % _bare(entries[0]), signing=True)
+            return
+        n = len(entries)
+        self.ok("%s (from %s): %d entr%s" % (path, source, n, "y" if n == 1 else "ies"))
+        bad = host.malformed_lines()
+        if bad:
+            self.info("skipped malformed line(s) %s in %s" % (", ".join(str(k) for k in bad), path))
+        rev_path, err = host.revocation()
+        if err:
+            self.problem("%s - see docs/signing-key.md" % _bare(err), signing=True)
+        elif rev_path:
+            self.ok("gpg.ssh.revocationFile %s is readable" % rev_path)
+
+    def ssh_agent(self):
+        host = self.host
+        keys, why = host.agent()
+        sk = host.effective("user.signingkey")
+        # A signingkey that is a private key file signs without the agent.
+        needed = not sk.set or resolve_signingkey(sk.text, host.home)[1] is not False
+        if keys is None:
+            if needed:
+                self.problem("%s - load this host's signing key with ssh-add" % _bare(why), signing=True)
+            else:
+                self.info(_bare(why))
+            return
+        self.ok("%d key(s) in the ssh-agent" % len(keys))
+        path, _, entries = host.signers()
+        if path is None:
+            return
+        unclear = host.unclear_lines(keys)
+        if unclear:
+            self.problem("malformed allowed-signers line(s) %s in %s name an ssh-agent key - fix or remove them"
+                         % (", ".join(str(k) for k in unclear), path), signing=True)
+        pairs = sorted(host.candidates(entries, keys))
+        for p, k in pairs:
+            self.ok("%s is listed for %s in %s" % (fingerprint(k), p, path))
+        if not pairs:
+            self.info("no ssh-agent key is listed for the git namespace in %s" % path)
+
+    def signing_key(self):
+        host = self.host
+        # The stale-key report of `check` mode, read back as findings: one
+        # line per cause, its hint joined to it. An agent that cannot be
+        # read is the ssh-agent check's line, not a second one here.
+        reported, lines = _capture(check_signing_key, host, True)
+        for line in _grouped(lines):
+            if reported:
+                self.problem(line, signing=True)
+            else:
+                self.info(line)
+        origins = host.origins("user.signingkey")
+        if reported or not origins or host.effective("gpg.format").text != "ssh":
+            return
+        key, needs_agent = resolve_signingkey(origins[-1][1], host.home)
+        if key is None:
+            return
+        if needs_agent and host.agent()[0] is None:
+            return
+        email_v = host.effective("user.email")
+        path, _, _ = host.signers()
+        how = "loaded in the ssh-agent" if needs_agent else "signs from its private key file"
+        if email_v.set and path is not None:
+            self.ok("%s verifies for %s in %s, %s" % (fingerprint(key), email_v.text, path, how))
+        else:
+            self.ok("%s, %s (no user.email or allowed-signers file to verify it against)"
+                    % (fingerprint(key), how))
+
+    def ssh_session(self):
+        if os.environ.get("SSH_CONNECTION"):
+            self.info("SSH_CONNECTION is set: the automatic step writes nothing in this session; %s identity, run on purpose, still works"
+                      % self.host.installer)
+        else:
+            self.ok("not an SSH session")
+
+    def gitconfig(self):
+        level, text = gitconfig_finding(self.host)
+        if level == "problem":
+            self.problem(text)
+        elif level == "info":
+            self.info(text)
+        else:
+            self.ok(text)
+
+
+# (name, Doctor method): the checks, in the order they print.
+CHECKS = (
+    ("git", Doctor.git),
+    ("python3", Doctor.python3),
+    ("ssh-keygen", Doctor.ssh_keygen),
+    ("values", Doctor.values),
+    ("trust root", Doctor.trust_root),
+    ("ssh-agent", Doctor.ssh_agent),
+    ("signing key", Doctor.signing_key),
+    ("ssh session", Doctor.ssh_session),
+    ("~/.gitconfig", Doctor.gitconfig),
+)
+
+
+def doctor(host, verbose):
+    """Run CHECKS; print the problems (everything with VERBOSE). Writes
+    nothing. Returns 1 when a problem was found, else 0."""
+    if not local_absent_or_regular(host):
+        # Before any git read (see local_absent_or_regular()); one literal,
+        # quoted in docs/troubleshooting.md.
+        log("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
+            % host.config_local)
+        return 1
+    reason = git_isolate()
+    if reason is not None:
+        # Every check reads through git(), so each would report this one
+        # cause as a problem of its own (an unset gpg.format, a git that
+        # did not run). One literal, quoted in docs/troubleshooting.md.
+        log("doctor: git: not reading the git config: %s" % reason)
+        return 1
+    d = Doctor(host)
+    findings = []
+    for name, method in CHECKS:
+        d.found = []
+        method(d)
+        findings += [(level, name, text) for level, text in d.found]
+    problems = 0
+    for level, check, text in findings:
+        if level == "problem":
+            problems += 1
+        if level == "problem" or verbose:
+            # Config values, origins and paths are printed through _shown()
+            # here, once: none of them can rewrite the terminal.
+            log("doctor: %s: %s%s" % (check, "note: " if level == "info" else "", _shown(text)))
+    if verbose:
+        if problems:
+            log("doctor: verdict: %d problem(s) need action" % problems)
+        elif d.opted_out_origin:
+            log("doctor: verdict: signing is off on purpose on this host; nothing needs action")
+        else:
+            log("doctor: verdict: nothing needs action")
+    return 1 if problems else 0
+
+
+def run(host, mode, name, report_stale, verbose=False):
     """Dispatch one mode; returns its exit status."""
+    if mode == "doctor":
+        return doctor(host, verbose)
     if not local_is_regular(host):
         return 0 if mode == "check" else 1
     # Before any git read, so a mode never acts on reads that only failed.
@@ -1771,11 +2261,13 @@ def run(host, mode, name, report_stale):
         warn("identity: not reading the git config: %s" % reason)
         return 0 if mode == "check" else 1
     if mode == "check":
-        check_signing_key(host)
-        # identity() reports these itself, as conflicts; only check says it here.
-        for key, origin in overridden_signing(host):
-            warn("identity: %s is true in %s, but %s sets it false and wins - signing stays off"
-                 % (key, host.config_local, origin))
+        return advisory(host)
+    # An opted-out host (commit.gpgsign = false in config.local, its own
+    # decision; see opted_out()) hears nothing from the automatic step, and
+    # nothing is written for it: not on install, not on link, so not on any
+    # upgrade. `install.sh doctor` says why; `install.sh identity`, run on
+    # purpose, still works.
+    if mode == "auto" and opted_out(host):
         return 0
     if mode == "auto" and already_configured(host):
         if not report_stale:
@@ -1805,12 +2297,16 @@ def main(argv):
     ap = argparse.ArgumentParser(prog="install.sh identity", add_help=False)
     ap.add_argument("--config-local", required=True)
     ap.add_argument("--installer", default="./install.sh")
-    ap.add_argument("--mode", choices=("auto", "identity", "rotate", "check"), required=True)
+    ap.add_argument("--mode", choices=("auto", "identity", "rotate", "check", "doctor"), required=True)
     ap.add_argument("--name")
     ap.add_argument("--report-stale", action="store_true")
+    ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
     if args.report_stale and args.mode != "auto":
         warn("identity: --report-stale is taken only by --mode auto")
+        return 2
+    if args.verbose and args.mode != "doctor":
+        warn("identity: --verbose is taken only by --mode doctor")
         return 2
     if args.name is not None:
         n = args.name.strip()
@@ -1829,13 +2325,17 @@ def main(argv):
         warn("identity: HOME is not an absolute path - skipping")
         return 1
     host = Host(home, args.config_local, args.installer)
-    if args.mode == "auto":
+    # auto reduces its warnings to one line below; doctor reports through its
+    # own findings, so a warning a shared helper prints is dropped there.
+    if args.mode in ("auto", "doctor"):
         _captured = []
     try:
-        rc = run(host, args.mode, args.name, args.report_stale)
+        rc = run(host, args.mode, args.name, args.report_stale, args.verbose)
     finally:
         git_release()
         lines, _captured = _captured, None
+    if args.mode == "doctor":
+        lines = []
     if lines:
         if rc == 0:
             for line in lines:

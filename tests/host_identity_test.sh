@@ -415,6 +415,9 @@ for setting in "TMPDIR=$work/co:lon" "GIT_CONFIG_GLOBAL=.config/git/config"; do
   rc=0; out="$(cd "$HOME" && env "$setting" python3 -I -B "$module" --config-local "$local_cfg" \
     --installer "$installer" --mode check 2>&1)" || rc=$?
   expect_rc 0 "$setting, check"; has "identity: not reading the git config: " "$setting, check"
+  rc=0; out="$(cd "$HOME" && env "$setting" "$installer" doctor 2>&1)" || rc=$?
+  expect_rc 1 "$setting, doctor"; has "doctor: git: not reading the git config: " "$setting, doctor"
+  [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || fail "$setting, doctor: more than one line: $out"
 done
 has "GIT_CONFIG_GLOBAL=.config/git/config is not an absolute path" "a relative GIT_CONFIG_GLOBAL is named"
 # A global config git cannot parse: git cannot start at all, and the step
@@ -675,7 +678,7 @@ advise
 has "a dangling ~/.gitconfig symlink is in place" "dangling ~/.gitconfig"
 rm -f "$HOME/.gitconfig"; printf '[alias]\n\tst = status\n' > "$HOME/.gitconfig"
 advise
-has "a ~/.gitconfig exists: its values override" "present ~/.gitconfig"
+has "~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it" "present ~/.gitconfig"
 rm -f "$HOME/.gitconfig"
 ok
 
@@ -802,6 +805,41 @@ expect_rc 0 "link with signing overridden off"
 has "identity: signing is off against $local_cfg: commit.gpgsign = false from file:$HOME/.gitconfig - see $B/install.sh identity" "link names the override"
 [ "$(ls -li "$local_cfg")" = "$before" ] && [ "$(cat "$local_cfg")" = "$content" ] || fail "an override report rewrote config.local"
 rm -f "$HOME/.gitconfig"
+# An opted-out host (commit.gpgsign = false in config.local) is quiet on link
+# and upgrade, with no agent and a stale key alike, and nothing is written:
+# tag.gpgsign is never turned on for it.
+printf '[user]\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
+before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
+rc=0; out="$(FAKE_AGENT_DOWN=1 bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
+expect_rc 0 "link on an opted-out host with no agent"; lacks "identity:" "link on an opted-out host is quiet"
+printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
+git config --file "$local_cfg" user.signingkey "key::$K1"
+before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
+rc=0; out="$(bash "$B/install.sh" link </dev/null 2>&1)" || rc=$?
+expect_rc 0 "link on an opted-out host with a stale key"; lacks "identity:" "link on an opted-out, stale host is quiet"
+printf 'c4\n' > "$A/NEXT"
+git -C "$A" -c user.name=t -c user.email=t@x -c commit.gpgsign=false commit -q -am c4
+rc=0; out="$(FAKE_AGENT_DOWN=1 bash "$B/install.sh" upgrade </dev/null 2>&1)" || rc=$?
+expect_rc 0 "upgrade on an opted-out host"; has "upgrade: done" "upgrade on an opted-out host merged"
+lacks "identity:" "upgrade on an opted-out host is quiet"
+[ "$(ls -li "$local_cfg")" = "$before" ] && [ "$(cat "$local_cfg")" = "$content" ] || fail "an opted-out host's config.local was rewritten"
+[ "$(get tag.gpgsign)" = UNSET ] || fail "tag.gpgsign was turned on for an opted-out host"
+# doctor on that host: the missing name is still a problem (every commit
+# carries it); once it is set, silent and 0; --verbose names the opt-out.
+rc=0; out="$(bash "$B/install.sh" doctor </dev/null 2>&1)" || rc=$?
+expect_rc 1 "doctor on an opted-out host with no name"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "doctor on an opted-out host with no name: want one line: $out"
+has "doctor: values: user.name is not set" "doctor on an opted-out host still needs user.name"
+git config --file "$local_cfg" user.name "Jane Doe"
+before="$(ls -li "$local_cfg")"; content="$(cat "$local_cfg")"
+rc=0; out="$(bash "$B/install.sh" doctor </dev/null 2>&1)" || rc=$?
+expect_rc 0 "doctor on an opted-out host"; [ -z "$out" ] || fail "doctor is not silent on an opted-out host: $out"
+rc=0; out="$(bash "$B/install.sh" doctor --verbose </dev/null 2>&1)" || rc=$?
+expect_rc 0 "doctor --verbose on an opted-out host"
+has "doctor: values: commit.gpgsign = false from file:$local_cfg: respected as this host's opt-out; the automatic step stays quiet and writes nothing" "doctor --verbose names the opt-out with its origin"
+has "doctor: verdict: signing is off on purpose on this host; nothing needs action" "doctor --verbose verdict on an opted-out host"
+[ "$(ls -li "$local_cfg")" = "$before" ] && [ "$(cat "$local_cfg")" = "$content" ] || fail "doctor rewrote config.local"
+rm -f "$local_cfg"
 unset XDG_CACHE_HOME XDG_STATE_HOME
 ok
 
@@ -821,7 +859,8 @@ ok
 # --- an explicit false is the host's exception: kept, the rest still written --
 # (operator decision: a commit.gpgsign or tag.gpgsign = false at any level is
 # kept; email and key are written anyway; key, email or trust-root conflicts
-# still write nothing)
+# still write nothing. Only a commit.gpgsign = false in config.local opts the
+# host out of signing; a false at another level is the exception alone.)
 for where in local global; do
   for key in commit.gpgsign tag.gpgsign; do
     fresh
@@ -835,22 +874,66 @@ for where in local global; do
     [ "$(get user.email)" = "me@example.com" ] && [ "$(get user.signingkey)" = "key::$K1" ] \
       || fail "$key = false in $where: email and key not written"
     [ "$(git -C "$HOME" config --type=bool --get "$key")" = false ] || fail "$key = false in $where was not kept"
-    other=commit.gpgsign; [ "$key" = commit.gpgsign ] && other=tag.gpgsign
-    [ "$(get "$other")" = true ] || fail "$key = false in $where: $other not written"
+    # commit.gpgsign = false in config.local opts the host out: tag.gpgsign
+    # is not turned on for it either. Anywhere else it is not an opt-out, so
+    # tag.gpgsign is written as before. tag.gpgsign = false alone still gets
+    # commit signing.
+    if [ "$key" = commit.gpgsign ] && [ "$where" = local ]; then
+      [ "$(get tag.gpgsign)" = UNSET ] || fail "commit.gpgsign = false in $where: tag.gpgsign written"
+      has "identity: tag.gpgsign is left unset while commit.gpgsign is false (this host opted out of signing)" "an opted-out host is told why tag.gpgsign stays unset"
+    elif [ "$key" = commit.gpgsign ]; then
+      [ "$(get tag.gpgsign)" = true ] || fail "commit.gpgsign = false in $where: tag.gpgsign not written"
+      lacks "tag.gpgsign is left unset" "a false outside config.local is not an opt-out"
+    else
+      [ "$(get commit.gpgsign)" = true ] || fail "$key = false in $where: commit.gpgsign not written"
+    fi
     if [ "$where" = global ]; then [ "$(get "$key")" = UNSET ] || fail "$key written beside a global false"; fi
     # Quiet afterwards, through the automatic step too.
     idrun; expect_rc 0 "auto after $key = false in $where"; [ -z "$out" ] || fail "auto not quiet: $out"
   done
 done
-# The automatic step that writes beside an exception says so, after the write.
+# The automatic step on an opted-out host (commit.gpgsign = false in
+# config.local) writes nothing and says nothing, for every spelling git reads
+# as false.
+for spelling in false no off 0 FALSE; do
+  fresh
+  printf 'me@example.com %s\n' "$K1" > "$signers"
+  export FAKE_AGENT_KEYS="$K1"
+  printf '[commit]\n\tgpgsign = %s\n' "$spelling" > "$local_cfg"
+  idrun
+  expect_rc 0 "auto on a host opted out with $spelling"
+  [ -z "$out" ] || fail "auto is not quiet on a host opted out with $spelling: $out"
+  [ "$(cat "$local_cfg")" = "$(printf '[commit]\n\tgpgsign = %s' "$spelling")" ] \
+    || fail "auto wrote to a host opted out with $spelling: $(cat "$local_cfg")"
+done
+# A false at any other level is not an opt-out: the automatic step still
+# writes the identity and names the exception with its file, for
+# ~/.gitconfig, the system level and a file a plain [include] pulls in.
+for level in gitconfig system include; do
+  fresh
+  printf 'me@example.com %s\n' "$K1" > "$signers"
+  export FAKE_AGENT_KEYS="$K1"
+  case "$level" in
+    gitconfig) file="$HOME/.gitconfig" ;;
+    system) file="$HOME/system-gitconfig" ;;
+    include) file="$HOME/included"
+      printf '[include]\n\tpath = %s\n' "$file" >> "$XDG_CONFIG_HOME/git/config" ;;
+  esac
+  printf '[commit]\n\tgpgsign = false\n' > "$file"
+  rc=0; out="$(GIT_CONFIG_SYSTEM="$HOME/system-gitconfig" bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto' _ "$installer" 2>&1)" || rc=$?
+  expect_rc 0 "auto beside a false from $level"
+  has "identity: wrote user.email" "auto writes beside a false from $level"
+  has "identity: commit.gpgsign is false (file:$file) - kept as this host's exception, so it stays off" "auto names the exception from $level"
+  [ "$(get tag.gpgsign)" = true ] || fail "a false from $level opted the host out of tag.gpgsign"
+done
+# A tag.gpgsign = false alone is not an opt-out: the step writes, and names it.
 fresh
 printf 'me@example.com %s\n' "$K1" > "$signers"
-export FAKE_AGENT_KEYS="$K1"
-printf '[commit]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
+printf '[tag]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
 idrun
-expect_rc 0 "auto writes beside a false"
-has "identity: wrote user.email" "auto writes beside a false"
-has "identity: commit.gpgsign is false (file:$HOME/.gitconfig) - kept as this host's exception, so it stays off" "auto names the exception when it writes"
+expect_rc 0 "auto writes beside a tag.gpgsign false"
+has "identity: wrote user.email" "auto writes beside a tag.gpgsign false"
+has "identity: tag.gpgsign is false (file:$HOME/.gitconfig) - kept as this host's exception, so it stays off" "auto names the exception when it writes"
 rm -f "$HOME/.gitconfig"
 # A key conflict still blocks everything, false or not.
 fresh
@@ -862,25 +945,43 @@ expect_rc 1 "a false beside a key conflict"
 has "user.signingkey is already set to a different value" "the key conflict is named"
 has "commit.gpgsign is false (file:$local_cfg) - kept as this host's exception" "a direct run names the exception even when it refuses"
 [ "$(get user.email)" = UNSET ] || fail "a key conflict next to a false still wrote user.email"
-# The automatic step refuses in ONE line: the exception line is said only
-# when the step goes on to write.
+# The automatic step leaves an opted-out host alone, conflict or not.
 idrun
-expect_rc 1 "auto, a false beside a key conflict"
+expect_rc 0 "auto, a false beside a key conflict"
+[ -z "$out" ] || fail "auto is not quiet on an opted-out host with a key conflict: $out"
+# With tag.gpgsign = false instead, the automatic step refuses in ONE line:
+# the exception line is said only when the step goes on to write.
+printf '[tag]\n\tgpgsign = false\n[user]\n\tsigningkey = key::%s\n' "$K2" > "$local_cfg"
+idrun
+expect_rc 1 "auto, a tag.gpgsign false beside a key conflict"
 [ "$(grep -c . <<<"$out")" -eq 1 ] || fail "auto printed more than one line beside an exception: $out"
 lacks "kept as this host's exception" "auto does not print the exception line when it refuses"
+printf '[commit]\n\tgpgsign = false\n[user]\n\tsigningkey = key::%s\n' "$K2" > "$local_cfg"
 advise() { rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; _signing_advisory' _ "$installer" 2>&1)" || rc=$?; }
 printf '[commit]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
 advise
 has "commit signing is NOT enabled on this host (commit.gpgsign is false)." "advisory names the actual value"
-has "An explicit false is kept as this host's exception" "advisory names the exception"
-has "a legacy ~/.gitconfig carries signing settings" "advisory warns about the ~/.gitconfig with signing off"
-# An explicit false does not silence the stale-key report: a key can go
-# stale while commit signing is off.
+has "An explicit false from file:$HOME/.gitconfig is kept as this host's exception" "advisory names the exception and its file"
+has "~/.gitconfig sets commit.gpgsign, and git reads it after ~/.config/git/config" "advisory warns about the ~/.gitconfig with signing off"
+# A false outside config.local does not silence the stale-key report: a key
+# can go stale while commit signing is off.
 printf '[user]\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = false\n' "$K1" > "$local_cfg"
 printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
 advise
-has "An explicit false is kept as this host's exception" "advisory names the exception"
+has "kept as this host's exception" "advisory names the exception"
 has "user.signingkey $FP1 is not valid for me@example.com" "the stale key is reported beside an explicit false"
+# The same host with the false in config.local alone has opted out: the
+# advisory says nothing, stale key and missing agent included.
+rm -f "$HOME/.gitconfig"
+FAKE_AGENT_DOWN=1 advise
+expect_rc 0 "advisory on an opted-out host"
+[ -z "$out" ] || fail "the advisory is not silent on an opted-out host: $out"
+# ...unless tag.gpgsign is true: tags still sign, so the key is still checked.
+git config --file "$local_cfg" tag.gpgsign true
+advise
+has "tag.gpgsign is true, so tags are still signed" "a true tag.gpgsign is not an opt-out"
+has "user.signingkey $FP1 is not valid for me@example.com" "the stale key is reported while tags sign"
+git config --file "$local_cfg" --unset tag.gpgsign
 printf 'me@example.com %s\n' "$K1" > "$signers"
 # A true in config.local overridden by a later false is not the exception,
 # for tag.gpgsign as for commit.gpgsign; the check names the file.
@@ -1287,6 +1388,276 @@ advise
 expect_rc 0 "advisory, a private key without its .pub"
 has "user.signingkey (~/.ssh/id_sign) is a certificate or a private key without its .pub - not checked" "not checked"
 lacks "signing will fail" "a private key path is not called a failure"
+# A signingkey value with a control character is printed escaped, never raw.
+printf '[user]\n\temail = me@example.com\n[commit]\n\tgpgsign = true\n' > "$local_cfg"
+git config --file "$local_cfg" user.signingkey "$(printf '~/.ssh/x\033[2J')"
+advise
+has "user.signingkey ('~/.ssh/x\\x1b[2J') names no readable SSH public key" "the advisory escapes a control character"
+! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw escape byte: $out"
+ok
+
+# --- install.sh doctor: read only, silent when healthy, one line a problem ---
+# snap - every path under $HOME with its inode, size, mode, mtime (in ns)
+# and content hash, so a write, a touch, a rename or a new file shows as a
+# difference. A symlink is recorded, never followed.
+snap() {
+  python3 -I -B -c '
+import hashlib, os, sys
+def line(p):
+    st = os.lstat(p)
+    h = ""
+    if os.path.isfile(p) and not os.path.islink(p):
+        with open(p, "rb") as f:
+            h = hashlib.sha256(f.read()).hexdigest()
+    print(p, st.st_ino, st.st_size, st.st_mode, st.st_mtime_ns, h)
+line(sys.argv[1])
+for root, dirs, files in os.walk(sys.argv[1]):
+    dirs.sort()
+    for n in sorted(dirs + files):
+        line(os.path.join(root, n))
+' "$HOME"
+}
+doc() { rc=0; out="$("$installer" doctor "$@" 2>&1)" || rc=$?; }
+fresh
+printf 'me@example.com %s\n' "$K1" > "$signers"
+export FAKE_AGENT_KEYS="$K1"
+run --name "Jane Doe"; expect_rc 0 "doctor setup"
+snap_before="$(snap)"
+doc; expect_rc 0 "doctor on a healthy host"
+[ -z "$out" ] || fail "doctor is not silent on a healthy host: $out"
+doc --verbose; expect_rc 0 "doctor --verbose on a healthy host"
+has "doctor: values: user.email = me@example.com (file:$local_cfg)" "doctor --verbose names a value and its origin"
+has "doctor: values: gpg.format = ssh (file:$XDG_CONFIG_HOME/git/config)" "doctor --verbose names gpg.format's origin"
+has "doctor: values: gpg.ssh.revocationFile is unset" "doctor --verbose names an unset value"
+has "doctor: trust root: $signers (from gpg.ssh.allowedSignersFile): 1 entry" "doctor --verbose names the trust root and its source"
+has "doctor: ssh-agent: $FP1 is listed for me@example.com in $signers" "doctor --verbose names the agent key match"
+has "doctor: signing key: $FP1 verifies for me@example.com in $signers, loaded in the ssh-agent" "doctor --verbose verifies the key"
+has "doctor: ssh-keygen:" "doctor --verbose checks ssh-keygen"
+has "doctor: git: an [include] reaches $local_cfg" "doctor --verbose checks the include chain"
+has "doctor: verdict: nothing needs action" "doctor --verbose verdict"
+lacks "PRIVATE" "doctor never prints private material"
+[ "$(snap)" = "$snap_before" ] || fail "doctor wrote under HOME (healthy host)"
+# An SSH session is reported, never a problem.
+rc=0; out="$(SSH_CONNECTION='10.0.0.1 22 10.0.0.2 22' "$installer" doctor --verbose 2>&1)" || rc=$?
+expect_rc 0 "doctor in an SSH session"; has "doctor: ssh session: note: SSH_CONNECTION is set" "doctor names the SSH session"
+# A stale key: one line, the cause and the fix.
+printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
+doc; expect_rc 1 "doctor, stale key"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "doctor printed more than one line for a stale key: $out"
+has "doctor: signing key: user.signingkey $FP1 is not valid for me@example.com in $signers (line 1: expired) - new signatures will not verify; run: $installer identity --rotate" "doctor names the stale key and the fix"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+# The configured key is not in the agent.
+FAKE_AGENT_KEYS="$K2"
+doc; expect_rc 1 "doctor, key not in the agent"
+has "doctor: signing key: user.signingkey $FP1 is not loaded in the ssh-agent - signing will fail - ssh-add this host's signing key" "doctor names an unloaded key"
+FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, agent down"
+has "doctor: ssh-agent: cannot reach an ssh-agent (ssh-add -L exited 2) - load this host's signing key with ssh-add" "doctor names an unreachable agent"
+[ "$(grep -c . <<<"$out")" -eq 1 ] || fail "doctor printed more than one line for an unreachable agent: $out"
+export FAKE_AGENT_KEYS="$K1"
+# An override: config.local true, a later ~/.gitconfig false.
+printf '[commit]\n\tgpgsign = false\n' > "$HOME/.gitconfig"
+snap_gc="$(snap)"
+doc; expect_rc 1 "doctor, override"
+has "doctor: values: commit.gpgsign is true in $local_cfg, but file:$HOME/.gitconfig sets it false and wins - remove the false there, or the true in $local_cfg" "doctor names the override"
+has "doctor: ~/.gitconfig: ~/.gitconfig sets commit.gpgsign, and git reads it after ~/.config/git/config - move its settings into $local_cfg and remove it" "doctor names the legacy ~/.gitconfig"
+lacks "respected as this host's opt-out" "an override is not the opt-out"
+[ "$(snap)" = "$snap_gc" ] || fail "doctor wrote under HOME (override)"
+rm -f "$HOME/.gitconfig"
+ln -s "$HOME/no-such-gitconfig" "$HOME/.gitconfig"
+doc; expect_rc 1 "doctor, dangling ~/.gitconfig"
+has "doctor: ~/.gitconfig: a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it" "doctor names a dangling ~/.gitconfig"
+rm -f "$HOME/.gitconfig"
+# An ssh-keygen that does not know -Y (OpenSSH before 8.2 answers this way).
+mkdir -p "$work/oldkeygen"
+printf '#!/bin/sh\necho "ssh-keygen: unknown option -- Y" >&2\necho "usage: ssh-keygen [-q]" >&2\nexit 1\n' > "$work/oldkeygen/ssh-keygen"
+chmod u+x "$work/oldkeygen/ssh-keygen"
+snap_before="$(snap)"
+rc=0; out="$(PATH="$work/oldkeygen:$PATH" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, ssh-keygen without -Y"
+has "doctor: ssh-keygen: $work/oldkeygen/ssh-keygen does not support -Y, which git signs and verifies with - install OpenSSH 8.2 or later" "doctor names an ssh-keygen without -Y"
+[ "$(snap)" = "$snap_before" ] || fail "doctor wrote under HOME"
+# No trust root at all.
+mv "$local_cfg" "$work/doc_local"
+printf '[user]\n\tname = Jane Doe\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = true\n' "$K1" > "$local_cfg"
+rm -f "$signers"
+doc; expect_rc 1 "doctor, no trust root"
+has "doctor: trust root: no allowed-signers file found - see docs/signing-key.md" "doctor names the missing trust root"
+has "doctor: values: gpg.ssh.allowedSignersFile is not set, so git cannot verify signatures - run: $installer identity" "doctor names the unset allowedSignersFile"
+# The include chain does not reach config.local.
+printf '[gpg]\n\tformat = ssh\n' > "$XDG_CONFIG_HOME/git/config"
+doc; expect_rc 1 "doctor, no include"
+has "doctor: git: no [include] reaches $local_cfg, so git never reads it - see \"Framework git settings do not apply\" in docs/troubleshooting.md" "doctor names the missing include"
+# A config.local that is not a regular file is named before any git read.
+rm -f "$local_cfg"; mkfifo "$local_cfg"
+bounded_run 20 "$work/doctor.out" "$installer" doctor || fail "bounded_run could not start (no job control)"
+[ "$br_hung" -eq 0 ] && [ "$br_stuck" -eq 0 ] || fail "doctor hung on a FIFO config.local"
+rc="$br_rc"; out="$(cat "$work/doctor.out")"
+expect_rc 1 "doctor, FIFO config.local"
+has "doctor: git: $local_cfg is not a regular file" "doctor names a FIFO config.local"
+rm -f "$local_cfg"
+# Usage, and a python3 that does not run.
+doc --bogus; expect_rc 2 "doctor --bogus"; has "doctor: unknown option: --bogus (expected: --verbose)" "doctor usage"
+doc --verbose --verbose; expect_rc 2 "doctor --verbose twice"
+rc=0; out="$(PATH="$work/nopy" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, python3 unusable"
+has "doctor: python3: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)" "doctor names an unusable python3"
+rc=0; out="$(python3 -I "$module" --config-local "$local_cfg" --mode check --verbose 2>&1)" || rc=$?
+expect_rc 2 "--verbose outside --mode doctor"
+rc=0; out="$("$installer" --help 2>&1)" || rc=$?
+expect_rc 0 "--help"; has "|doctor [--verbose]]" "the usage line names doctor and --verbose"
+ok
+
+# --- doctor: each finding, and what an opt-out does and does not hide -------
+# dhealthy - a fresh host that signs, with its name set: doctor is silent.
+dhealthy() {
+  fresh
+  printf 'me@example.com %s\n' "$K1" > "$signers"
+  export FAKE_AGENT_KEYS="$K1"
+  run --name "Jane Doe"; expect_rc 0 "doctor setup"
+  doc; expect_rc 0 "doctor setup is healthy"; [ -z "$out" ] || fail "doctor setup is not healthy: $out"
+}
+# one LABEL - exactly one line of output.
+one() { [ "$(grep -c . <<<"$out")" -eq 1 ] || fail "$1: want one line, got: $out"; }
+# An opted-out host still needs a name and an email: every commit carries
+# them, signed or not. Signing problems (no agent, no key, no
+# allowedSignersFile) stay notes there.
+fresh
+printf 'me@example.com %s\n' "$K1" > "$signers"
+printf '[user]\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
+FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, no user.name"; one "doctor, opted out, no user.name"
+has "doctor: values: user.name is not set - run: git config --file $local_cfg user.name \"Full Name\"" "an opted-out host still needs user.name"
+printf '[user]\n\tname = Jane Doe\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
+FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, no user.email"; one "doctor, opted out, no user.email"
+has "doctor: values: user.email is not set - run: git config --file $local_cfg user.email <your email>" "an opted-out host still needs user.email"
+printf '[user]\n\tname = Jane Doe\n\temail = me@example.com\n[commit]\n\tgpgsign = false\n' > "$local_cfg"
+FAKE_AGENT_DOWN=1 doc; expect_rc 0 "doctor, opted out, name and email set"; [ -z "$out" ] || fail "doctor, opted out: $out"
+FAKE_AGENT_DOWN=1 doc --verbose; expect_rc 0 "doctor --verbose, opted out"
+has "doctor: ssh-agent: note: cannot reach an ssh-agent" "an opted-out host's agent is a note"
+has "doctor: values: note: gpg.ssh.allowedSignersFile is not set" "an opted-out host's trust root setting is a note"
+printf '[user]\n\temail = old@corp.example\n' > "$HOME/.gitconfig"
+FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, ~/.gitconfig email"; one "doctor, opted out, ~/.gitconfig email"
+has "doctor: ~/.gitconfig: ~/.gitconfig sets user.email, and git reads it after ~/.config/git/config" "an opted-out host still hears about ~/.gitconfig"
+rm -f "$HOME/.gitconfig"
+# The include chain broken: config.local is not read, so the host is not
+# opted out, and the missing include is a problem.
+printf '[gpg]\n\tformat = ssh\n' > "$XDG_CONFIG_HOME/git/config"
+FAKE_AGENT_DOWN=1 doc; expect_rc 1 "doctor, opted out, include broken"
+has "doctor: git: no [include] reaches $local_cfg" "a broken include on an opted-out host"
+# tag.gpgsign = true keeps the signing checks: tags still sign.
+dhealthy
+git config --file "$local_cfg" commit.gpgsign false
+printf 'me@example.com valid-before="20000101" %s\n' "$K1" > "$signers"
+doc; expect_rc 1 "doctor, commit false and tag true, stale key"; one "doctor, commit false and tag true, stale key"
+has "doctor: signing key: user.signingkey $FP1 is not valid for me@example.com" "a true tag.gpgsign keeps the stale-key problem"
+doc --verbose
+has "doctor: values: note: commit.gpgsign = false from file:$local_cfg, but tag.gpgsign is true: tags are signed, so the signing checks apply" "doctor says why a false with a true tag.gpgsign is not an opt-out"
+has "doctor: verdict: 1 problem(s) need action" "the verbose verdict counts the problems"
+idrun_stale() { rc=0; out="$(bash -c 'set -euo pipefail; . "$1"; do_identity --mode auto --report-stale' _ "$installer" 2>&1)" || rc=$?; }
+idrun_stale; expect_rc 1 "link's step, commit false and tag true, stale key"
+has "identity: user.signingkey $FP1 is not valid for me@example.com" "link names the stale key while tags sign"
+# A false outside config.local is not an opt-out: one problem, naming its file.
+dhealthy
+git config --file "$local_cfg" --unset commit.gpgsign
+printf '[commit]\n\tgpgsign = false\n' > "$HOME/sys"
+rc=0; out="$(GIT_CONFIG_SYSTEM="$HOME/sys" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, a system false"; one "doctor, a system false"
+has "doctor: values: commit.gpgsign = false from file:$HOME/sys, outside $local_cfg, so commits are not signed - remove it there to sign, or set the false in $local_cfg to opt out" "doctor names a false outside config.local"
+lacks "opt-out;" "a system false is not the opt-out"
+rm -f "$HOME/sys"
+# commit.gpgsign unset: the run-identity line.
+doc; expect_rc 1 "doctor, commit.gpgsign unset"; one "doctor, commit.gpgsign unset"
+has "doctor: values: commit.gpgsign is not set, so commits are not signed - run: $installer identity" "doctor names an unset commit.gpgsign"
+# A value git cannot read as a boolean fails every commit (or tag).
+git config --file "$local_cfg" commit.gpgsign flase
+doc; expect_rc 1 "doctor, commit.gpgsign = flase"; one "doctor, commit.gpgsign = flase"
+has "doctor: values: commit.gpgsign is not a boolean git reads (" "doctor names an unparseable commit.gpgsign"
+has "git refuses to commit until it is" "doctor says what an unparseable commit.gpgsign does"
+git config --file "$local_cfg" commit.gpgsign true
+git config --file "$local_cfg" tag.gpgsign flase
+doc; expect_rc 1 "doctor, tag.gpgsign = flase"; one "doctor, tag.gpgsign = flase"
+has "doctor: values: tag.gpgsign is not a boolean git reads (" "doctor names an unparseable tag.gpgsign"
+git config --file "$local_cfg" tag.gpgsign true
+# Command-line config and includeIf never reach doctor's reads: a false
+# there is neither an opt-out nor an override.
+rc=0; out="$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false \
+  GIT_CONFIG_PARAMETERS="'commit.gpgsign'='false'" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 0 "doctor ignores command-line config"; [ -z "$out" ] || fail "doctor read command-line config: $out"
+printf '[commit]\n\tgpgsign = false\n' > "$HOME/cond"
+printf '[includeIf "onbranch:main"]\n\tpath = %s\n' "$HOME/cond" >> "$XDG_CONFIG_HOME/git/config"
+doc; expect_rc 0 "doctor ignores includeIf"; [ -z "$out" ] || fail "doctor read an includeIf: $out"
+# A git too old to sign with SSH keys.
+mkdir -p "$work/oldgit"
+printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "git version 2.30.1"; exit 0; fi\nexec "%s" "$@"\n' "$(command -v git)" > "$work/oldgit/git"
+chmod u+x "$work/oldgit/git"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, git 2.30"; one "doctor, git 2.30"
+has "doctor: git: git version 2.30.1 cannot sign with SSH keys (2.34 or later can) - upgrade git" "doctor names a git too old to sign"
+# GIT_CONFIG_GLOBAL away from the XDG config.
+rc=0; out="$(GIT_CONFIG_GLOBAL=/dev/null "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, GIT_CONFIG_GLOBAL=/dev/null"
+has "doctor: git: GIT_CONFIG_GLOBAL=/dev/null is not $XDG_CONFIG_HOME/git/config, so git does not read $local_cfg - unset it" "doctor names GIT_CONFIG_GLOBAL"
+# No ssh-keygen on PATH: only what install.sh and the checks call.
+mkdir -p "$work/nokeygen"
+for t in git dirname bash python3; do ln -sf "$(command -v "$t")" "$work/nokeygen/$t"; done
+ln -sf "$work/fakebin/ssh-add" "$work/nokeygen/ssh-add"
+rc=0; out="$(PATH="$work/nokeygen" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, no ssh-keygen"
+has "doctor: ssh-keygen: ssh-keygen was not found on PATH - git signs and verifies with it; install OpenSSH" "doctor names a missing ssh-keygen"
+# An ssh-keygen that cannot be executed.
+mkdir -p "$work/badkeygen"
+printf '#!/nonexistent/interpreter\n' > "$work/badkeygen/ssh-keygen"; chmod u+x "$work/badkeygen/ssh-keygen"
+rc=0; out="$(PATH="$work/badkeygen:$PATH" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 1 "doctor, ssh-keygen does not run"
+has "doctor: ssh-keygen: ssh-keygen did not run (" "doctor names an ssh-keygen that does not run"
+# gpg.format other than ssh.
+git config --file "$local_cfg" gpg.format openpgp
+doc; expect_rc 1 "doctor, gpg.format openpgp"
+has "doctor: values: gpg.format is 'openpgp', not ssh" "doctor names gpg.format"
+git config --file "$local_cfg" --unset gpg.format
+# A malformed allowed-signers line that names an agent key.
+export FAKE_AGENT_KEYS="$K1
+$K2"
+printf 'me@example.com valid-before="20991231235961" %s\nme@example.com %s\n' "$K2" "$K1" > "$signers"
+doc; expect_rc 1 "doctor, an unclear allowed-signers line"
+has "doctor: ssh-agent: malformed allowed-signers line(s) 1 in $signers name an ssh-agent key - fix or remove them" "doctor names an unclear line"
+export FAKE_AGENT_KEYS="$K1"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+# A signing key that is a private key file signs without the agent; doctor
+# names it by fingerprint and never prints the file.
+mkdir -p "$HOME/.ssh"
+printf -- '-----BEGIN OPENSSH %s KEY-----\nx\n-----END OPENSSH %s KEY-----\n' PRIVATE PRIVATE > "$HOME/.ssh/id_sign"
+printf '%s me\n' "$K1" > "$HOME/.ssh/id_sign.pub"
+git config --file "$local_cfg" user.signingkey "~/.ssh/id_sign"
+FAKE_AGENT_DOWN=1 doc; expect_rc 0 "doctor, a private key file and no agent"; [ -z "$out" ] || fail "doctor, private key file: $out"
+FAKE_AGENT_DOWN=1 doc --verbose
+has "doctor: signing key: $FP1 verifies for me@example.com in $signers, signs from its private key file" "doctor names a private key file signer"
+lacks "BEGIN" "doctor never prints a private key file"
+git config --file "$local_cfg" user.signingkey "key::$K1"
+# A binary KRL: ssh-keygen -Q reads a temporary .pub, which is removed.
+printf '%s\n' "$K2" > "$work/revoke.pub"
+ssh-keygen -q -k -f "$HOME/krl" "$work/revoke.pub"
+git config --file "$local_cfg" gpg.ssh.revocationFile "$HOME/krl"
+mkdir -p "$work/tmpdir"
+rc=0; out="$(TMPDIR="$work/tmpdir" "$installer" doctor --verbose 2>&1)" || rc=$?
+expect_rc 0 "doctor, a binary KRL"
+has "doctor: trust root: gpg.ssh.revocationFile $HOME/krl is readable" "doctor reads a binary KRL"
+[ -z "$(ls -A "$work/tmpdir")" ] || fail "doctor left files in TMPDIR: $(ls -A "$work/tmpdir")"
+# A value with a control character is printed escaped, never raw.
+git config --file "$local_cfg" user.name "$(printf 'Jane\033[2JDoe')"
+doc --verbose
+has "Jane\\x1b[2JDoe" "doctor escapes a control character"
+! grep -q "$(printf '\033')" <<<"$out" || fail "doctor printed a raw escape byte: $out"
+ok
+
+# --- --rotate and identity on an opted-out host -------------------------------
+fresh
+printf 'me@example.com valid-before="20000101" %s\nme@example.com %s\n' "$K1" "$K2" > "$signers"
+export FAKE_AGENT_KEYS="$K2"
+printf '[user]\n\temail = me@example.com\n\tsigningkey = key::%s\n[commit]\n\tgpgsign = false\n' "$K1" > "$local_cfg"
+run --rotate
+expect_rc 0 "--rotate on an opted-out host"
+[ "$(get user.signingkey)" = "key::$K2" ] || fail "--rotate on an opted-out host: $(get user.signingkey)"
+[ "$(get commit.gpgsign)" = false ] && [ "$(get tag.gpgsign)" = UNSET ] || fail "--rotate on an opted-out host touched signing"
 ok
 
 # --- the scratch-agent guard: an agent on any other socket aborts ------------

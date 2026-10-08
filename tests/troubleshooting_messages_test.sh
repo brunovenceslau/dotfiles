@@ -8,11 +8,14 @@
 # Doc-sync test: docs/troubleshooting.md is keyed to the exact text the
 # framework prints, so a reworded message silently strands its section. Every
 # message the page quotes must still exist in the code that prints it
-# (install.sh, lib/*.sh and lib/*.py, zsh/).
+# (install.sh, lib/*.sh and lib/*.py, zsh/). docs/signing-key.md quotes the
+# identity step's and doctor's lines the same way, so it is held to the same
+# rule.
 #
 # What counts as a quoted message:
 #   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
-#     (the `install: ` prefix is added by install.sh's log/warn, so it is dropped);
+#     (the `install: ` prefix is added by install.sh's log/warn, so it is
+#     dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
 #   * a backtick span that starts with one of the framework's message prefixes
 #     (`upgrade: `, `link: `, `packages: `, `uninstall: `, `one or more links`,
 #     `updates are available`, `no successful update check`).
@@ -25,8 +28,10 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 doc="$repo_root/docs/troubleshooting.md"
+recipes="$repo_root/docs/signing-key.md"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 [ -f "$doc" ] || fail "docs/troubleshooting.md not found"
+[ -f "$recipes" ] || fail "docs/signing-key.md not found"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/troubleshooting_messages_test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
@@ -36,7 +41,18 @@ cat "$repo_root/install.sh" "$repo_root"/lib/*.sh "$repo_root"/lib/*.py "$repo_r
 
 # 1. Fenced-block lines.
 awk '/^```/ { inblock = !inblock; next }
-     inblock && /^(install|dotfiles): / { sub(/^install: /, ""); print }' "$doc" > "$work/msgs"
+     inblock && /^(install|dotfiles): / {
+       sub(/^install: /, "")
+       # doctor composes `doctor: <check>: <text>` from its CHECKS registry
+       # (lib/host_identity.py): the check name must be a registry entry, and
+       # the text is checked on its own.
+       if (match($0, /^doctor: [^:<]+: /)) {
+         name = substr($0, 9, RLENGTH - 10)
+         print "(\"" name "\", Doctor."
+         $0 = substr($0, RLENGTH + 1)
+       }
+       print
+     }' "$doc" "$recipes" > "$work/msgs"
 # 2. Backtick spans with a message prefix (one span per line of output).
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
   | grep -E '^(upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \

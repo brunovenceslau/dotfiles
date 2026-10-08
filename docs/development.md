@@ -35,6 +35,8 @@ maintainer decision, and last the step-by-step recipes for common changes.
   - [Bump a plugin pin](#bump-a-plugin-pin)
   - [Add a gh extension](#add-a-gh-extension)
   - [Change something on the upgrade path](#change-something-on-the-upgrade-path)
+  - [Change the identity step](#change-the-identity-step)
+- [Deferred decisions](#deferred-decisions)
 - [Landing a change](#landing-a-change)
 - [Cutting a release](#cutting-a-release)
   - [Which number to bump](#which-number-to-bump)
@@ -63,6 +65,12 @@ maintainer decision, and last the step-by-step recipes for common changes.
   fails before it reads a file.
 - git 2.31 or later. The smoke and its tests use
   `git rev-parse --path-format=absolute`, which older versions lack.
+- For `tests/host_identity_test.sh`: `ssh-keygen`, `ssh-agent` and `ssh-add`
+  (OpenSSH, which macOS ships), and time zone data for `python3`. The suite
+  checks its matcher against `ssh-keygen` in `Asia/Tokyo`,
+  `America/Los_Angeles` and `Europe/Berlin`, and fails when `python3` reads
+  any of them as UTC (on a minimal Linux image, install `tzdata`). Under
+  `STRICT=1` a missing OpenSSH tool fails the suite.
 - The plugin submodules. Clone with `--recurse-submodules`, or run
   `git submodule update --init` once in an existing checkout. `make test`,
   `make smoke` and `make forkgate` never initialize them for you. Without them,
@@ -88,7 +96,7 @@ in parity by construction. Run `make local-ci` before every push.
 
 | Target | What it runs | What it proves |
 | --- | --- | --- |
-| `make lint` | shellcheck over `install.sh`, `lib/`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` and `py-syntax` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
+| `make lint` | shellcheck over `install.sh`, `lib/*.sh`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` and `py-syntax` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
 | `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
 | `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
@@ -653,6 +661,17 @@ Back up any user file to `*.bak` before overwriting it.
 except for their README and `*.example` files. `make secret-scan` is the
 backstop.
 
+**Python only where bash 3.2 cannot do the job, from the standard library.**
+`lib/*.py` (today `lib/host_identity.py`) runs on the `python3` the Command
+Line Tools ship, so it uses the standard library only and stays Python 3.9
+safe: no `match` statement, no `X | Y` type unions.
+`tests/host_identity_units.py`, run by `tests/host_identity_test.sh`, parses
+it with `feature_version=(3, 9)`.
+`install.sh` always runs it as `python3 -I`, which keeps the current
+directory and the `PYTHON*` variables out of its module path, and probes that
+`python3 -I -c ''` runs first: on a Mac without the Command Line Tools,
+`/usr/bin/python3` is a stub.
+
 **`make lint` must be green before every commit, and commits are signed.**
 
 ## Ask before doing any of these
@@ -735,6 +754,50 @@ A subcommand name is a cross-version interface. The previous release's installer
 invokes it on the new tree. Deleting an arm sends that installer to the unknown
 command branch, which reports a failed upgrade. Retire a subcommand by making it
 a no-op, the way `reseed-settings` is retired.
+
+### Change the identity step
+
+The identity step and `install.sh doctor` live in `lib/host_identity.py`;
+`install.sh` only dispatches to it.
+
+1. Change the rule in one place. The behaviour is documented once, in
+   [`install.sh identity`](shell-reference.md#installsh-identity) and
+   [`install.sh doctor`](shell-reference.md#installsh-doctor); other pages
+   link there.
+2. Keep each printed message one string literal. `docs/troubleshooting.md`
+   and `docs/signing-key.md` quote them, and
+   `tests/troubleshooting_messages_test.sh` fails when a quote no longer
+   matches the code. Update both pages in the same commit.
+3. A new `doctor` check is one `Doctor` method and one `CHECKS` entry. It
+   only reads: a tool under a timeout, a file through `read_small_file()`
+   (non-blocking, size-capped). It states each problem as one line with its
+   fix, and passes `signing=True` only for a problem that matters to signing
+   alone, which an opted-out host sees as a note.
+4. A change to how the allowed-signers file is read needs a vector in
+   `tests/fixtures/allowed_signers/verify-git.txt`.
+   `tests/host_identity_test.sh` checks every vector against `ssh-keygen` in
+   four time zones, and runs the generated differential leg of
+   `tests/host_identity_conformance.py` once.
+5. Run `STRICT=1 bash tests/host_identity_test.sh`, then
+   `make local-ci STRICT=1`.
+
+## Deferred decisions
+
+Decisions about the test suite and the maintainers' tooling, each kept as it
+is until its trigger fires. The ones about the framework's behaviour are in
+[architecture](architecture.md#deferred-decisions).
+
+| Decision | Kept for now | Reopen when |
+| --- | --- | --- |
+| Extend `install.sh doctor` to the framework's other dependencies (gh auth and its scopes, Homebrew, the pinned plugins, and the like) | `doctor` checks the identity and signing path and the tools it uses: git, python3, ssh-keygen, the ssh-agent | A pull request opens that changes `CHECKS` in `lib/host_identity.py`, or a host breaks on one of those dependencies without a `doctor` line naming it |
+| Give the differential leg's key comparison a bucket check of its own | The leg compares each key spelling with `ssh-keygen -l`, with no assertion that it saw at least one refused and one matching spelling, so a module side that always agreed would pass | The next change to `tests/host_identity_conformance.py` |
+| Test two identity runs writing `config.local` at once | One writer per run: a temporary file and a rename, and the first `.bak` is never replaced; no concurrency test | A host reports a corrupt `config.local` or a second `.bak` |
+| Test the identity step's macOS-only paths on Linux: a case-insensitive APFS spelling of `TMPDIR`, `/var` as a link to `/private/var`, and an execute-only or deleted working directory | The macOS CI legs run `tests/host_identity_test.sh`: every case there runs under the macOS `TMPDIR` in `/var/folders`, a case-insensitive spelling of `TMPDIR` is run there and skipped elsewhere, and an execute-only working directory must either work or give the one refusal for it. A deleted working directory is not tested | The first macOS run of the identity step that reports a refusal, or a macOS CI leg that fails one of these cases |
+| Hold the test `.py` files to the Python 3.9 floor, in `tests/host_identity_units.py` and the Makefile `py-syntax` leg | The floor is checked for `lib/host_identity.py` only | A test `.py` file uses syntax newer than 3.9, or CI gains a 3.9 leg |
+| Name the `webauthn-sk-ecdsa-sha2-nistp256@openssh.com` spelling of a security key on purpose: add it to `TYPE_ALIASES`, or pin today's behaviour with a test | A line using that name is malformed here, and `keys_named()` finds its key only because the name contains `sk-ecdsa-sha2-nistp256@openssh.com` | The next edit to `keys_named()` |
+| Require a minimum `ssh-keygen` version for the conformance vectors | The suite uses the host's `ssh-keygen`. The vector `OK \x0da@x @KEY@` was reported to fail with OpenSSH 9.2 and 9.6 and to pass with 9.7 and later; that report has not been reproduced | A host with `ssh-keygen` 9.6 or older goes red on it, or the macOS CI leg shows it |
+| Probe `ssh-keygen -Y sign` and `-Y verify` once, with a named message, before the conformance checks | The suite signs and verifies directly, so a broken `ssh-keygen` fails it without naming the cause | A report of a conformance failure that is empty or a traceback |
+| Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
 
 ## Landing a change
 
