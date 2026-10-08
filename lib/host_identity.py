@@ -1599,7 +1599,8 @@ def identity(host, name):
         # Nothing at all next to a conflict: an email, or tag.gpgsign = true,
         # written beside a signing key this step did not choose would pair
         # this host's identity with a key that may not verify for it.
-        # Commit signing itself comes from the tracked config either way.
+        # Where git reads the tracked config, commit signing comes from it
+        # either way; elsewhere commit.gpgsign = true is withheld too.
         warn("identity:   writing nothing; fix the value(s) above, or keep them on purpose")
         return 1
     if to_write:

@@ -252,9 +252,9 @@ config there, and points at
 
 **Cause.** The tracked `config/git/config` sets `commit.gpgsign = true`, so a
 commit goes out unsigned only where that does not apply: git does not read
-the tracked config at all (`commit.gpgsign` is unset), a `false` from another
-file turns it off, or the commit took a path the setting does not cover. The
-known paths are in
+the tracked config at all (`commit.gpgsign` is unset), a `false` from a file
+git reads after it turns it off, or the commit took a path the setting does
+not cover. The known paths are in
 [where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
 What refuses an unsigned commit on `main` is in
 [security properties](architecture.md#security-properties-and-where-they-are-enforced).

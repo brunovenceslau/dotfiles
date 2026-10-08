@@ -592,11 +592,14 @@ and the steps in
 
 ### Commit signing is on in the tracked config
 
-The tracked `config/git/config` sets `commit.gpgsign = true`. A host that
-reads the tracked config signs its commits unless it opts out, so an
+The tracked `config/git/config` sets `commit.gpgsign = true`. Where git
+reads the tracked config, a plain `git commit` signs by default, so an
 unsigned commit there is the exception a host asks for, not the state a
-fresh host falls into. A host with no signing key fails closed: git refuses
-every commit until `install.sh identity` sets the key, or until
+fresh host falls into; the other ways to an unsigned commit are the known
+paths in
+[where commit signing is mandatory](shell-reference.md#where-commit-signing-is-mandatory).
+A host with no signing key fails closed: git refuses a plain `git commit`
+until `install.sh identity` sets the key, or until
 `config.local` opts the host out. The automatic step, the `install` advisory
 and `install.sh doctor` all say so: the automatic step's line says every
 commit fails, and the advisory and doctor say git refuses every commit. That
@@ -640,7 +643,7 @@ test suite are in development.md's
 | Read a `TMPDIR` spelled in decomposed Unicode (NFD) the way git does under `core.precomposeunicode` on macOS | `getcwd()` decides the ceiling; a mismatch can only make the identity step refuse (`not reading the git config`), never read a repository | A refusal is reported with a non-ASCII `TMPDIR` |
 | Match glibc's leniencies in the allowed-signers and revocation readers (a seconds field of 61, spaces inside a date field), and `ssh-keygen`'s acceptance of a repeated `cert-authority` or of a line cut short by a NUL byte | Read more strictly, the same on every platform (the header of `lib/host_identity.py`): such an allowed-signers line is malformed, and one that names an ssh-agent key makes the step write nothing, as an ambiguity; such a revocation line makes it write nothing | One of these spellings turns up in a real allowed-signers or revocation file |
 | Refuse on a malformed allowed-signers line only when it could change this host's own identity (its principals match `user.email`) | Any malformed line that names an ssh-agent key makes the step write nothing, even a line for another email: it fails closed | Someone is blocked by a malformed line for another principal |
-| Warn about an unsigned host in `_signing_advisory` when python3 is unusable | The advisory is `lib/host_identity.py`'s `advisory()`, so without python3 it says nothing; the identity step, which runs first, already says python3 is unusable. Where git reads the tracked config, a host with no key cannot commit at all, so only a host that does not read it can commit unsigned unnoticed | A host that does not read the tracked config, and has no usable python3, commits unsigned without noticing |
+| Warn about an unsigned host in `_signing_advisory` when python3 is unusable | The advisory is `lib/host_identity.py`'s `advisory()`, so without python3 it says nothing; the identity step, which runs first, already says python3 is unusable. Where git reads the tracked config and no later file sets it false, a host with no key cannot commit at all | A host that does not read the tracked config, and has no usable python3, commits unsigned without noticing |
 | Make `--rotate`, and the stale-key line that points at it, agree with every platform's `ssh-keygen` on a line only glibc accepts; report a `user.signingkey` that names no readable key from `link` | `--rotate` may move away from a key glibc's `ssh-keygen` still accepts, or refuse with the malformed-line message after `link` pointed at it; `link` stays quiet on a `user.signingkey` it cannot read (it reports only what it can judge) | A host hits either path in practice |
 | Check for ambiguity a key spelled only inside a quoted option value | Not checked: the shape is contrived, and was judged to fail closed | Such a line turns up in a real allowed-signers file |
 | Guard against a FIFO at `~/.gitconfig` | Not guarded: git itself hangs on one, so every git command does, not only this step | A host reports a hang that traces to a special file at `~/.gitconfig` |

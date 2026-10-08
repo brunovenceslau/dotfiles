@@ -464,7 +464,9 @@ def main_twice_units(mod, scratch):
           "a second auto run on a keyed host carries nothing over from the first (%r)" % text)
     os.remove(local)
     for mode in ("check", "doctor"):
-        said("auto")
+        rc, text = said("auto")
+        check("; every commit fails until this host has a signing key" in text,
+              "the auto run before --mode %s fails closed (%r)" % (mode, text))
         rc, text = said(mode)
         check("every commit fails until" not in text,
               "--mode %s after a fail-closed auto run does not repeat its suffix (%r)" % (mode, text))

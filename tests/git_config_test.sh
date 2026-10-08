@@ -125,6 +125,11 @@ fi
 # tag.forceSignAnnotated defeats `git tag --no-sign` and the opt-out, so the
 # example does not suggest it, not even commented (git reads names in any case).
 ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignannotated "$ex" || :)" "0"
+# Style-independent twin of the uncommenting below: whatever indentation a
+# commented line takes, no line of the example may read as a gpgsign opt-out
+# (false, no, off or 0), with or without the commit. prefix.
+ck "the example carries no commented gpgsign opt-out line" \
+  "$(grep -ciE '^#[[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*(false|no|off|0)[[:space:]]*$' "$ex" || :)" "0"
 # The example says to uncomment and edit each line: doing exactly that, with
 # the result included after the tracked config the way the link engine writes
 # ~/.config/git/config (lib/link.sh's _write_git_local_config), must leave
