@@ -3661,8 +3661,8 @@ esac
 # ARM 1 (curl|sh) is asserted over the CODE surface, derived from the same
 # log, never a hand-kept list: every tracked path under an arm 2 root (the
 # shared install.sh, lib/, bin/, zsh/, config/, packages/, security/ and
-# home/), under an arm 8 root outside tests/ (which adds the Makefile and
-# .github/workflows/), or under .github/ at all, must lie under an arm 1 root;
+# home/), under an arm 8 root outside tests/ (which adds the Makefile,
+# .githooks/ and .github/workflows/), or under .github/ at all, must lie under an arm 1 root;
 # no arm 1 root may lie in tests/, docs/ or .claude/; and arms 1 and 2 each
 # run exactly one non-recursive self-scan, of bin/check-patterns.
 # NOT proven: that any OTHER arm reaches an entry. Arm 11 (em dash) is the

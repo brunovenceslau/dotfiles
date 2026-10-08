@@ -582,13 +582,13 @@ opt='[[:space:]]+-[^[:space:]"'"'"'`$]*'
 fetch_pipe="(curl|wget)[^|]*\\|&?[[:space:]]*$runner([^[:alnum:]_.-]|\$)"
 fetch_subst="(^|[^[:alnum:]_.-])(eval([[:space:]]+--)?|$runner($opt)*[[:space:]]+-[[:alnum:]]*c[[:alnum:]]*($opt)*)[[:space:]]+[\"']?[[:space:]]*(\\\$\\(|\`)[[:space:]]*$fetcher"
 fetch_procsub="(^|[^[:alnum:]_.-])(source|\\.|$runner)[[:space:]]+(<[[:space:]]*)?<\\([[:space:]]*$fetcher"
-# SURFACE: the shared `scan` roots plus the Makefile and the whole .github/ -
-# a recipe line, a workflow `run:` step and a composite action's step
-# execute on every CI leg exactly as a line in lib/ does. tests/, docs/ and .claude/ stay OUT: tests/ plants
+# SURFACE: the shared `scan` roots plus the Makefile, .githooks/ and the whole
+# .github/ - a recipe line, a git hook, a workflow `run:` step and a composite
+# action's step execute exactly as a line in lib/ does. tests/, docs/ and .claude/ stay OUT: tests/ plants
 # real fetch shapes as fixtures, and docs/ and .claude/ are prose that names
 # them. tests/check_patterns_test.sh's surface-coverage section derives this
 # from the gate's own grep calls. Plus the narrow self-scan of this file.
-_scan_roots install.sh lib bin zsh config packages security home Makefile .github
+_scan_roots install.sh lib bin zsh config packages security home Makefile .githooks .github
 fetch_scan=(${roots[@]+"${roots[@]}"})
 rc=0
 out=$(grep -rHnaE --exclude=check-patterns \
@@ -814,8 +814,8 @@ fi
 # sees the break. This arm is its static gate; the fix is always a POSIX class
 # (`[[:space:]]`, `[[:alnum:]_]`, `(^|[^[:alnum:]_])`) or the ERE operator under -E.
 # SURFACE: every file whose commands run on a mac - install.sh, lib/, bin/, zsh/,
-# tests/, the Makefile and the workflows (the macOS runner executes their `run:`
-# steps). config/ is NOT scanned: it holds editor configs whose own regex dialects
+# tests/, the Makefile, the .githooks/ hooks and the workflows (the macOS runner
+# executes their `run:` steps). config/ is NOT scanned: it holds editor configs whose own regex dialects
 # (vim's `\s`) are legitimate. Pinned plugins are upstream's code, left out by
 # their exact path (_scan_roots), and this script excludes itself by name -
 # NEITHER is a language exemption, both are content-independent path
@@ -827,8 +827,8 @@ fi
 # there, so non-shell code that needs one lives in its own `.py` file under
 # tests/, never a heredoc embedded in a `.sh` script (a heredoc is still
 # shell-surface text to this arm - it has no notion of an embedded language).
-# The exemption stops at tests/: bin/, lib/, zsh/, install.sh, the Makefile and
-# the workflows are still fully scanned, because lib/link.sh's _link_bin_tree
+# The exemption stops at tests/: bin/, lib/, zsh/, install.sh, .githooks/, the
+# Makefile and the workflows are still fully scanned, because lib/link.sh's _link_bin_tree
 # links every bin/* file onto the live PATH by basename - a `bin/foo.py`
 # holding a shell-adjacent GNU-only regex would run on a mac unscanned if this
 # arm exempted it too. tests/ has no such path: nothing there is linked or run
@@ -842,7 +842,7 @@ fi
 #     carry no -E/-r/-P. Under -E, `\|` is an ESCAPED literal bar and is portable.
 # PREMISE: a flag group before the pattern is short options only (`-qi`, `-e`); a
 # long option (`--posix`) in front of a BRE pattern hides it from the second shape.
-_scan_roots install.sh lib bin zsh Makefile .github/workflows
+_scan_roots install.sh lib bin zsh Makefile .githooks .github/workflows
 gnu_rest=(${roots[@]+"${roots[@]}"})
 _scan_roots tests
 gnu_tests=(${roots[@]+"${roots[@]}"})

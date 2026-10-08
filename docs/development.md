@@ -107,7 +107,8 @@ in parity by construction. Run `make local-ci` before every push.
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
 | `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference link and definition, HTML `href` and `src`, and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
-| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck | Everything CI runs. |
+| `make commit-identity` | `python3 -I .githooks/commit_identity.py check`, with git's local environment variables unset | No `user.email` or `user.name` is set inside this repository's own git config. See [What `make commit-identity` checks](#what-make-commit-identity-checks). |
+| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck, commit-identity | Everything CI runs. |
 | `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
 `reuse lint` walks what git tracks and does not descend into the pinned plugin
@@ -146,28 +147,28 @@ paths, which ones. The rules:
   string (`sh -c "set -e; $(curl ...)"`), a fetch through an alias or function,
   a shell reached through `xargs` or `nohup`, and fetch tools other than curl
   and wget. This rule reads `install.sh`, `lib/`, `bin/`, `zsh/`, `config/`,
-  `packages/`, `security/`, `home/`, the `Makefile` and `.github/` (a recipe
-  line, a workflow `run:` step and a composite action's step execute like any
-  other code), never `tests/` (which plants real fetch shapes as fixtures),
-  `docs/` or `.claude/`.
+  `packages/`, `security/`, `home/`, the `Makefile`, `.githooks/` and
+  `.github/` (a recipe line, a git hook, a workflow `run:` step and a composite
+  action's step execute like any other code), never `tests/` (which plants
+  real fetch shapes as fixtures), `docs/` or `.claude/`.
 - No ad-hoc `uname -m` outside `lib/os.sh`.
 - No unescaped `#` inside a Makefile `$(shell ...)`.
 - No hardcoded Homebrew prefix and no `brew shellenv` or `brew --prefix` fork.
 - No bash 4 syntax in `install.sh` or `lib/`.
 - No GNU-only regex escape (`\s`, `\w`, `\b`, BRE `\|`) in the shell surface,
-  `tests/` and the workflows (this arm's only OTHER exclusions, the pinned
-  plugins dir and the script's own name, are content-independent path
+  `.githooks/`, `tests/` and the workflows (this arm's only OTHER exclusions,
+  the pinned plugins dir and the script's own name, are content-independent path
   exclusions, not language exemptions; inside `tests/` ONLY, `*.py` files are
   skipped by a fixed extension - the arm's only content-independent LANGUAGE
   exemption, never a marker comment or a parse of what a file contains, because
   Python's own `re` module is a different regex dialect where those escapes are
-  portable; `bin/`, `lib/`, `zsh/`, `install.sh`, the Makefile and the workflows
-  carry no such exemption, since `lib/link.sh`'s `_link_bin_tree` links every
-  `bin/*` file onto the live PATH by basename; non-shell code that needs the
-  exemption MUST live in its own `.py` file under `tests/`, never a `python3 -
-  <<'PY'` heredoc embedded in a `.sh` script - a heredoc is still shell-surface
-  text to this arm, which has no notion of an embedded language; see
-  `tests/release_workflow_check.py` and its caller
+  portable; `bin/`, `lib/`, `zsh/`, `install.sh`, `.githooks/`, the Makefile and
+  the workflows carry no such exemption, since `lib/link.sh`'s `_link_bin_tree`
+  links every `bin/*` file onto the live PATH by basename; non-shell code that
+  needs the exemption MUST live in its own `.py` file under `tests/`, never a
+  `python3 - <<'PY'` heredoc embedded in a `.sh` script - a heredoc is still
+  shell-surface text to this arm, which has no notion of an embedded language;
+  see `tests/release_workflow_check.py` and its caller
   `tests/release_workflow_test.sh`).
 - No early-exit reader (`grep -q`, `-m`, `-l`, `head`) on the right of a pipe in
   the pipefail surface (`install.sh`, `lib/`, `bin/`, `tests/`, the workflows).
@@ -490,6 +491,48 @@ unreadable, not UTF-8, or reached through a symlink swapped into the working
 tree.
 `tests/linkcheck_test.sh` proves each rule against a fixture.
 
+### What `make commit-identity` checks
+
+A commit identity belongs in the global config. The check refuses a
+`user.email` or `user.name` set at git config scope `local` (the repository's
+`.git/config`, or a file it includes) or `worktree` (a `config.worktree`, when
+`extensions.worktreeConfig` is on). A `git config user.email` run inside a
+linked worktree writes the shared `.git/config`, so every worktree of the
+repository then commits under it: signed by the right key, authored by the
+wrong person.
+
+These stay allowed: `git -c user.email=... -c user.name=...` per command
+(scope `command`), the `GIT_AUTHOR_*` and `GIT_COMMITTER_*` variables, and the
+global and system scopes. The check reads config only. It does not look at
+signatures or keys.
+
+A refusal prints one line per offending key, naming the key, its value, the
+scope and the file, and the command that removes it, then one line pointing
+at `git -c`:
+
+```text
+commit-identity: check: refusing: user.email 'a@b' is set at scope local in /path/.git/config; fix: git config --file /path/.git/config --unset-all user.email
+```
+
+Control characters, bidi and zero-width characters in a value or a path print
+as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`, so a value
+cannot forge a line. It exits 2 when it cannot answer, for example outside a
+repository.
+
+The same rule runs as two git hooks, `.githooks/pre-commit` and
+`.githooks/pre-push`, which run `.githooks/commit_identity.py`. `pre-push`
+matters because a rebase or a cherry-pick commits without running
+`pre-commit`. It drains the ref lines git writes on its stdin and ignores
+them, so a new branch, a deletion, a tag or a remote commit missing locally
+pushes the same way. The hooks run only where something points git at
+`.githooks/`: the development sandbox's system dispatcher, which runs
+`<toplevel>/.githooks/<hook>` when it is executable. Nothing in this
+repository sets `core.hooksPath`, and the installer does not, so on the Mac
+the guard runs only as this gate (see
+[Deferred decisions](#deferred-decisions)). A CI checkout sets no identity in
+its repository, so the gate passes there.
+`tests/commit_identity_test.sh` proves each rule in scratch repositories.
+
 ## CI
 
 `.github/workflows/ci.yml` is a thin matrix of `make` calls.
@@ -797,6 +840,7 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Name the `webauthn-sk-ecdsa-sha2-nistp256@openssh.com` spelling of a security key on purpose: add it to `TYPE_ALIASES`, or pin today's behaviour with a test | A line using that name is malformed here, and `keys_named()` finds its key only because the name contains `sk-ecdsa-sha2-nistp256@openssh.com` | The next edit to `keys_named()` |
 | Require a minimum `ssh-keygen` version for the conformance vectors | The suite uses the host's `ssh-keygen`. The vector `OK \x0da@x @KEY@` was reported to fail with OpenSSH 9.2 and 9.6 and to pass with 9.7 and later; that report has not been reproduced | A host with `ssh-keygen` 9.6 or older goes red on it, or the macOS CI leg shows it |
 | Probe `ssh-keygen -Y sign` and `-Y verify` once, with a named message, before the conformance checks | The suite signs and verifies directly, so a broken `ssh-keygen` fails it without naming the cause | A report of a conformance failure that is empty or a traceback |
+| Wire `.githooks/` as git hooks on the Mac (`core.hooksPath`, or a dispatcher like the sandbox's) | Not wired: a hook directory a sandbox can write would then run on the host, outside the sandbox. On the Mac the rule runs only as `make commit-identity` | An identity incident happens on the Mac |
 | Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
 
 ## Landing a change

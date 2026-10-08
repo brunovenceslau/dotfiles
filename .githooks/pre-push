@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# .githooks/pre-push - refuse a commit identity set inside the repository.
+#
+# Runs where a dispatcher or core.hooksPath points at .githooks/ (the sandbox's
+# system dispatcher, /etc/git/hooks, execs <toplevel>/.githooks/<hook> with
+# git's args and stdin). Nothing wires it on the Mac on purpose: see "Deferred
+# decisions" in docs/development.md. The rule lives in commit_identity.py;
+# this wrapper only names the caller. git's args are not passed on: the rule
+# reads config only, and the script drains a pre-push stdin itself.
+set -euo pipefail
+
+exec python3 -I "$(dirname -- "$0")/commit_identity.py" pre-push

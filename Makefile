@@ -17,9 +17,12 @@ SELF := $(lastword $(MAKEFILE_LIST))
 # Wildcards so a target stays valid when its scanned directory is empty.
 # Every bin/ tool is a shell script, so the whole set routes to shellcheck; a
 # .py file there would need excluding first (shellcheck errors SC1071 on one).
+# .githooks/ is named file by file for the same reason: its two hook wrappers
+# are bash, and commit_identity.py beside them is not.
 # lib/ is taken as lib/*.sh, which keeps lib/host_identity.py out. py-syntax
 # below covers .py syntax separately, wherever it lives.
-SH_FILES     := $(wildcard install.sh) $(wildcard lib/*.sh) $(wildcard bin/*)
+SH_FILES     := $(wildcard install.sh) $(wildcard lib/*.sh) $(wildcard bin/*) \
+                $(wildcard .githooks/pre-commit) $(wildcard .githooks/pre-push)
 # Bash-3.2 compatibility is scoped to install.sh + lib/ only; bin/
 # tools run on provisioned hosts/CI under a modern bash. The /bin/bash -n 3.2
 # parse pass therefore scans this subset, not all of SH_FILES.
@@ -34,7 +37,7 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck local-ci repo-settings-check
+.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
@@ -47,6 +50,7 @@ help:
 	@echo "  make secret-scan          high-confidence secret scan over the tracked tree"
 	@echo "  make forkgate             prove 'zsh -i -c exit' invokes no external binary"
 	@echo "  make linkcheck            every relative link and #anchor in the tracked docs resolves (no network)"
+	@echo "  make commit-identity      no user.email or user.name set inside this repository's own git config"
 	@echo "  make local-ci             every locally-runnable CI gate; reports skipped legs"
 	@echo "  make repo-settings-check  maintainer-run: diff live GitHub settings vs .github/repo-settings.json"
 
@@ -443,15 +447,36 @@ linkcheck:
 	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
 	fi
 
+# Commit identity - refuse a user.email or user.name set at git config scope
+#   `local` or `worktree` in this repository: the one place a stray
+#   `git config user.email` inside a linked worktree lands, from where every
+#   worktree commits under it. The rule lives in .githooks/commit_identity.py,
+#   shared with the pre-commit and pre-push hooks there, so the gate and the
+#   hooks cannot disagree. A CI checkout sets no user.* in its repository, so
+#   the gate passes there; it bites on a developer's checkout, before a push.
+#   git's local env vars are unset first ($(GIT_ENV_SCRUB)): a GIT_DIR leaked
+#   from a hook would point the check at another repository. stdin is
+#   /dev/null because the `check` mode never reads it. STRICT semantics match
+#   the linkcheck block.
+commit-identity:
+	@$(GIT_ENV_SCRUB) \
+	if command -v python3 >/dev/null 2>&1; then \
+	  echo "python3 -I .githooks/commit_identity.py check"; python3 -I .githooks/commit_identity.py check </dev/null; \
+	elif [ -n "$(STRICT)" ]; then \
+	  echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
+	else \
+	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
+	fi
+
 # Run every locally-runnable CI gate and report which OS-specific
 #   or not-yet-implemented legs were skipped. `smoke` runs a full scratch-HOME
 #   install + interactive zsh, so it is locally runnable and gates here.
-local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck
+local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck commit-identity
 	@echo "----------------------------------------------------------------"
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck"; \
+	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	else \
-	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck"; \
+	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	  echo "local-ci: SKIP shellcheck (not installed locally; enforced in CI)"; \
 	fi
 	@# reuse reports on its own line, for the reason shellcheck does: without
