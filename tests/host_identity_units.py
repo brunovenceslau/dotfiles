@@ -52,6 +52,147 @@ def stub(directory, name, body):
     os.chmod(path, stat.S_IRWXU)
 
 
+def use_tmpdir(mod, path):
+    """Point TMPDIR at PATH for the module's next git_isolate()."""
+    mod.git_release()
+    os.environ["TMPDIR"] = path
+    mod.tempfile.tempdir = None
+
+
+def git_units(mod, scratch):
+    os.environ.update({
+        "GIT_DIR": "/some/repo/.git",
+        "GIT_WORK_TREE": "/some/repo",
+        "GIT_CONFIG_PARAMETERS": "'user.email'='evil@x'",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "user.email",
+        "GIT_CONFIG_VALUE_0": "evil@x",
+        "GIT_CONFIG_GLOBAL": "/custom/global",
+        "GIT_CONFIG_SYSTEM": "/custom/system",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CEILING_DIRECTORIES": "/inherited",
+    })
+    env = mod.git_env("/ceiling")
+    check("GIT_DIR" not in env, "git_env drops GIT_DIR rather than pointing it anywhere")
+    check(env.get("GIT_CEILING_DIRECTORIES") == "/ceiling", "git_env sets the one ceiling it is given")
+    check(not any(k in env for k in ("GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                                     "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")),
+          "git_env drops the repository-local and -c variables")
+    check(env.get("GIT_CONFIG_GLOBAL") == "/custom/global" and env.get("GIT_CONFIG_SYSTEM") == "/custom/system"
+          and env.get("GIT_CONFIG_NOSYSTEM") == "1", "git_env keeps the global and system file selectors")
+
+    # A stub git: it answers the isolation check the way git does outside a
+    # repository, and records what any other call saw.
+    real_path = os.environ["PATH"]
+    bindir = os.path.join(scratch, "bin")
+    os.mkdir(bindir)
+    record = os.path.join(scratch, "git-env")
+    cwd_record = os.path.join(scratch, "git-cwd")
+    stub(bindir, "git", 'if [ "$1" = rev-parse ]; then\n'
+         '  echo "fatal: not a git repository (or any of the parent directories): .git" >&2; exit 128\n'
+         'fi\nenv > "%s"\npwd -P > "%s"\nls -A > "%s.ls"\nexit 1\n' % (record, cwd_record, cwd_record))
+    os.environ["PATH"] = bindir + os.pathsep + real_path
+    tmpdir = os.path.join(scratch, "tmp")
+    os.mkdir(tmpdir, 0o700)
+    use_tmpdir(mod, tmpdir)
+    mod.git(["config", "--get", "user.email"])
+    with open(record) as fh:
+        seen = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
+    check("GIT_DIR" not in seen and "GIT_WORK_TREE" not in seen and "GIT_CONFIG_PARAMETERS" not in seen
+          and seen.get("GIT_CONFIG_GLOBAL") == "/custom/global" and seen.get("GIT_CONFIG_NOSYSTEM") == "1",
+          "the git child process sees exactly the scrubbed environment")
+    with open(cwd_record) as fh:
+        ran_in = fh.read().strip()
+    with open(cwd_record + ".ls") as fh:
+        listing = fh.read()
+    check(os.path.dirname(ran_in) == os.path.realpath(tmpdir) and listing == "",
+          "git runs from a fresh, empty directory under $TMPDIR")
+    check(seen.get("GIT_CEILING_DIRECTORIES") == os.path.realpath(tmpdir),
+          "the ceiling is that directory's parent, replacing an inherited one")
+    mod.git(["config", "--get", "user.name"])
+    with open(cwd_record) as fh:
+        check(fh.read().strip() == ran_in and os.listdir(tmpdir) == [os.path.basename(ran_in)],
+              "every git call of one process shares that one directory")
+    mod.git_release()
+    check(not os.path.exists(ran_in) and os.listdir(tmpdir) == [], "git_release() removes it")
+
+    def refused(what, needle):
+        if os.path.exists(record):
+            os.unlink(record)
+        rc, _, err = mod.git(["config", "--get", "user.email"])
+        check(rc == 127 and needle in err and not os.path.exists(record),
+              "%s: git refuses (%s), the config is not read" % (what, err))
+        again = mod.git(["config", "--get", "user.email"])
+        check(again == (127, "", err), "%s: the refusal is remembered" % what)
+
+    colon = os.path.join(scratch, "a:b")
+    os.mkdir(colon, 0o700)
+    use_tmpdir(mod, colon)
+    refused("a ceiling holding ':' (git's list separator)", "cannot express")
+    mod.git_release()
+    check(os.listdir(colon) == [], "the refused directory is removed all the same")
+
+    open_dir = os.path.join(scratch, "open")
+    os.mkdir(open_dir)
+    os.chmod(open_dir, 0o777)
+    use_tmpdir(mod, open_dir)
+    refused("a TMPDIR writable by every user, not sticky", "writable by every user and not sticky")
+    os.chmod(open_dir, 0o777 | stat.S_ISVTX)
+    use_tmpdir(mod, open_dir)
+    check(mod.git_isolate() is None, "the same TMPDIR with the sticky bit (as /tmp) is accepted")
+    mod.git_release()
+    os.chmod(open_dir, 0o700)
+
+    use_tmpdir(mod, tmpdir)
+    real_tempdir = mod.tempfile.TemporaryDirectory
+
+    def no_tempdir(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    mod.tempfile.TemporaryDirectory = no_tempdir
+    try:
+        refused("no empty directory can be made", "No space left on device")
+    finally:
+        mod.tempfile.TemporaryDirectory = real_tempdir
+
+    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        use_tmpdir(mod, tmpdir)
+        old = os.environ[name]
+        os.environ[name] = ".gitconfig"
+        refused("a relative %s" % name, "%s=.gitconfig is not an absolute path" % name)
+        os.environ[name] = old
+    mod.git_release()
+    check(os.listdir(tmpdir) == [], "no refusal leaves a directory behind")
+
+    # The proof itself, with the real git: were the ceiling lost, git would
+    # find the repository holding $TMPDIR, and the step must refuse.
+    for k in [k for k in os.environ if k.startswith("GIT_")]:
+        del os.environ[k]
+    os.environ["PATH"] = real_path
+    os.environ["GIT_CONFIG_SYSTEM"] = os.devnull
+    os.environ["GIT_CONFIG_GLOBAL"] = os.devnull
+    hostile = os.path.join(scratch, "hostile")
+    subprocess.run(["git", "init", "-q", hostile], check=True, stdin=subprocess.DEVNULL)
+    inside = os.path.join(hostile, "tmp")
+    os.mkdir(inside, 0o700)
+    use_tmpdir(mod, inside)
+    check(mod.git_isolate() is None, "a TMPDIR inside a repository passes: the ceiling holds")
+    link = os.path.join(scratch, "tmp-link")
+    os.symlink(inside, link)
+    use_tmpdir(mod, link)
+    check(mod.git_isolate() is None and mod._git_place[2] == os.path.realpath(inside),
+          "a TMPDIR that is a symlink into a repository passes, its ceiling spelled as getcwd() spells it")
+    real_env = mod.git_env
+    mod.git_env = lambda ceiling: {k: v for k, v in real_env(ceiling).items() if k != "GIT_CEILING_DIRECTORIES"}
+    try:
+        use_tmpdir(mod, inside)
+        refused("without the ceiling, git finds the repository around TMPDIR", "git finds a repository")
+    finally:
+        mod.git_env = real_env
+    mod.git_release()
+    check(os.listdir(inside) == [], "nothing is left inside the repository")
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -67,64 +208,34 @@ def main(argv):
 
     # --- the git environment: what is scrubbed, what survives ---------------
     saved = dict(os.environ)
-    os.environ.update({
-        "GIT_DIR": "/some/repo/.git",
-        "GIT_WORK_TREE": "/some/repo",
-        "GIT_CONFIG_PARAMETERS": "'user.email'='evil@x'",
-        "GIT_CONFIG_COUNT": "1",
-        "GIT_CONFIG_KEY_0": "user.email",
-        "GIT_CONFIG_VALUE_0": "evil@x",
-        "GIT_CONFIG_GLOBAL": "/custom/global",
-        "GIT_CONFIG_SYSTEM": "/custom/system",
-        "GIT_CONFIG_NOSYSTEM": "1",
-    })
-    env = mod.git_env("/ceiling")
-    check("GIT_DIR" not in env, "git_env drops GIT_DIR rather than pointing it anywhere")
-    check(env.get("GIT_CEILING_DIRECTORIES") == "/ceiling", "git_env sets the one ceiling it is given")
-    check(not any(k in env for k in ("GIT_WORK_TREE", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-                                     "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")),
-          "git_env drops the repository-local and -c variables")
-    check(env.get("GIT_CONFIG_GLOBAL") == "/custom/global" and env.get("GIT_CONFIG_SYSTEM") == "/custom/system"
-          and env.get("GIT_CONFIG_NOSYSTEM") == "1", "git_env keeps the global and system file selectors")
-    bindir = os.path.join(scratch, "bin")
-    os.mkdir(bindir)
-    record = os.path.join(scratch, "git-env")
-    cwd_record = os.path.join(scratch, "git-cwd")
-    stub(bindir, "git", 'env > "%s"\npwd -P > "%s"\nls -A > "%s.ls"\nexit 1\n'
-         % (record, cwd_record, cwd_record))
-    os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
-    os.environ["GIT_CEILING_DIRECTORIES"] = "/inherited"
-    tmpdir = os.path.join(scratch, "tmp")
-    os.mkdir(tmpdir)
-    os.environ["TMPDIR"] = tmpdir
-    mod.tempfile.tempdir = None
-    mod.git(["config", "--get", "user.email"])
-    with open(record) as fh:
-        seen = dict(line.split("=", 1) for line in fh.read().splitlines() if "=" in line)
-    check("GIT_DIR" not in seen and "GIT_WORK_TREE" not in seen and "GIT_CONFIG_PARAMETERS" not in seen
-          and seen.get("GIT_CONFIG_GLOBAL") == "/custom/global" and seen.get("GIT_CONFIG_NOSYSTEM") == "1",
-          "the git child process sees exactly the scrubbed environment")
-    with open(cwd_record) as fh:
-        ran_in = fh.read().strip()
-    with open(cwd_record + ".ls") as fh:
-        listing = fh.read()
-    check(os.path.dirname(ran_in) == os.path.realpath(tmpdir) and listing == "",
-          "git runs from a fresh, empty directory under $TMPDIR")
-    check(seen.get("GIT_CEILING_DIRECTORIES") == os.path.realpath(tmpdir),
-          "the ceiling is that directory's parent, replacing an inherited one")
-    check(not os.path.exists(ran_in) and os.listdir(tmpdir) == [], "the empty directory is removed afterwards")
-    colon = os.path.join(scratch, "a:b")
-    os.mkdir(colon)
-    os.environ["TMPDIR"] = colon
-    mod.tempfile.tempdir = None
-    os.unlink(record)
-    rc, _, err = mod.git(["config", "--get", "user.email"])
-    check(rc == 127 and "cannot run git outside a repository" in err and not os.path.exists(record)
-          and os.listdir(colon) == [],
-          "a ceiling holding ':' (git's list separator) is refused, git is not run, nothing is left")
-    mod.tempfile.tempdir = None
-    os.environ.clear()
-    os.environ.update(saved)
+    try:
+        git_units(mod, scratch)
+    finally:
+        mod.git_release()
+        mod.tempfile.tempdir = None
+        os.environ.clear()
+        os.environ.update(saved)
+
+    # --- a git read that fails is said, never taken for an unset value -----
+    real_git = mod.git
+    mod.git = lambda args: (128, "", "fatal: bad config line 3")
+    try:
+        host = mod.Host(scratch, os.path.join(scratch, "config.local"), "INSTALLER")
+        mod._captured = []
+        ok_format = mod.require_ssh_format(host)
+        said_format = mod._captured
+        mod._captured = []
+        reported = mod.check_signing_key(host)
+        said_check = mod._captured
+        included = host.includes_local()
+    finally:
+        mod._captured = None
+        mod.git = real_git
+    check(not ok_format and said_format[:1] == ["identity: cannot read gpg.format (fatal: bad config line 3) - writing nothing"],
+          "require_ssh_format names git's error, not an unset gpg.format")
+    check(reported and said_check == ["identity: cannot read gpg.format (fatal: bad config line 3) - user.signingkey not checked"],
+          "check_signing_key names git's error instead of staying silent")
+    check(included == (False, "fatal: bad config line 3"), "includes_local carries git's error, not a missing include")
 
     # --- keys: types, exact blob structure, agent noise ---------------------
     for kind in ("rsa", "ecdsa"):
@@ -191,6 +302,8 @@ def main(argv):
     check(mod.parse_ssh_time("00000101Z") is None, "year 0 is refused")
 
     agent_out = "\n".join(["The agent has 1 identities.", "garbage", ed + " real", "", "\x1c"]) + "\n"
+    bindir = os.path.join(scratch, "agent-bin")
+    os.mkdir(bindir)
     stub(bindir, "ssh-add", 'printf "%%s" "%s"\n' % agent_out.replace('"', '\\"'))
     os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
     host = mod.Host(scratch, os.path.join(scratch, "config.local"), "INSTALLER")
@@ -285,7 +398,10 @@ def main(argv):
     host = Shadowed(home, os.path.join(gitdir, "config.local"), "INSTALLER")
     host._agent = ({mod.parse_key(ed)}, None)
     mod._captured = []
-    rc = mod.identity(host, None)
+    try:
+        rc = mod.identity(host, None)
+    finally:
+        mod.git_release()
     said = mod._captured
     mod._captured = None
     check(rc == 1 and any("tag.gpgsign reads 'false'" in line for line in said),

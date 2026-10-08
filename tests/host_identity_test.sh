@@ -37,6 +37,11 @@ done
 real_ssh_add="$(command -v ssh-add)"
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/host_identity_test.XXXXXX")"
+# Every run of the step makes an empty directory for git under TMPDIR: pinned
+# here so a case that leaves one behind fails the suite (checked at the end)
+# instead of littering the caller's /tmp. Cases that test TMPDIR set their own.
+export TMPDIR="$work/tmp"
+mkdir "$TMPDIR"
 agent_pid="" decoy_pid=""
 cleanup() {
   if [ -n "$agent_pid" ]; then kill "$agent_pid" 2>/dev/null || :; fi
@@ -329,6 +334,54 @@ expect_rc 0 "a TMPDIR inside a repository"
 [ -z "$(ls -A "$HOME/repo/tmp")" ] || fail "the empty git directory was left in TMPDIR: $(ls -A "$HOME/repo/tmp")"
 ok
 
+# A TMPDIR that is a symlink into that repository: the ceiling is taken from
+# the working directory git itself sees, so the link changes nothing.
+rm -f "$local_cfg"
+ln -s "$HOME/repo/tmp" "$HOME/tmp-link"
+rc=0
+out="$(cd "$HOME/repo" && TMPDIR="$HOME/tmp-link" "$installer" identity 2>&1)" || rc=$?
+expect_rc 0 "a TMPDIR that is a symlink into a repository"
+[ "$(get user.email)" = "me@example.com" ] || fail "TMPDIR through a symlink: $(get user.email)"
+ok
+
+# An inherited GIT_CEILING_DIRECTORIES is replaced, never kept: neither one
+# that misses, nor one whose empty entry stops git resolving what follows.
+for inherited in /nonexistent ":$HOME/repo/tmp"; do
+  rm -f "$local_cfg"
+  rc=0
+  out="$(cd "$HOME/repo" && GIT_CEILING_DIRECTORIES="$inherited" TMPDIR="$HOME/repo/tmp" "$installer" identity 2>&1)" \
+    || rc=$?
+  expect_rc 0 "inherited GIT_CEILING_DIRECTORIES=$inherited"
+  [ "$(get user.email)" = "me@example.com" ] || fail "GIT_CEILING_DIRECTORIES=$inherited: $(get user.email)"
+done
+[ -z "$(ls -A "$HOME/repo/tmp")" ] || fail "an empty git directory was left in TMPDIR: $(ls -A "$HOME/repo/tmp")"
+ok
+
+# --- git that cannot be kept out of a repository: said, in every mode -------
+# A ':' in TMPDIR cannot be a GIT_CEILING_DIRECTORIES entry; a relative
+# GIT_CONFIG_GLOBAL would name a file in the empty directory git runs from.
+# Neither may read as an unset gpg.format or a missing include.
+fresh
+export FAKE_AGENT_KEYS="$K1"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+mkdir -p "$work/co:lon"
+for setting in "TMPDIR=$work/co:lon" "GIT_CONFIG_GLOBAL=.config/git/config"; do
+  rc=0; out="$(cd "$HOME" && env "$setting" "$installer" identity 2>&1)" || rc=$?
+  expect_rc 1 "$setting, identity"; has "identity: not reading the git config: " "$setting, identity"
+  lacks "gpg.format is unset" "$setting, identity"; unwritten "$setting, identity"
+  rc=0; out="$(cd "$HOME" && env "$setting" python3 -I -B "$module" --config-local "$local_cfg" \
+    --installer "$installer" --mode auto 2>&1)" || rc=$?
+  expect_rc 1 "$setting, auto"; has "identity: not reading the git config: " "$setting, auto"
+  [ "$(printf '%s\n' "$out" | wc -l)" -eq 1 ] || fail "$setting, auto: more than one line: $out"
+  unwritten "$setting, auto"
+  rc=0; out="$(cd "$HOME" && env "$setting" python3 -I -B "$module" --config-local "$local_cfg" \
+    --installer "$installer" --mode check 2>&1)" || rc=$?
+  expect_rc 0 "$setting, check"; has "identity: not reading the git config: " "$setting, check"
+done
+has "GIT_CONFIG_GLOBAL=.config/git/config is not an absolute path" "a relative GIT_CONFIG_GLOBAL is named"
+[ -z "$(ls -A "$work/co:lon")" ] || fail "a refused run left a directory in TMPDIR: $(ls -A "$work/co:lon")"
+ok
+
 # --- includeIf gitdir: in the global config is read, and never applies -------
 # git once died on these reads (rc 128, "Invalid path") when the step pointed
 # GIT_DIR at a path that cannot exist, so the step wrote nothing and blamed a
@@ -368,6 +421,29 @@ for cond in gitdir gitdir/i; do
   expect_rc 0 "includeIf $cond, check mode"; [ -z "$out" ] || fail "includeIf $cond, check mode spoke: $out"
   ok
 done
+
+# --- onbranch: never holds here; hasconfig: does, as it does for git --------
+# Outside a repository there is no branch, while hasconfig:remote.*.url:
+# matches the remotes of the global config itself. Neither makes git fail.
+fresh
+export FAKE_AGENT_KEYS="$K1"
+printf 'me@example.com %s\n' "$K1" > "$signers"
+printf 'evil@example.com %s\n' "$K1" > "$HOME/evil_signers"
+printf '[user]\n\temail = evil@example.com\n' > "$XDG_CONFIG_HOME/git/evil.inc"
+printf '[includeIf "onbranch:**"]\n\tpath = evil.inc\n' >> "$XDG_CONFIG_HOME/git/config"
+git init -q -b main "$HOME/r"
+[ "$(git -C "$HOME/r" config --get user.email)" = evil@example.com ] \
+  || fail "onbranch: the fixture's condition does not hold inside a repository, so this case proves nothing"
+rc=0; out="$(cd "$HOME/r" && "$installer" identity 2>&1)" || rc=$?
+expect_rc 0 "includeIf onbranch:"; [ "$(get user.email)" = "me@example.com" ] || fail "onbranch: $(get user.email)"
+rm -f "$local_cfg"
+printf '[gpg]\n\tformat = openpgp\n' > "$XDG_CONFIG_HOME/git/hc.inc"
+printf '[remote "origin"]\n\turl = https://example.com/r.git\n[includeIf "hasconfig:remote.*.url:https://example.com/**"]\n\tpath = hc.inc\n' \
+  >> "$XDG_CONFIG_HOME/git/config"
+rc=0; out="$(cd "$HOME" && "$installer" identity 2>&1)" || rc=$?
+expect_rc 1 "includeIf hasconfig:"; has "gpg.format is 'openpgp', not ssh" "includeIf hasconfig: applies"
+unwritten "includeIf hasconfig:"
+ok
 
 # --- D2: two principals, two keys, and the user.email filter -----------------
 fresh
@@ -1240,4 +1316,5 @@ got="$(git -C "$work/e2e_repo" log -1 --format='%G?|%GS|%GF|%ae|%an')"
   || fail "e2e: signature is [$got], want [G|e2e@example.com|$want_fp|e2e@example.com|E2E Tester]"
 ok
 
+[ -z "$(ls -A "$work/tmp")" ] || fail "runs left directories in TMPDIR: $(ls -A "$work/tmp")"
 echo "PASS: host_identity_test ($pass groups)"

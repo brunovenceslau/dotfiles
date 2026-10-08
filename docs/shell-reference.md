@@ -93,13 +93,25 @@ Every git config read here asks for the effective value outside any
 repository: all system and global levels, includes on, with git's
 repository-local environment variables (`GIT_DIR`, `GIT_CONFIG_PARAMETERS`,
 `GIT_CONFIG_COUNT` and the rest of `git rev-parse --local-env-vars`) removed.
-Git runs from a fresh, empty temporary directory, with
+Git runs from a fresh, empty directory under `$TMPDIR`, with
 `GIT_CEILING_DIRECTORIES` set to its parent, so it finds no repository: not the
 one you run the installer from, not a `$HOME` that is one, not one holding
-`$TMPDIR`. A repository's own config, or a `git -c` in the calling environment,
-never steers it. An `[includeIf "gitdir:..."]` or `[includeIf "onbranch:..."]`
-in your global config is read without error and never applies here, since no
-repository is open. A `GIT_CONFIG_GLOBAL` that names any file other than
+`$TMPDIR`. Before the first read, `git rev-parse --git-dir` must report that
+there is no repository there. A repository's own config, or a `git -c` in the
+calling environment, never steers it. An `[includeIf "gitdir:..."]` or
+`[includeIf "onbranch:..."]` in your global config is read without error and
+never applies here, since no repository is open. An
+`[includeIf "hasconfig:remote.*.url:..."]` does apply when a remote URL in the
+global or system config matches, as it does for plain git outside a repository.
+
+The step reads no git config at all, and says so in one line naming the cause
+(`identity: not reading the git config: ...`), when it cannot run git outside
+every repository and with your own config files: a relative `GIT_CONFIG_GLOBAL`
+or `GIT_CONFIG_SYSTEM`, a `$TMPDIR` whose path holds a `:` or that every user
+can write to without the sticky bit, or a repository that git still finds. The
+writing modes then write nothing, and `install` still completes.
+
+A `GIT_CONFIG_GLOBAL` that names any file other than
 `$XDG_CONFIG_HOME/git/config` hides `config.local`, which that file includes,
 so the step writes nothing under it. Relative paths in `user.signingkey`,
 `gpg.ssh.allowedSignersFile` and `gpg.ssh.revocationFile` resolve against
