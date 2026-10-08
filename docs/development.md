@@ -23,6 +23,7 @@ maintainer decision, and last the step-by-step recipes for common changes.
   - [`STRICT=1`](#strict1)
   - [What `make smoke` does](#what-make-smoke-does)
   - [What `make forkgate` does](#what-make-forkgate-does)
+  - [What `make linkcheck` checks](#what-make-linkcheck-checks)
 - [CI](#ci)
   - [Repository settings](#repository-settings)
   - [When a runner image is retired](#when-a-runner-image-is-retired)
@@ -82,8 +83,8 @@ did not run. See "`STRICT=1`" below for the full rule.
 
 ## The gates
 
-Every gate is a `make` target. CI only ever calls `make`, so local and CI stay in
-parity by construction. Run `make local-ci` before every push.
+Every gate is a `make` target. CI only ever calls `make`, so local and CI stay
+in parity by construction. Run `make local-ci` before every push.
 
 | Target | What it runs | What it proves |
 | --- | --- | --- |
@@ -97,7 +98,8 @@ parity by construction. Run `make local-ci` before every push.
 | `make gitleaks` | `gitleaks dir .` | The same question asked again, with [gitleaks](https://gitleaks.io/)' maintained rule set, over the working directory as it is on disk. |
 | `make forkgate` | `bin/startup-fork-gate` | `zsh -i -c exit` invokes no external binary. |
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
-| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate | Everything CI runs. |
+| `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference link and definition, HTML `href` and `src`, and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
+| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck | Everything CI runs. |
 | `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
 `reuse lint` walks what git tracks and does not descend into the pinned plugin
@@ -212,6 +214,21 @@ paths, which ones. The rules:
   (its patterns are assembled from pieces, its prose says "a curl piped into
   sh"), so a line added to it that either rule would flag in another file,
   comment or code, fails there too.
+- No Markdown prose line over 80 columns, counted in characters, in any
+  `*.md` file on the em-dash rule's surface (so `CODE_OF_CONDUCT.md`, verbatim
+  upstream text, is out). Exempt: YAML front matter, fenced code blocks at any
+  indent, table rows, headings, link reference definitions, HTML comments,
+  lines that open with an HTML tag, and a line holding a single unbreakable
+  token once its indent, quote and list markers are set aside. A token runs
+  from one space to the next, except that a code span and a whole link or
+  image never break, so a long URL, command or link alone on its line passes,
+  and the same token sharing its line with other words fails. Every hit is
+  therefore fixable by rewrapping the paragraph without changing a word. No
+  Markdown file is generated today; a generated one would leave the rule by
+  its exact path. A Setext heading's text line, a line inside a multi-line
+  HTML block, an indented code block and front matter that never closes are
+  read as prose and held to the limit. A TAB is one column, a CR before the LF
+  is none, and an awk that miscounts UTF-8 characters fails the gate closed.
 - No symlink where a recursive scan reads (`find`, always, over the em-dash
   rule's surface; a recursive scan never follows one it meets while walking a
   directory), plus, when the root has its own `.git`, no tracked symlink and no
@@ -305,12 +322,13 @@ moment before it becomes history. The pinned plugin submodules are in that scope
 as well.
 
 Both honour one waiver, the literal `secret-scan:allow` on the offending line -
-`bin/secret-scan` natively, `gitleaks` through the allowlist in `.gitleaks.toml`.
-Reach for it last. Neither scanner speaks for GitHub's own push protection,
-which reads the same bytes on the server and honours no marker of ours, and a
-literal that gets that far costs a history rewrite to remove. A test fixture
-that needs a real secret shape builds it from fragments at run time instead; see
-`tests/secret_scan_test.sh`. No tracked file needs the waiver today.
+`bin/secret-scan` natively, `gitleaks` through the allowlist in
+`.gitleaks.toml`. Reach for it last. Neither scanner speaks for GitHub's own
+push protection, which reads the same bytes on the server and honours no marker
+of ours, and a literal that gets that far costs a history rewrite to remove. A
+test fixture that needs a real secret shape builds it from fragments at run time
+instead; see `tests/secret_scan_test.sh`. No tracked file needs the waiver
+today.
 
 ### `STRICT=1`
 
@@ -326,8 +344,8 @@ make local-ci STRICT=1
 
 A local green can be vacuous. Platform and privilege skips (a case only a given
 OS, architecture or root can stage) exit 0 even under `STRICT=1`; a missing
-tool fails it. A pass proves what ran, not what was covered. When a particular suite
-matters to your change, check that it did not skip.
+tool fails it. A pass proves what ran, not what was covered. When a particular
+suite matters to your change, check that it did not skip.
 
 Where `make` is unavailable, run the same commands it drives:
 
@@ -373,12 +391,13 @@ gitleaks dir . --no-banner --redact
 bin/secret-scan --git .
 bin/smoke
 bin/startup-fork-gate
+python3 -I tests/linkcheck.py .
 ```
 
 ### What `make smoke` does
 
-The whole run happens under `.smoke/` inside the repository, which is gitignored.
-Nothing is written outside `~/.config/dotfiles`.
+The whole run happens under `.smoke/` inside the repository, which is
+gitignored. Nothing is written outside `~/.config/dotfiles`.
 
 When the repository root is the top level of a git checkout, which is the
 default, the installer runs against a disposable copy of the working tree under
@@ -411,11 +430,52 @@ files among them, so delete `.smoke/run` once you are done debugging.
 Every binary reachable on `PATH` is replaced by a logging shim placed first on
 `PATH`. A hermetic `zsh -i -c exit` runs against this repository's zshenv and
 zshrc, and the log must be empty. The gate proves its own instrumentation first:
-a canary invocation must reach the log, and the measured shell must have actually
-loaded the repository zshrc.
+a canary invocation must reach the log, and the measured shell must have
+actually loaded the repository zshrc.
 
 Out of scope, explicitly: the `precmd` window. `precmd` never fires under
 `zsh -i -c exit`, so first-prompt activity is not measured.
+
+### What `make linkcheck` checks
+
+`tests/linkcheck.py` reads what git tracks, never a directory walk: every
+`*.md` file, plus the issue-form YAML under `.github/ISSUE_TEMPLATE/`. A
+tracked symlink is skipped, never followed. The script lives under `tests/`
+rather than `bin/` because the installer links every `bin/` tool onto the
+user's `PATH` except a fixed list of gates, and growing that list is a
+link-convention change.
+
+- The target of an inline link, an image, a reference definition, and the
+  `href` or `src` of an HTML `<a>` or `<img>` tag must name a tracked file, or
+  a directory holding one, inside the repository. A file that exists only on
+  your machine (a gitignored `.local` file) fails, because GitHub renders the
+  tracked tree, and so does a path that differs from the tracked one only in
+  case. A root-absolute path (`/docs/x.md`) fails too. A `?query` is dropped
+  before resolving.
+- A full or collapsed reference link (`[text][ref]`, `[text][]`) must have a
+  definition in the same file. A shortcut `[ref]` is not checked, since it
+  cannot be told apart from bracketed prose.
+- An `#anchor` into a Markdown file must match a heading under GitHub's slug
+  rule: the rendered text, lowercased, with punctuation dropped and each space
+  turned into `-`. Text inside a code span is kept as written, so
+  `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
+  `-1`, `-2` in order, the way github-slugger numbers it. An explicit
+  `<a id="...">` counts too. An anchor into any other file, such as a `#L10`
+  line anchor, is not checked.
+- A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
+  against the local tree the same way.
+- Front matter, fenced code blocks and HTML comments (both running to the end
+  of the file when never closed, as GitHub renders them), indented code blocks
+  and inline code spans are not prose, so a link inside one is ignored. Front
+  matter that never closes is prose, since GitHub renders its `---` as a rule.
+  An HTML `href` or `src` may be double- or single-quoted. A link whose
+  text wraps across lines is still found. Every other URL scheme is out of
+  scope, since the gate never touches the network.
+
+It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
+bytes escaped, and 2 when it cannot run: the root is not a checkout's
+toplevel, git fails or warns, or a file is unreadable or not UTF-8.
+`tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ## CI
 
@@ -430,8 +490,8 @@ Both legs are real hardware of their own architecture. There is no emulation,
 because what these legs exercise is exactly the part that emulation would hide:
 Homebrew prefix detection, `on_arm` and `on_intel` Brewfile blocks, bash 3.2 and
 the BSD toolchain. Intel has no rolling image alias, so that leg names
-`macos-15-intel` explicitly. If the image is retired, the leg fails loudly rather
-than dropping the coverage.
+`macos-15-intel` explicitly. If the image is retired, the leg fails loudly
+rather than dropping the coverage.
 
 The workflow checks out submodules recursively, so smoke exercises the real
 plugin path. It does not persist credentials on the runner.
@@ -524,16 +584,16 @@ coverage is a decision someone takes, never something that happens quietly.
 
 These are not style preferences. Breaking one of them breaks a host.
 
-**Bash 3.2 compatibility** for `install.sh` and `lib/`. No associative arrays, no
-`mapfile`, no `${var,,}`. macOS ships bash 3.2 as `/bin/bash`, and the smoke test
-invokes the installer through it. Files under `bin/` may use a modern bash,
+**Bash 3.2 compatibility** for `install.sh` and `lib/`. No associative arrays,
+no `mapfile`, no `${var,,}`. macOS ships bash 3.2 as `/bin/bash`, and the smoke
+test invokes the installer through it. Files under `bin/` may use a modern bash,
 because they run only on provisioned hosts and CI. `zsh/` targets zsh only.
 `make check-patterns` flags all three constructs, on any host, and is their only
 gate. The `/bin/bash -n` pass in `make lint` is not a backstop for them:
-`declare -A` and `mapfile` are ordinary command invocations, and `${var,,}` fails
-when it is expanded, so no bash reports a parse error for any of the three. That
-pass covers the syntax bash 3.2 genuinely cannot parse, and only on the macOS
-legs where `/bin/bash` is the real 3.2.
+`declare -A` and `mapfile` are ordinary command invocations, and `${var,,}`
+fails when it is expanded, so no bash reports a parse error for any of the
+three. That pass covers the syntax bash 3.2 genuinely cannot parse, and only on
+the macOS legs where `/bin/bash` is the real 3.2.
 
 **POSIX regex in every `sed`, `grep` and `awk` call.** macOS runs BSD `sed` and
 `grep`. GNU's `\s`, `\w`, `\b`, `\<`, `\>` and the BRE operators `\|`, `\+`,
@@ -585,7 +645,8 @@ absolute pinentry path.
 Back up any user file to `*.bak` before overwriting it.
 
 **Never commit secrets.** `config/rclone` and `config/restic` are gitignored
-except for their README and `*.example` files. `make secret-scan` is the backstop.
+except for their README and `*.example` files. `make secret-scan` is the
+backstop.
 
 **`make lint` must be green before every commit, and commits are signed.**
 
@@ -617,17 +678,17 @@ naming the config directory it belongs to.
 If the program refuses XDG paths, use `home/<file>`, which links to `~/.<file>`.
 That directory does not exist yet, and the walker skips it when absent.
 
-If the program writes to its own config file, or keeps secrets there, it needs an
-entry in the exceptions table in `lib/link.sh`. That is a link-convention change,
-so ask first.
+If the program writes to its own config file, or keeps secrets there, it needs
+an entry in the exceptions table in `lib/link.sh`. That is a link-convention
+change, so ask first.
 
 ### Add a `.local` layer to a surface
 
 Follow the existing shape: load the tracked file first, then the untracked
-companion, guarded on readability and silent when absent. Use an `if` rather than
-a bare `[[ ... ]] &&` when the load is the last statement in a file, so the file's
-exit status stays 0. Add a `.local.example` template, and list the pair in the
-[shell reference](shell-reference.md#local-files).
+companion, guarded on readability and silent when absent. Use an `if` rather
+than a bare `[[ ... ]] &&` when the load is the last statement in a file, so the
+file's exit status stays 0. Add a `.local.example` template, and list the pair
+in the [shell reference](shell-reference.md#local-files).
 
 ### Bump a plugin pin
 
@@ -639,16 +700,17 @@ exit status stays 0. Add a `.local.example` template, and list the pair in the
    [architecture](architecture.md#plugins-and-the-supply-chain) in the same
    commit. If the table disagrees with `git submodule status`, it is stale and
    must not be trusted.
-4. Run `make local-ci STRICT=1`. `bin/check-patterns` verifies the shim premises,
-   and `tests/fsyh_fetch_test.sh` covers the download branch.
+4. Run `make local-ci STRICT=1`. `bin/check-patterns` verifies the shim
+   premises, and `tests/fsyh_fetch_test.sh` covers the download branch.
 
 ### Add a gh extension
 
-Add one `owner/repo <pin>` line to `packages/gh-extensions.txt`, where the pin is
-a reviewed `vX.Y.Z` release tag. A bare commit SHA is accepted by the validator
-but does not resolve for a binary extension, so a tag is the usual form. Every
-line is validated before it reaches `gh extension install`: the `owner/repo` may
-not start with a dash, dot or slash, and an unpinned line is dropped.
+Add one `owner/repo <pin>` line to `packages/gh-extensions.txt`, where the pin
+is a reviewed `vX.Y.Z` release tag. A bare commit SHA is accepted by the
+validator but does not resolve for a binary extension, so a tag is the usual
+form. Every line is validated before it reaches `gh extension install`: the
+`owner/repo` may not start with a dash, dot or slash, and an unpinned line is
+dropped.
 
 Pinning to a release tag stops a floating `latest`. It is not the
 content-addressed immutability of a submodule, because `gh` downloads a mutable

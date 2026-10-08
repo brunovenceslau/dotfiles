@@ -55,7 +55,8 @@ Three details matter here:
   the credential helper, and a later `pull` will prompt for
   `Username for github.com`.
 - `mkdir -p ~/.config/git` is required. git does not create the parent directory
-  of a config file, and fails with `could not lock config file` if it is missing.
+  of a config file, and fails with `could not lock config file` if it is
+  missing.
 - The `GIT_CONFIG_GLOBAL` prefix puts the helper in the untracked
   `~/.config/git/config.local`, which the `~/.config/git/config` the installer
   writes in step 3 includes. Without the prefix, `gh auth setup-git` writes the
@@ -165,8 +166,8 @@ the `gh auth refresh` line `gh ssh-key add --type signing` fails and asks for
 it. The refresh opens the same browser flow as the login.
 
 Nothing in the framework verifies signatures. `dotfiles-upgrade` is a fetch plus
-a fast-forward merge. Signing exists for GitHub's Verified badge and for your own
-`git log --show-signature`. To make local verification work, add an
+a fast-forward merge. Signing exists for GitHub's Verified badge and for your
+own `git log --show-signature`. To make local verification work, add an
 `allowedSignersFile` entry as shown in `config/git/config.local.example`. Once
 that file lists this host's key, `./install.sh identity` can set the rest.
 
@@ -246,7 +247,8 @@ If any check fails, see [troubleshooting](troubleshooting.md).
 
 ## What to do next
 
-- Put host-specific settings in the [`.local` layer](shell-reference.md#local-files).
+- Put host-specific settings in the
+  [`.local` layer](shell-reference.md#local-files).
 - Set up backups with [backup and restore](backup-restore.md).
-- Read the [shell reference](shell-reference.md) for the commands and aliases you
-  now have.
+- Read the [shell reference](shell-reference.md) for the commands and aliases
+  you now have.

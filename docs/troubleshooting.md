@@ -6,11 +6,12 @@ SPDX-License-Identifier: GPL-3.0-or-later
 
 # Troubleshooting
 
-Symptoms, causes and fixes, keyed to the exact message each tool prints. Messages
-from `install.sh` and its wrappers are prefixed with `install:`. Warnings and
-errors go to stderr; progress lines such as `upgrade: already up to date` go to
-stdout. `tests/troubleshooting_messages_test.sh` fails when a message quoted on
-this page no longer exists in the code.
+Symptoms, causes and fixes, keyed to the exact message each tool prints.
+Messages from `install.sh` and its wrappers are prefixed with `install:`.
+Warnings and errors go to stderr; progress lines such as
+`upgrade: already up to date` go to stdout.
+`tests/troubleshooting_messages_test.sh` fails when a message quoted on this
+page no longer exists in the code.
 
 | Symptom | Section |
 | --- | --- |
@@ -203,11 +204,11 @@ binary for its completions on every TAB (measured on sbx v0.45.1: the
 generated script references `__complete` exactly once), so new subcommands
 appear without a refresh.
 
-**Two related, non-error messages.** If `install.sh link` (or `dotfiles-upgrade`)
-prints this, `canga`/`sbx` ran but its output was not a real completion script
-(cobra's zsh template emits `#compdef <tool>` first, measured on sbx v0.45.1
-and canga v0.10.5) - the same regenerate-then-reload fix above applies once
-the binary itself prints one correctly:
+**Two related, non-error messages.** If `install.sh link` (or
+`dotfiles-upgrade`) prints this, `canga`/`sbx` ran but its output was not a real
+completion script (cobra's zsh template emits `#compdef <tool>` first, measured
+on sbx v0.45.1 and canga v0.10.5) - the same regenerate-then-reload fix above
+applies once the binary itself prints one correctly:
 
 ```
 install: <tool> <args> did not produce a completion script (want first line '<want>') - its shell integration is skipped
@@ -228,9 +229,9 @@ GitHub shows no Verified badge, or the installer warns
 `commit.gpgsign = true`, and commits then go out unsigned. Nothing in the
 framework refuses an unsigned commit.
 
-**Diagnose.** Do not trust `git log --format=%G?`: it reports `N` even for a good
-SSH signature unless git can see an allowed-signers file. Check the raw commit
-instead:
+**Diagnose.** Do not trust `git log --format=%G?`: it reports `N` even for a
+good SSH signature unless git can see an allowed-signers file. Check the raw
+commit instead:
 
 ```sh
 git cat-file commit HEAD | grep -c gpgsig     # 0 means unsigned
@@ -250,8 +251,8 @@ git cat-file commit HEAD | grep -c gpgsig     # want: 1
 
 **Also check for a shadowing `~/.gitconfig`.** The installer warns when one
 carries signing settings. A legacy GPG `signingkey` against the framework's
-`gpg.format = ssh` makes commits fail outright while `commit.gpgsign` still reads
-true. Remove the file, as in
+`gpg.format = ssh` makes commits fail outright while `commit.gpgsign` still
+reads true. Remove the file, as in
 [new mac host, step 6](new-mac-host.md#6-remove-a-legacy-gitconfig). To stay on
 GPG for now, set `gpg.format = openpgp` in `config.local`.
 
@@ -455,8 +456,8 @@ pinentry program.
 **Cause.** `gpg-agent.conf` has no include directive and no variable expansion,
 so `pinentry-program` must be an absolute path and cannot be derived from the
 Homebrew prefix the way the shell derives it. The tracked file carries the Apple
-Silicon prefix. On Intel, Homebrew installs under `/usr/local`, so that path does
-not exist:
+Silicon prefix. On Intel, Homebrew installs under `/usr/local`, so that path
+does not exist:
 
 ```sh
 grep pinentry-program ~/.gnupg/gpg-agent.conf   # /opt/homebrew/bin/pinentry-mac
@@ -471,14 +472,15 @@ $EDITOR ~/.config/dotfiles/config/gnupg/gpg-agent.conf
 gpgconf --kill gpg-agent
 ```
 
-That leaves a tracked file modified, and `dotfiles-upgrade` refuses to merge over
-local modifications, see [Upgrade refuses a dirty tree](#upgrade-refuses-a-dirty-tree).
+That leaves a tracked file modified, and `dotfiles-upgrade` refuses to merge
+over local modifications, see
+[Upgrade refuses a dirty tree](#upgrade-refuses-a-dirty-tree).
 
 Replacing the link with a real file instead keeps the tree clean, but is not
 durable: the next `./install.sh link` backs the file up to
 `~/.gnupg/gpg-agent.conf.bak` and restores the link. Writing the real file a
-second time then makes that link fail, because the engine refuses to overwrite an
-existing backup, see [Install refuses a link](#install-refuses-a-link).
+second time then makes that link fail, because the engine refuses to overwrite
+an existing backup, see [Install refuses a link](#install-refuses-a-link).
 
 ## Git prompts for a username
 
@@ -562,8 +564,8 @@ dotfiles-upgrade
 install: upgrade: another upgrade appears to be in progress
 ```
 
-**Cause.** The upgrade takes a single-flight lock by creating a directory. A trap
-releases it on exit and on Ctrl-C, but a hard kill can orphan it.
+**Cause.** The upgrade takes a single-flight lock by creating a directory. A
+trap releases it on exit and on Ctrl-C, but a hard kill can orphan it.
 
 **Fix.** If no upgrade is running, remove the lock directory. The message prints
 its exact path:
@@ -604,8 +606,8 @@ install: upgrade: fast-forward merge refused (diverged or rewound history)
 ```
 
 **Cause.** This is the anti-rollback guard working. Your local history is not an
-ancestor of the fetched tip, either because you have local commits or because the
-remote history was rewritten. The upgrade will not reset to it.
+ancestor of the fetched tip, either because you have local commits or because
+the remote history was rewritten. The upgrade will not reset to it.
 
 **Fix.** Inspect what diverged, then resolve it by hand:
 
@@ -632,8 +634,8 @@ survives an upgrade, clear the stale file:
 rm -f ~/.local/state/dotfiles/update-available
 ```
 
-**"No successful update check in over N days"** means no background fetch has succeeded
-within the staleness window, usually because the host is offline or
+**"No successful update check in over N days"** means no background fetch has
+succeeded within the staleness window, usually because the host is offline or
 authentication is broken. Run `dotfiles-upgrade` by hand to see the real error.
 
 Tune or disable the sentinel from `~/.config/zsh/.zshrc.local`, which is read
@@ -809,9 +811,9 @@ infocmp -x xterm-ghostty | ssh REMOTE_HOST -- tic -x -
 ```
 
 Ghostty's `ssh-terminfo` feature does this automatically. The zshrc arms it by
-appending `ssh-env,ssh-terminfo` to `$GHOSTTY_SHELL_FEATURES`, which is necessary
-because the tracked Ghostty config sets `shell-integration = none` and Ghostty
-then ignores its own `shell-integration-features` line.
+appending `ssh-env,ssh-terminfo` to `$GHOSTTY_SHELL_FEATURES`, which is
+necessary because the tracked Ghostty config sets `shell-integration = none` and
+Ghostty then ignores its own `shell-integration-features` line.
 
 ## check-patterns rejects a file under zsh/plugins
 

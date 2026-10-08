@@ -121,11 +121,11 @@ Omit the two AWS values for a local or sftp repository. A repository reached
 through rclone uses `rclone:<remote>:<bucket>/<path>` as its location, and a
 local path may be given literally.
 
-Naming convention: `<repository-id>_<remote-id>.env`, so one repository backed up
-to two places reads as two files that differ only in the remote half.
+Naming convention: `<repository-id>_<remote-id>.env`, so one repository backed
+up to two places reads as two files that differ only in the remote half.
 
-Never put a real secret in a file named `*.example`. That suffix stays tracked by
-design.
+Never put a real secret in a file named `*.example`. That suffix stays tracked
+by design.
 
 ## 4. Run restic through a wrapper
 
@@ -138,8 +138,8 @@ restic-pass-cli photos_b2    snapshots    # photos_b2.env holds pass:// referenc
 restic-op       photos_b2_op snapshots    # photos_b2_op.env holds op:// references
 ```
 
-The wrappers are defined only when `restic` is on `PATH`, and each checks for its
-own runner before doing anything. A missing repository name exits 2, and an
+The wrappers are defined only when `restic` is on `PATH`, and each checks for
+its own runner before doing anything. A missing repository name exits 2, and an
 unknown name or a missing runner exits 1. Otherwise the exit status is the
 runner's. See [shell reference](shell-reference.md#restic-wrappers).
 
@@ -157,13 +157,14 @@ restic-pass-cli photos_b2 backup "$HOME" \
 ```
 
 `~/.config/dotfiles` is excluded because it is a git clone: re-clone it instead
-of restoring it. `--exclude-caches` skips directories tagged with `CACHEDIR.TAG`.
+of restoring it. `--exclude-caches` skips directories tagged with
+`CACHEDIR.TAG`.
 
 Once the exclude set grows, keep it in a file and pass
 `--exclude-file ~/.config/restic/excludes`.
 
-Each run prints the new snapshot's short ID. Repeated runs are fast, because only
-changed data is stored.
+Each run prints the new snapshot's short ID. Repeated runs are fast, because
+only changed data is stored.
 
 ## 6. Verify
 

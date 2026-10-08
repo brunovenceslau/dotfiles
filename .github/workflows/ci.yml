@@ -5,13 +5,13 @@
 # CI - the verification gate.
 #
 # Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint +
-# test-env-scrub + test + reuse + gitleaks + secret-scan + smoke + forkgate) -
-# on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS arm64 +
-# Intel. macOS is the only platform the framework installs on, so there is no
-# leg for any other OS. There is deliberately NO QEMU/container emulation: each
-# leg is real hardware of its own architecture, which is what the Brewfile
-# on_arm/on_intel blocks, the Homebrew-prefix detection and the bash 3.2 +
-# BSD-tools assumptions actually exercise.
+# test-env-scrub + test + reuse + gitleaks + secret-scan + smoke + forkgate +
+# linkcheck) - on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS
+# arm64 + Intel. macOS is the only platform the framework installs on, so
+# there is no leg for any other OS. There is deliberately NO QEMU/container
+# emulation: each leg is real hardware of its own architecture, which is what
+# the Brewfile on_arm/on_intel blocks, the Homebrew-prefix detection and the
+# bash 3.2 + BSD-tools assumptions actually exercise.
 #
 # Runner images: `macos-latest` is Apple Silicon. Intel has no rolling alias, so
 # that leg names `macos-15-intel` - GitHub's Intel image - explicitly; if it is
@@ -115,7 +115,8 @@ jobs:
 
       # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
       # can never report green on a gate it did not actually run. local-ci =
-      # lint + test + reuse + gitleaks + secret-scan + smoke + forkgate;
+      # lint + test + reuse + gitleaks + secret-scan + smoke + forkgate +
+      # linkcheck;
       # `make test` runs this workflow's contract test.
       - name: make local-ci
         run: make local-ci STRICT=1
