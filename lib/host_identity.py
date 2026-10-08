@@ -594,7 +594,12 @@ _SHELL_ACTIVE = '"\\$`!'
 # like a different name than the one written.
 _INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
               (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
-              (0xE0100, 0xE01EF))
+              (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+# Unassigned (Cn) and private-use (Co) code points have no agreed glyph, so
+# a suggestion holding one may render as another name. Only the suggestion
+# refuses them: valid_name(), which decides what is written, does not, and
+# an older Python's Unicode table only makes the placeholder more likely.
+_UNSHOWN_CATEGORIES = frozenset(["Cn", "Co"])
 
 
 def _invisible(c):
@@ -606,14 +611,15 @@ def suggested_name(name):
     """The value the missing-name line puts after --name: NAME when
     install.sh identity would accept it, a shell passes it through double
     quotes unchanged, and it reads on screen as what it is (a letter or a
-    digit, no space but U+0020, no invisible code point), else the
-    placeholder. Through _shown() as well, so a control character could
+    digit, no space but U+0020, no invisible, unassigned or private-use
+    code point), else the placeholder. Through _shown() as well, so a control character could
     never reach the terminal even if valid_name() were loosened."""
     if (name and valid_name(name)
             and not any(c in _SHELL_ACTIVE for c in name)
             and any(c.isalnum() for c in name)
             and not any(c.isspace() and c != " " for c in name)
-            and not any(_invisible(c) for c in name)):
+            and not any(_invisible(c) for c in name)
+            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)):
         return _shown(name)
     return "Full Name"
 
@@ -2427,7 +2433,8 @@ def run(host, mode, name, report_stale, verbose=False):
         # write nothing, and an unreachable agent would bury the name line
         # under an agent line. The next run, once the name is set, reports
         # the stale key. A user.name git cannot read is not "not set": it
-        # falls through to identity(), like any other failed read.
+        # falls through to identity(), like any other failed read (git fails
+        # a read for the whole config, so the email's read names the error).
         warn(missing_name_line(host))
         return 0, None
     if not global_reads_local(host):
