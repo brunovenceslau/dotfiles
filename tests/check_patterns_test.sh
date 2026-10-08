@@ -3403,6 +3403,60 @@ bounded_run 20 "$work/mdw-nested-brackets.out" env STRICT= "$cp" "$r" \
   || fail "arm 15: 30000 nested bracket pairs outlived 20 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 1 ] && ok || fail "arm 15: the nested-bracket line must still fail as too long, got $br_rc"
 
+# backtick runs of every length 1..2000 (a 2 MB line), none closed. Two
+# quadratic costs met here: every opener scanned the rest of the line for a
+# run of its own length (mawk: 8 s at 700 runs, over 120 s at 1400), and on
+# the onetrue awk (macOS) every substr() call runs strlen() over the whole
+# line, so even a linear walk by substr was quadratic (a build of the macOS
+# awk source: 8.5 s at 1400 runs here, past 20 s on the macOS CI runners).
+# Each run's partner is now listed once per line and the walk reads a
+# character array split once: about 1 s at 2000 runs on that build, 0.1 s on
+# mawk.
+r="$work/mdw-backtick-runs"; seed "$r"; mkdir -p "$r/docs"
+python3 -I -c 'import sys; sys.stdout.write("a " + "".join("`" * k + " x " for k in range(1, 2000)) + "\n")' \
+  > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-backtick-runs.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 backtick runs: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: a line of 2000 distinct backtick runs outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 1 ] && ok || fail "arm 15: the backtick-run line must still fail as too long, got $br_rc"
+
+# How a line's links and code spans are paired. Each case is one line over
+# the limit that is exempt only when it is ONE whole link or code span, so a
+# pairing mistake flips its verdict. md40 is 40 columns of words.
+md40="$(_md_words 40)"
+i=0
+while IFS='|' read -r want shape; do
+  i=$((i + 1)); r="$work/mdw-pair-$i"; seed "$r"; mkdir -p "$r/docs"
+  f="$r/docs/x.md"
+  case "$shape" in
+    image) printf '![%s](%s)\n' "$md81" "$_md_long_token" > "$f" ;;
+    code-bracket) printf '[%s `]` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    escaped-bracket) printf '\\[%s](%s)\n' "$md81" "$_md_long_token" > "$f" ;;
+    unclosed-paren) printf '[%s](%s\n' "$md81" "$_md_long_token" > "$f" ;;
+    # the same bracket and paren positions on two lines: the first line's
+    # pairs must not survive into the second, where they no longer close.
+    stale-paren) printf '[%s](%s)\n[%s](%s more\n' "$md81" "$_md_long_token" "$md81" "$_md_long_token" > "$f" ;;
+    stale-bracket) printf '[%s](%s)\n[%sx(%s)\n' "$md81" "$_md_long_token" "$md81" "$_md_long_token" > "$f" ;;
+    stale-backtick) printf -- '- `%s`\n- `%sx\n' "$md81" "$md81" > "$f" ;;
+    *) fail "arm 15: unknown pairing shape $shape" ;;
+  esac
+  if [ "$want" = pass ]; then
+    [ "$(run "$r")" = "0" ] && ok || fail "arm 15 pairing must exempt: $shape"
+  else
+    fails_with_rc 1 "$r" "$md_msg" "arm 15 pairing must fail: $shape" only
+    case "$shape" in stale-*) fails_with "$r" "/docs/x.md:2:" "arm 15 pairing: $shape reports line 2" ;; esac
+  fi
+done <<'SHAPES'
+pass|image
+pass|code-bracket
+fail|escaped-bracket
+fail|unclosed-paren
+fail|stale-paren
+fail|stale-bracket
+fail|stale-backtick
+SHAPES
+
 # front matter that never closes is not front matter: GitHub renders the
 # `---` as a rule and the rest as prose, so its lines are held to the limit
 # at their own line numbers.
@@ -3414,19 +3468,50 @@ r="$work/mdw-fm-unclosed-ok"; seed "$r"; mkdir -p "$r/docs"
 printf -- '---\nshort\n' > "$r/docs/x.md"
 [ "$(run "$r")" = "0" ] && ok || fail "arm 15: a short unclosed front matter must pass"
 
-# the character-count path. The awk here counts bytes, so an awk shim
-# rewrites the program to take the path a UTF-8-aware awk takes (length()
-# as is). Under that shim the probe self-test must fail the gate closed; with
-# the self-test also removed, a 71-character line of 60 two-byte characters
-# (131 bytes) fails, which proves the probe really selects the path.
+# Every per-file state resets on the next file's first line, in one awk run.
+# docs/ is scanned before README.md (see the unclosed-fence case above).
+#   - an unclosed front matter in docs/a.md is flushed as docs/a.md's own
+#     prose when README.md starts, and README.md is read as itself;
+#   - an unclosed HTML comment in docs/a.md hides nothing in README.md;
+#   - held front-matter lines never carry over: README.md's own unclosed
+#     front matter reports nothing of docs/a.md's.
+r="$work/mdw-reset-fm"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n%s\n' "$md81" > "$r/docs/a.md"
+printf '%s\n' "$md81" > "$r/README.md"
+fails_with "$r" "/docs/a.md:3:" "arm 15: an unclosed front matter is flushed as its own file when the next starts"
+fails_with "$r" "/README.md:1:" "arm 15: the file after an unclosed front matter is read as itself"
+r="$work/mdw-reset-cmt"; seed "$r"; mkdir -p "$r/docs"
+printf '<!-- open\n' > "$r/docs/a.md"
+printf '%s\n' "$md81" > "$r/README.md"
+fails_with "$r" "/README.md:1:" "arm 15: an unclosed HTML comment must not hide the next file"
+r="$work/mdw-reset-held"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\n%s\n' "$md81" > "$r/docs/a.md"
+printf -- '---\nshort\n' > "$r/README.md"
+rc=0; out="$(STRICT= "$cp" "$r" 2>&1)" || rc=$?
+case "$rc:$out" in
+  *README.md:*) fail "arm 15: held front-matter lines leaked into the next file: $out" ;;
+  1:*"/docs/a.md:2:"*) ok ;;
+  *) fail "arm 15: expected exactly docs/a.md:2 from the held lines (exit $rc): $out" ;;
+esac
+
+# the OTHER counting path. An awk shim rewrites the probe to pick the path
+# the native awk does not take (u8 inverted). Under that shim the probe
+# self-test must fail the gate closed; with the self-test also removed, a
+# fixture that the wrong path miscounts flips its verdict, which proves the
+# probe really selects the path. On a byte-counting awk (gawk, mawk, macOS's
+# onetrue awk under LC_ALL=C) a 71-character line of 60 two-byte characters
+# (131 bytes) passes natively and fails on the character path. On a
+# character-counting awk (the second-edition onetrue awk), an 85-character
+# line holding 10 micro signs fails natively and passes on the byte path,
+# which deletes U+0080-U+00BF as if they were continuation bytes.
 real_awk="$(command -v awk)"
-awk_shim="$work/awk-shim"; mkdir -p "$awk_shim"
+awk_shim="$work/awk-shim-width"; mkdir -p "$awk_shim"
 cat > "$awk_shim/awk" <<'SHIM'
 #!/usr/bin/env python3
 import os, sys
 args, hits = [], 0
 for a in sys.argv[1:]:
-    b = a.replace('u8 = (length("\\303\\251") == 1)', "u8 = 1")
+    b = a.replace('u8 = (length("\\303\\251") == 1)', 'u8 = !(length("\\303\\251") == 1)')
     if os.environ.get("CPT_NO_SELFTEST"):
         b = b.replace('if (cols("\\303\\251\\302\\265\\302\\260") != 3)', "if (0)")
     hits += b != a
@@ -3437,9 +3522,19 @@ if not hits:
 os.execv(os.environ["CPT_REAL_AWK"], [os.environ["CPT_REAL_AWK"]] + args)
 SHIM
 chmod u+x "$awk_shim/awk"
+native_len="$(LC_ALL=C "$real_awk" 'BEGIN { print length("\303\251") }')"
 r="$work/mdw-charpath"; seed "$r"; mkdir -p "$r/docs"
-printf '%s aaaaaaaaaa\n' "$(printf '\303\251%.0s' $(seq 1 60))" > "$r/docs/x.md"
-[ "$(run "$r")" = "0" ] && ok || fail "arm 15: 71 characters of two-byte UTF-8 must pass on the byte path"
+case "$native_len" in
+  2)
+    printf '%s aaaaaaaaaa\n' "$(printf '\303\251%.0s' $(seq 1 60))" > "$r/docs/x.md"
+    [ "$(run "$r")" = "0" ] && ok || fail "arm 15: 71 characters of two-byte UTF-8 must pass on the byte path"
+    want_forced=1 ;;
+  1)
+    printf '%s %s\n' "$(printf '\302\265%.0s' $(seq 1 10))" "$(_md_words 74)" > "$r/docs/x.md"
+    fails_with_rc 1 "$r" "$md_msg" "arm 15: 85 characters holding micro signs must fail on the character path" only
+    want_forced=0 ;;
+  *) fail "arm 15: the native awk's length of a two-byte character is '$native_len', not 1 or 2" ;;
+esac
 rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" STRICT= "$cp" "$r" 2>&1)" || rc=$?
 [ "$rc" = 2 ] || fail "arm 15: a miscounting probe must fail closed (exit 2), got $rc: $out"
 case "$out" in
@@ -3447,10 +3542,11 @@ case "$out" in
   *) fail "arm 15: a miscounting probe must report the self-test and this arm's error: $out" ;;
 esac
 rc=0; out="$(PATH="$awk_shim:$PATH" CPT_REAL_AWK="$real_awk" CPT_NO_SELFTEST=1 STRICT= "$cp" "$r" 2>&1)" || rc=$?
-[ "$rc" = 1 ] || fail "arm 15: the character path on a byte awk must count bytes (exit 1), got $rc: $out"
-case "$out" in
-  *"/docs/x.md:1:"*"$md_msg"*) ok ;;
-  *) fail "arm 15: the forced character path must flag the 131-byte line: $out" ;;
+[ "$rc" = "$want_forced" ] \
+  || fail "arm 15: the other counting path must flip the fixture's verdict (want exit $want_forced), got $rc: $out"
+case "$want_forced:$out" in
+  0:*|1:*"/docs/x.md:1:"*"$md_msg"*) ok ;;
+  *) fail "arm 15: the forced path must flag the 131-byte line: $out" ;;
 esac
 
 # every exempt shape passes, each over the limit and holding spaces.

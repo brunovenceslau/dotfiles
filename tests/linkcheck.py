@@ -15,8 +15,11 @@ same tracked set:
 
   - the target of an inline link `[text](path#anchor)`, an image, a
     reference definition `[ref]: path`, and the `href` or `src` of an HTML
-    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked file, or a directory holding one,
-    inside ROOT. An untracked file on this machine does not count: GitHub
+    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked
+    file, or a directory holding one, inside ROOT. An inline link's
+    destination is read up to 2048 characters: a longer one is not a link
+    to this gate (no file name in a git tree comes close). An untracked
+    file on this machine does not count: GitHub
     renders the tracked tree, so a link to a gitignored `.local` file is broken
     there even though it resolves here. Case is compared exactly for the same
     reason (a case-insensitive APFS resolves `Docs/` where GitHub does not). A
@@ -38,20 +41,31 @@ Not links, so ignored: anything in YAML front matter, a fenced code block
 closed, as GitHub renders it), an indented code block, an inline code span and
 an HTML comment (also running to the end of the file when never closed).
 Front matter that never closes is not front matter: GitHub renders its `---`
-as a rule and the rest as prose, so its links are checked. A CR before a LF
-is not part of a line. A link whose text wraps across lines is still found. External
-URLs (any other scheme, `mailto:` included) are out of scope: this gate never
-touches the network, so its answer depends only on the tree.
+as a rule and the rest as prose, so its links are checked. Every CRLF is
+read as a LF before anything else looks at the text, so a CRLF file behaves
+exactly like its LF twin. A link whose text wraps across lines is still
+found. External URLs (any other scheme, `mailto:` included) are out of
+scope: this gate never touches the network, so its answer depends only on
+the tree.
+
+Hostile input stays near-linear. A pattern that could rescan the rest of a
+line or file once per opener is bounded (a definition's label at
+CommonMark's 999 characters, a destination, a title or an `<a>` id at 2048)
+or stops at the next opener of its kind; everything else is a str.find loop
+or a lookup built in one pass. An HTML attribute value is read up to its
+closing quote by str.find, so it has no length cap.
 
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
 run (not a git toplevel, git failed or warned, an unreadable or non-UTF-8
-file, any unexpected error). Exit 2 is never a pass. Every printed line goes
+file, a file reached through a symlink swapped into the working tree, any
+unexpected error). Exit 2 is never a pass. Every printed line goes
 through tty_safe, since it echoes names and text from the scanned tree.
 
 Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
 """
 
+import bisect
 import os
 import re
 import subprocess
@@ -69,26 +83,48 @@ SELF = re.compile(
 # at least as long, alone on its line.
 FENCE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|[0-9]+[.)])(?:[ \t]|$)")
-ATX = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$")
+# An ATX heading opens with 1 to 6 `#` then a space, a tab or the end of the
+# line. atx_text cuts its text out with str methods: a lazy `.*?` next to an
+# optional closing sequence backtracked quadratically on a run of spaces.
+ATX_OPEN = re.compile(r"^ {0,3}#{1,6}(?=[ \t]|$)")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-EXPLICIT = re.compile(r"<a\s+(?:[^>]*\s)?(?:id|name)=\"([^\"]+)\"")
+# `<a ... id="x">` (or name=): the attributes before it are read lazily, at
+# most 2048 characters and never past the next `<`, so a line of `<a `
+# openers costs each one the stretch up to the next.
+EXPLICIT = re.compile(r"<a(?=\s)[^<>]{0,2048}?(?<=\s)(?:id|name)=\"([^\"]{1,2048})\"")
 # [text](dest "title"): text may wrap across lines (never across a blank
 # line) and may hold one level of nested brackets, which covers an image
-# inside a link (a badge).
+# inside a link (a badge). The destination is bounded and ATOMIC (a
+# lookahead captures it, a backreference consumes it, so it is never
+# backtracked into): unbounded, every `[a](b` on a line of them rescanned
+# the rest of the line. Nothing it could give back would let the match
+# succeed, since a destination never holds what may follow it.
 TEXT = r"((?:[^\[\]\n]|\n(?![ \t]*\n)|\[[^\[\]]*\])*)"
-LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*<?(?=([^)\s>]{1,2048}))\2>?"
+                  r"(?:\s+\"[^\"]{0,2048}\")?\s*\)")
 REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[([^\[\]]*)\]")
-REFDEF = re.compile(r"^ {0,3}\[([^\]]+)\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.M)
+# A definition's label holds no unescaped bracket and at most 999 characters
+# (CommonMark): unbounded, each line opening with `[` scanned the rest of the
+# file for a `]`.
+REFDEF = re.compile(r"^ {0,3}\[([^\[\]]{1,999})\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.M)
 # An `<a` or `<img` tag opener; its attributes are read up to the tag's own
 # `>` (found with str.find, so an unclosed tag costs one scan, not one per
-# opener), and a value may be double- or single-quoted.
+# opener). HTML_ATTR finds where an href or src value opens, and str.find
+# its closing quote (double or single) inside the tag.
 HTML_TAG = re.compile(r"<(?:a|img)(?=[\s>/])", re.I)
-# A value is capped at 2048 characters, so an unclosed quote scans a bounded
-# stretch rather than the rest of the tag once per attribute.
-HTML_ATTR = re.compile(r"\s(?:href|src)\s*=\s*(?:\"([^\"]{0,2048})\"|'([^']{0,2048})')", re.I)
+HTML_ATTR = re.compile(r"\s(?:href|src)\s*=\s*([\"'])", re.I)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
-BLANK_LINE = re.compile(r"\n[ \t\r]*\n")
+BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
+# Printable, yet they reorder or hide what a terminal shows: the Arabic
+# letter mark, the zero-width space and joiners, the LRM and RLM marks, the
+# line and paragraph separators, the bidi embeddings and overrides, the bidi
+# isolates, and the zero-width no-break space (BOM).
+BIDI_HIDDEN = frozenset(
+    [chr(0x061C), chr(0xFEFF)]
+    + [chr(c) for c in range(0x200B, 0x2010)]
+    + [chr(c) for c in range(0x2028, 0x202F)]
+    + [chr(c) for c in range(0x2066, 0x206A)])
 
 
 class GateError(Exception):
@@ -100,7 +136,10 @@ def tty_safe(s):
     sanitizer applies: C0 controls but TAB, DEL, and C1 (U+0080 to U+009F),
     printed as `\\xHH`. LF is escaped too, since each report is one line and
     a name holding one would forge a second. A byte that was not UTF-8
-    (decoded with surrogateescape) prints as its `\\xHH` as well."""
+    (decoded with surrogateescape) prints as its `\\xHH` as well. Beyond
+    that rule, the characters that reorder or hide text without being
+    controls (BIDI_HIDDEN) print as `\\uHHHH`, so a report cannot show one
+    target while naming another."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -108,6 +147,8 @@ def tty_safe(s):
             out.append("\\x%02x" % (o - 0xDC00))
         elif (o < 0x20 and ch != "\t") or 0x7F <= o <= 0x9F:
             out.append("\\x%02x" % o)
+        elif ch in BIDI_HIDDEN:
+            out.append("\\u%04x" % o)
         else:
             out.append(ch)
     return "".join(out)
@@ -125,14 +166,21 @@ def git(root, *args):
     return p.stdout
 
 
-def read_text(path, rel):
+def read_text(root, rel):
+    """A tracked file's text, read only where git says it is: a working-tree
+    symlink swapped in for the file or any directory above it (which git
+    cannot see in the index) would read a file outside ROOT."""
+    path = os.path.join(root, rel)
+    if os.path.realpath(path) != os.path.join(root, os.path.normpath(rel)):
+        raise GateError("%s: reached through a symlink in the working tree" % rel)
     try:
         with open(path, "rb") as f:
             data = f.read()
     except OSError as e:
         raise GateError("%s: %s" % (rel, e.strerror))
     try:
-        return data.decode("utf-8")
+        # One normalization here, so no later reader has to strip a CR.
+        return data.decode("utf-8").replace("\r\n", "\n")
     except UnicodeDecodeError as e:
         raise GateError("%s: not UTF-8 (%s)" % (rel, e.reason))
 
@@ -154,10 +202,10 @@ def strip_code(text, spans=True):
     lines = text.split("\n")
     out = []
     i = 0
-    if lines and lines[0].rstrip("\r") == "---":
+    if lines and lines[0] == "---":
         # YAML front matter (the .claude/rules pages): not rendered as prose.
         for j in range(1, len(lines)):
-            if lines[j].rstrip("\r") == "---":
+            if lines[j] == "---":
                 out = [blank(x) for x in lines[:j + 1]]
                 i = j + 1
                 break
@@ -203,15 +251,29 @@ def blank_spans(text, spans):
     and a backtick inside a comment opens nothing. A code span is a run of N
     backticks up to the next run of exactly N in the same paragraph; a run
     with no partner is literal text. A comment never closed runs to the end
-    of the file, as an HTML block does. Every search is a str.find from the
-    current position, and a paragraph's end is found once per paragraph, so
-    hostile input (many openers, none closed) stays near-linear."""
+    of the file, as an HTML block does.
+    Hostile input (many openers, none closed) stays linear: every backtick
+    run is listed once with the next run of its own length (nxt), so finding
+    a partner is a lookup, not a scan per opener (a line of runs of every
+    length 1..k cost one scan per length); a paragraph's end is found once
+    per paragraph; and the next `<!--` is searched again only once the scan
+    has passed it (a file with none answers -1 once, not once per run)."""
     n = len(text)
     ends = [m.start() for m in BLANK_LINE.finditer(text)] + [n]
-    pieces, i, e = [], 0, 0
+    runs = [(m.start(), m.end() - m.start()) for m in re.finditer("`+", text)]
+    run_at = {start: k for k, (start, _) in enumerate(runs)}
+    nxt, last = [None] * len(runs), {}
+    for k in range(len(runs) - 1, -1, -1):
+        nxt[k] = last.get(runs[k][1])
+        last[runs[k][1]] = k
+    pieces, i, e, r = [], 0, 0, 0
+    c = text.find("<!--")
     while i < n:
-        a = text.find("`", i)
-        c = text.find("<!--", i)
+        if 0 <= c < i:
+            c = text.find("<!--", i)
+        while r < len(runs) and runs[r][0] < i:
+            r += 1
+        a = runs[r][0] if r < len(runs) else -1
         if a < 0 and c < 0:
             break
         if c >= 0 and (a < 0 or c < a):
@@ -221,29 +283,18 @@ def blank_spans(text, spans):
             pieces.append(blank(text[c:end]))
             i = end
             continue
-        k = a
-        while k < n and text[k] == "`":
-            k += 1
-        run = k - a
+        # Every opener is a whole run: i only ever lands after a run, after
+        # a comment's `>`, or at 0, never inside a run.
+        k = run_at[a]
+        run = runs[k][1]
         while ends[e] < a:
             e += 1
-        limit = ends[e]
-        j, close = k, -1
-        while True:
-            j = text.find("`" * run, j, limit)
-            if j < 0:
-                break
-            r = j + run
-            while r < n and text[r] == "`":
-                r += 1
-            if r - j == run:
-                close = j
-                break
-            j = r   # a longer run: skip all of it
-        if close < 0:
-            pieces.append(text[i:k])   # an unmatched run is literal backticks
-            i = k
+        partner = nxt[k]
+        if partner is None or runs[partner][0] >= ends[e]:
+            pieces.append(text[i:a + run])   # an unmatched run is literal backticks
+            i = a + run
             continue
+        close = runs[partner][0]
         pieces.append(text[i:a])
         span = text[a:close + run]
         pieces.append(blank(span) if spans else span)
@@ -260,10 +311,23 @@ def _render_inline(s):
         if k % 2:
             out.append(p)   # an escaped `_` or `*` is a literal, never emphasis
         else:
-            p = re.sub(r"<[^>]+>", "", p)                         # HTML tags render as nothing
+            p = re.sub(r"<[^<>]+>", "", p)                        # HTML tags render as nothing
             p = re.sub(r"(?<![\w])[*_]+|[*_]+(?![\w])", "", p)    # emphasis, not intra-word _
             out.append(p)
     return "".join(out)
+
+
+def atx_text(rest):
+    """An ATX heading's text: `rest` (what follows the `#`s) without its
+    padding and its optional closing `#`s, which close only after a space or
+    a tab, or when they are all there is (`## ##` is an empty heading)."""
+    rest = rest.strip(" \t")
+    bare = rest.rstrip("#")
+    if not bare:
+        return ""
+    if bare != rest and bare[-1] in " \t":
+        return bare.rstrip(" \t")
+    return rest
 
 
 def slugify(text):
@@ -273,9 +337,11 @@ def slugify(text):
     inner hyphens: `a - b` is `a---b`, as github-slugger makes it. A code
     span renders verbatim, so emphasis and escape rules stop at its edges:
     `_link_bin_tree` keeps both underscores."""
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)   # a link renders as its text
+    # Every class below stops at its own opener or is bounded, so a heading
+    # line of unclosed `[`, `(`, `<` or backticks costs near-linear time.
+    text = re.sub(r"!?\[([^\[\]]*)\]\([^()]*\)", r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
-    for m in re.finditer(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)", text):
+    for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
         rendered.append(_render_inline(text[pos:m.start()]))
         rendered.append(m.group(2))
         pos = m.end()
@@ -336,16 +402,16 @@ class Tree:
 
     def anchors(self, rel):
         if rel not in self._anchors:
-            text = strip_code(read_text(os.path.join(self.root, rel), rel), spans=False)
-            lines = [ln.rstrip("\r") for ln in text.split("\n")]
+            text = strip_code(read_text(self.root, rel), spans=False)
+            lines = text.split("\n")
             slugger, res = Slugger(), set()
             for i, ln in enumerate(lines):
                 for m in EXPLICIT.finditer(ln):
                     res.add(m.group(1))
                 heading = None
-                m = ATX.match(ln)
+                m = ATX_OPEN.match(ln)
                 if m:
-                    heading = m.group(2) or ""
+                    heading = atx_text(ln[m.end():])
                 elif i + 1 < len(lines) and ln.strip() and SETEXT.match(lines[i + 1]) \
                         and not FENCE.match(ln) and not LIST_ITEM.match(ln):
                     # A setext heading: text underlined by === or ---. A `---`
@@ -381,19 +447,27 @@ def resolve(tree, src_rel, target):
     return None
 
 
-def line_of(text, offset):
-    return text.count("\n", 0, offset) + 1
+class Lines:
+    """Offset to line number by bisecting the newline offsets, found once
+    per file: counting newlines per link was O(file) for each one."""
+
+    def __init__(self, text):
+        self.nl = [m.start() for m in re.finditer("\n", text)]
+
+    def of(self, offset):
+        return bisect.bisect_left(self.nl, offset) + 1
 
 
 def check_file(tree, rel):
-    raw = read_text(os.path.join(tree.root, rel), rel)
+    raw = read_text(tree.root, rel)
+    line_of = Lines(raw).of
     found = []   # (line, target, error)
     is_md = rel.endswith(".md")
     code_free = strip_code(raw) if is_md else raw
     for m in SELF.finditer(code_free):
         err = resolve(tree, "", m.group(1))
         if err:
-            found.append((line_of(raw, m.start()), m.group(0), err))
+            found.append((line_of(m.start()), m.group(0), err))
     if not is_md:
         return sorted(set(found))
     targets = []
@@ -415,20 +489,28 @@ def check_file(tree, rel):
         gt = code_free.find(">", m.end())
         if gt < 0:
             break   # no later tag can close either
-        for a in HTML_ATTR.finditer(code_free, m.end() - 1, gt):
-            g = 1 if a.group(1) is not None else 2
-            targets.append((a.start(g), a.group(g)))
+        pos = m.end()
+        while True:
+            a = HTML_ATTR.search(code_free, pos, gt)
+            if not a:
+                break
+            close = code_free.find(a.group(1), a.end(), gt)
+            if close < 0:
+                pos = a.end()   # unclosed inside the tag: not a value; look on
+                continue
+            targets.append((a.end(), code_free[a.end():close]))
+            pos = close + 1
     for m in REFLINK.finditer(code_free):
         label = m.group(2) if m.group(2).strip() else m.group(1)
         if ref_label(label) not in labels:
-            found.append((line_of(raw, m.start()), "[%s]" % label,
+            found.append((line_of(m.start()), "[%s]" % label,
                           "no such reference definition in this file"))
     for off, t in targets:
         if SCHEME.match(t):
             continue   # external, or SELF above; never fetched
         err = resolve(tree, rel, t)
         if err:
-            found.append((line_of(raw, off), t, err))
+            found.append((line_of(off), t, err))
     return sorted(set(found))
 
 

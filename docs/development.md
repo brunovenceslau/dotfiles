@@ -469,12 +469,17 @@ link-convention change.
   and inline code spans are not prose, so a link inside one is ignored. Front
   matter that never closes is prose, since GitHub renders its `---` as a rule.
   An HTML `href` or `src` may be double- or single-quoted. A link whose
-  text wraps across lines is still found. Every other URL scheme is out of
-  scope, since the gate never touches the network.
+  text wraps across lines is still found, and a CRLF file reads exactly like
+  its LF twin. An inline link whose destination runs past 2048 characters is
+  not read as a link. Every other URL scheme is out of scope, since the gate
+  never touches the network.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
-bytes escaped, and 2 when it cannot run: the root is not a checkout's
-toplevel, git fails or warns, or a file is unreadable or not UTF-8.
+bytes escaped as `\xHH` and the characters that reorder or hide text (bidi
+controls, zero-width characters) as `\uHHHH`. It exits 2 when it cannot run:
+the root is not a checkout's toplevel, git fails or warns, or a file is
+unreadable, not UTF-8, or reached through a symlink swapped into the working
+tree.
 `tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ## CI
