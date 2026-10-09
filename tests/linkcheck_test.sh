@@ -377,6 +377,30 @@ ok "a heading link slugs to its text: nesting to 3 levels, escaped paren, angle 
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
+# A body link's destination follows the heading's rule: balanced parentheses
+# nested up to 3 levels, an escaped paren (read unescaped), and the
+# `<...>` form, which may hold a space. A bare destination never starts with
+# `<`, so `[a](<b)` is literal text, in a heading too.
+new_tree
+printf '# Paren\n' >"$work/r/docs/a_(b).md"
+printf '# Deep\n' >"$work/r/docs/z_(((w))).md"
+printf '# Space\n' >"$work/r/docs/sp ace.md"
+cat >"$work/r/docs/body-paren.md" <<'MD'
+## L [a](<b) t
+
+[1](a_(b).md) [2](a_(b).md#paren) [3](a_\(b\).md) [4](<a_(b).md>)
+[5](z_(((w))).md#deep) [6](<sp ace.md>) [7](<sp ace.md#space>) [8](#l-ab-t)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a body destination with parentheses, an escape or <...> must resolve (exit $rc): $out"
+ok "a body link resolves balanced parentheses to 3 levels, an escaped paren and the <...> form; [a](<b) is literal"
+expect_broken README.md 'See [x](docs/gone_(b).md).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone_\(b\)\.md$' \
+  "a broken body destination with parentheses is reported whole"
+expect_broken README.md 'See [x](<docs/gone file.md>).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
+  "a broken <...> destination holding a space is checked"
 # The pattern spells the 2100 x's out: an interval such as x{2100} is past
 # RE_DUP_MAX (255) on BSD regex, so macOS grep cannot match it.
 long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
