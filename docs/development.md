@@ -469,14 +469,17 @@ link-convention change.
   before resolving.
 - A full or collapsed reference link (`[text][ref]`, `[text][]`) must have a
   definition in the same file. A backslash-escaped bracket (`\]`) does not
-  end link text or a label. A shortcut `[ref]` is not checked, since it
-  cannot be told apart from bracketed prose.
+  end link text or a label, and neither crosses a blank line. A definition
+  may put its destination on the next line, and is no definition when
+  anything but a title follows its destination. A shortcut `[ref]` is not
+  checked, since it cannot be told apart from bracketed prose.
 - An `#anchor` into a Markdown file must match a heading under GitHub's slug
   rule: the rendered text, lowercased, with punctuation dropped and each space
   turned into `-`. Text inside a code span is kept as written, so
   `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
   `-1`, `-2` in order, the way github-slugger numbers it. An explicit
-  `<a id="...">` counts too. An anchor into any other file, such as a `#L10`
+  anchor counts too: the `id` of an `<a>` or `<img>` tag, or an `<a>`'s
+  `name`. An anchor into any other file, such as a `#L10`
   line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
@@ -484,24 +487,25 @@ link-convention change.
   of the file when never closed, as GitHub renders them), indented code blocks
   and inline code spans are not prose, so a link inside one is ignored. Front
   matter that never closes is prose, since GitHub renders its `---` as a rule.
-  An HTML `href` or `src` may be double- or single-quoted. A tag is read as
-  CommonMark reads raw HTML: a `>` inside a quoted attribute value does not
-  end it, and one that crosses a blank line, or runs a quoted value into
-  the next attribute, is text. A link whose
+  An HTML `href` or `src` may be double-quoted, single-quoted or bare. A
+  tag is read the lenient way GitHub's HTML5 parser reads an HTML block,
+  since a link it renders is live: a `>` inside a quoted attribute value
+  does not end the tag, and one that crosses a blank line is text. A link
+  whose
   text wraps across lines is still found, and a CRLF file reads exactly like
-  its LF twin. A link destination may hold balanced parentheses (up to 3
-  levels deep) and backslash escapes, or be written `<...>` with spaces, and
-  its title may be double- or single-quoted or in parentheses, holding its
-  own delimiter escaped. Neither has
-  a length limit. Every other URL scheme is out of scope, since the gate
-  never touches the network.
+  its LF twin. A link destination ends at ASCII whitespace only, may hold
+  balanced parentheses (up to 3 levels deep), backslash escapes and
+  character references such as `&amp;`, or be written `<...>` with spaces,
+  and its title may be double- or single-quoted or in parentheses, holding
+  its own delimiter escaped. Neither has a length limit. Every other URL
+  scheme is out of scope, since the gate never touches the network.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
 bytes escaped as `\xHH` and the characters that reorder or hide text (bidi
-controls, zero-width characters) as `\uHHHH`. It exits 2 when it cannot run:
-the root is not a checkout's toplevel, git fails or warns, or a file is
-unreadable, not UTF-8, or reached through a symlink swapped into the working
-tree.
+controls, zero-width and tag characters, the soft hyphen) as `\uHHHH`. It
+exits 2 when it cannot run: the root is not a checkout's toplevel, git fails
+or warns, or a file is unreadable, not UTF-8, or reached through a symlink
+swapped into the working tree.
 `tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ### What `make commit-identity` checks
