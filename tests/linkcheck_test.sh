@@ -377,12 +377,260 @@ ok "a heading link slugs to its text: nesting to 3 levels, escaped paren, angle 
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
+# A body link's destination follows the heading's rule: balanced parentheses
+# nested up to 3 levels, an escaped paren (read unescaped, in a definition
+# too), and the `<...>` form, which may hold a space or an escaped `>`. A
+# bare destination never starts with `<`, so `[a](<b)` is literal text, in a
+# heading too.
+new_tree
+printf '# Paren\n' >"$work/r/docs/a_(b).md"
+printf '# Gt\n' >"$work/r/docs/a>b.md"
+printf '# Deep\n' >"$work/r/docs/z_(((w))).md"
+printf '# Space\n' >"$work/r/docs/sp ace.md"
+cat >"$work/r/docs/body-paren.md" <<'MD'
+## L [a](<b) t
+
+[1](a_(b).md) [2](a_(b).md#paren) [3](a_\(b\).md) [4](<a_(b).md>)
+[5](z_(((w))).md#deep) [6](<sp ace.md>) [7](<sp ace.md#space>) [8](#l-ab-t)
+[10][r]
+
+[r]: a_\(b\).md#paren
+MD
+# \134 is the backslash: check-patterns refuses a literal backslash-`>` in
+# shell, since BSD and GNU grep read it differently.
+printf '[9](<a\134>b.md#gt>)\n' >>"$work/r/docs/body-paren.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a body destination with parentheses, an escape or <...> must resolve (exit $rc): $out"
+ok "a body link resolves nested parentheses, escapes (in a definition too) and <...> with an escaped '>'; [a](<b) is literal"
+expect_broken README.md 'See [x](docs/gone_(b).md).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone_\(b\)\.md$' \
+  "a broken body destination with parentheses is reported whole"
+expect_broken README.md 'See [x](<docs/gone file.md>).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
+  "a broken <...> destination holding a space is checked"
+expect_broken README.md 'See [x](docs/gone\(1\).md).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\\\(1\\\)\.md$' \
+  "a broken destination is reported as written, escapes and all"
+expect_broken README.md "$(printf 'See [x](<docs/gone\134>b.md>).')" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone.>b\.md$' \
+  "a broken <...> destination holding an escaped '>' is checked"
+# A title never crosses a blank line (CommonMark), so this is text, not a link.
+new_tree
+printf '[x](docs/gone.md "a\n\nb")\n' >"$work/r/docs/para-title.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a title across a blank line must not make a link (exit $rc): $out"
+ok "a title across a blank line is text, not a link"
+# Forms that hid a link before: a single-quoted or parenthesized title, a
+# `>` inside a quoted HTML attribute before the href, an escaped `]` in a
+# reference label (full, collapsed and in the definition), and a `<...>`
+# definition holding a space. Each resolves here, and each is reported
+# when broken (below).
+new_tree
+printf '# Space\n' >"$work/r/docs/sp ace.md"
+cat >"$work/r/docs/forms.md" <<'MD'
+# Forms
+
+[1](guide.md 'single') [2](guide.md (paren)) [3](guide.md "double")
+<a title="x>y" href="guide.md#tail">4</a> <img alt='a>b' src="guide.md">
+A [full][a\]b], a [c\]d][] and a [spaced one][sp].
+
+[a\]b]: guide.md#setup
+[c\]d]: #forms
+[sp]: <sp ace.md> "title"
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "titles, a quoted '>' before an href, escaped label brackets and a <...> definition must resolve (exit $rc): $out"
+ok "single-quoted and parenthesized titles, a quoted '>' in a tag, an escaped ']' in a label and a spaced <...> definition resolve"
+expect_broken README.md "See [x](docs/gone.md 'title')." \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a link with a single-quoted title is checked"
+expect_broken README.md 'See [x](docs/gone.md (title)).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a link with a parenthesized title is checked"
+expect_broken README.md '<a title="x>y" href="docs/gone.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "an href after a quoted attribute holding '>' is checked"
+expect_broken README.md "<img alt='a>b' src='docs/gone.png'>" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.png$' \
+  "a single-quoted src after a quoted attribute holding '>' is checked"
+expect_broken README.md 'See [x][a\]b].
+
+[a\]b]: docs/gone.md' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a definition whose label holds an escaped ']' is checked"
+expect_broken README.md 'See [x][no\]def].' \
+  'no such reference definition in this file: \[no\\\]def\]' \
+  "a full reference whose label holds an escaped ']' needs a definition"
+expect_broken README.md 'See [no\]def][].' \
+  'no such reference definition in this file: \[no\\\]def\]' \
+  "a collapsed reference whose text holds an escaped ']' needs a definition"
+expect_broken README.md '[sp]: <docs/gone file.md>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
+  "a <...> definition holding a space is checked whole"
+# An open tag never crosses a blank line, and an opener that is no tag is
+# text, so a tag inside it is still found.
+expect_broken README.md "<a t='x <a href=\"docs/gone.md\">y</a>" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a tag after an opener whose quote never closes is checked"
+expect_broken README.md 'A stray <a title="oops in prose, then <a href="docs/gone.md">t</a> later.' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a tag inside the would-be quoted value of a stray opener is checked"
+new_tree
+printf '<a href="docs/gone.md"\n\n>x</a>\n' >"$work/r/docs/not-tags.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a tag across a blank line is text (exit $rc): $out"
+ok "a tag across a blank line is text, not a tag"
+# GitHub's HTML5 parser renders what CommonMark's inline grammar refuses, in
+# an HTML block: an attribute run onto a quoted value, a name opening with a
+# digit. Those links are live, so they are checked.
+expect_broken README.md '<div>
+<a title="x"y href="docs/gone-block.md">x</a>
+</div>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-block\.md$' \
+  "an href after an attribute run onto a quoted value is checked"
+expect_broken README.md '<div>
+<a 1x href="docs/gone-block2.md">x</a>
+</div>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-block2\.md$' \
+  "an href after an attribute name opening with a digit is checked"
+expect_broken README.md '<a href=docs/gone.md>x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a bare (unquoted) href is checked"
+expect_broken README.md '<IMG SRC="docs/gone.png">' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.png$' \
+  "an uppercase tag and attribute are checked"
+new_tree
+printf 'x\n<a\nhref="docs/gone.md">y</a>\n' >"$work/r/docs/wrapped-tag.md"
+git -C "$work/r" add -A
+run
+grep -qx 'docs/wrapped-tag.md:3: no such tracked file or directory: docs/gone.md' <<<"$out" \
+  || fail "an href on a tag's continuation line must be reported at its own line (3): $out"
+ok "an href on a tag's continuation line is reported at its own line"
+# An explicit anchor is any tag's id or an <a>'s name, read by the same tag
+# reader: after a quoted '>', single-quoted, or on a continuation line.
+new_tree
+printf '%s\n' '<a title=">" id="x1"></a> <a id='"'x2'"'></a> <a' 'name="x3"></a>' '' \
+  '[1](#x1) [2](#x2) [3](#x3)' >"$work/r/docs/ids.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an id after a quoted '>', a single-quoted id and an id on a continuation line are anchors (exit $rc): $out"
+ok "an id after a quoted '>', a single-quoted id and a name on a continuation line are anchors"
+# A label is at most 999 characters (CommonMark 4.7): one of 999 defines,
+# one of 1000 does not.
+new_tree
+l999="$(printf 'y%.0s' $(seq 1 999))"
+printf '[a][%s]\n\n[%s]: guide.md\n\n[%sy]: gone.md\n' "$l999" "$l999" "$l999" \
+  >"$work/r/docs/labels.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a 999-character label must define and a 1000-character one must not (exit $rc): $out"
+ok "a 999-character label defines; a 1000-character one is not a definition"
+# A definition (CommonMark 4.7) may put its destination on the next line,
+# and is no definition when anything but a title follows the destination.
+expect_broken README.md '[nl]:
+  docs/gone.md' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a definition with its destination on the next line is checked"
+expect_broken README.md 'See [x][junk].
+
+[junk]: docs/guide.md junk' \
+  'no such reference definition in this file: \[junk\]' \
+  "a definition with text after its destination is not a definition"
+new_tree
+printf 'See [x][a\n\nb] there.\n' >"$work/r/docs/label-para.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a reference label across a blank line is text (exit $rc): $out"
+ok "a reference label across a blank line is text, not a reference"
+# Destinations hold what CommonMark keeps: a non-ASCII space (U+00A0, U+2028)
+# is part of the destination, a blank line ends the link, a reference is
+# decoded (`&amp;`), and a backslash before a letter is literal.
+expect_broken README.md "$(printf 'See [x](docs/gone\302\240x.md).')" \
+  "$(printf '^README\\.md:[0-9]+: no such tracked file or directory: docs/gone\302\240x\\.md$')" \
+  "a destination holding U+00A0 is checked whole"
+expect_broken README.md "$(printf 'See [x](docs/gone\342\200\250x.md).')" \
+  'no such tracked file or directory: docs/gone\\u2028x\.md$' \
+  "a destination holding U+2028 is checked whole, and the separator prints escaped"
+new_tree
+printf '[q](\n\ngone-para.md)\n' >"$work/r/docs/para-dest.md"
+printf '# Amp\n' >"$work/r/docs/a&b.md"
+bs="$(printf '\134')"
+printf '# Bs\n' >"$work/r/docs/a${bs}b.md"
+printf '[1](a&amp;b.md#amp) [2](a&#38;b.md) <a href="a&amp;b.md">3</a> [4](a%sb.md#bs)\n' "$bs" \
+  >"$work/r/docs/decode.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a blank line ends a link; references decode; a backslash before a letter is literal (exit $rc): $out"
+ok "a blank line ends a link, '&amp;' and '&#38;' decode, and a backslash before a letter is literal"
+# References decode the CommonMark way: a name must match exactly, a
+# numeric reference is its code point (a control included), and an escaped
+# `&` keeps the reference literal, in one pass.
+new_tree
+printf '# Ampx\n' >"$work/r/docs/a&ampx;b.md"
+printf '# Esc\n' >"$work/r/docs/c$(printf '\033')d.md"
+printf '# Lit\n' >"$work/r/docs/a&amp;b.md"
+printf '[1](a&ampx;b.md#ampx) [2](c&#27;d.md#esc) [3](a\134&amp;b.md#lit)\n' \
+  >"$work/r/docs/refs.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "'&ampx;' must stay literal, '&#27;' must be ESC, and '\\&amp;' must stay literal (exit $rc): $out"
+ok "'&ampx;' stays literal, '&#27;' decodes to its control, and an escaped '&amp;' stays literal"
+expect_broken README.md "$(printf 'See [x](docs/gone\363\240\201\201.md).')" \
+  'docs/gone\\U000e0041\.md$' \
+  "a tag character in a report prints as \\UHHHHHHHH"
+expect_broken README.md '<img id="imgid" src="docs/guide.md">
+
+See [x](#imgid).' \
+  'no such anchor in README\.md: #imgid' \
+  "an <img> id is not an anchor: only an <a> id or name is"
+expect_broken README.md "$(printf 'See [x](docs/gone\342\201\240.md).')" \
+  'docs/gone\\u2060\.md$' \
+  "a word joiner in a report prints as \\uHHHH"
+# An opening bracket after an even run of backslashes opens a link; after an
+# odd run it is escaped.
+new_tree
+printf '%s\n' 'A \\[a](docs/gone-even.md) and \[b](docs/gone-odd.md).' >"$work/r/docs/bs-run.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'gone-even\.md' <<<"$out" && ! grep -q 'gone-odd' <<<"$out" \
+  || fail "an even run of backslashes before [ must leave a link, an odd run escape it (exit $rc): $out"
+ok "an even run of backslashes before [ leaves a link; an odd run escapes it"
+# A title may hold its own delimiter escaped, in each of its three forms.
+new_tree
+printf '%s\n' '[1](docs/gone.md "t \" q") [2](docs/gone-2.md '"'t \\' q'"') [3](docs/gone-3.md (t \) q))' \
+  >"$work/r/docs/esc-title.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && [ "$(grep -c 'docs/esc-title.md:1: no such tracked file' <<<"$out")" = 3 ] \
+  || fail "a title holding its escaped delimiter must still make a link, in all three forms (exit $rc): $out"
+ok "a title may hold its own delimiter escaped, in all three forms"
 # The pattern spells the 2100 x's out: an interval such as x{2100} is past
 # RE_DUP_MAX (255) on BSD regex, so macOS grep cannot match it.
 long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
 expect_broken README.md "An <a href=\"docs/$long_name\">long</a>." \
   "no such tracked file or directory: docs/$long_stem\\.md\$" \
   "an HTML href over 2048 characters is still checked"
+# No destination, title or anchor id has a length limit: a bound once
+# skipped every link past it in silence.
+expect_broken README.md "See [x](docs/$long_name)." \
+  "^README\\.md:[0-9]+: no such tracked file or directory: docs/$long_stem\\.md\$" \
+  "a broken destination over 2048 characters is reported"
+expect_broken README.md "See [x](<docs/$long_name>)." \
+  "^README\\.md:[0-9]+: no such tracked file or directory: docs/$long_stem\\.md\$" \
+  "a broken <...> destination over 2048 characters is reported"
+expect_broken README.md "See [x](docs/gone.md \"$long_stem\")." \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a broken destination with a title over 2048 characters is reported"
+new_tree
+printf '<a id="%s"></a>\n\n[x](#%s)\n' "$long_stem" "$long_stem" >"$work/r/docs/long-id.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an explicit <a id> over 2048 characters must be an anchor (exit $rc): $out"
+ok "an explicit <a id> over 2048 characters is an anchor"
 expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
   'docs/a\\u202eb\.md' \
   "a bidi override in a report prints as \\uHHHH"
@@ -426,6 +674,42 @@ shapes = {
     "h19.md": "# ![a](" + " " * n + "x",
     "h20.md": "# [a](x " + " " * n + '"',
     "h21.md": "# [a](" + "(x" * (n // 2),
+    # Body destinations: balanced and unclosed parentheses, angle openers,
+    # backslashes and every title form; `[a](<` once took 2 s at 200 KB.
+    "h22.md": "[a](<" * (n // 4),
+    "h23.md": "[a](x(y)" * (n // 8),
+    "h24.md": "[a](x" + "(y)" * (n // 3),
+    "h25.md": "[a](x(y(z(" * (n // 10),
+    "h26.md": "[a](\\" * (n // 5),
+    "h27.md": "[a](x 'y [a](x (y " * (n // 18),
+    # Escaped brackets in link text, labels and definitions.
+    "h28.md": "[\\" * (n // 2),
+    "h29.md": "[a][b\\]" * (n // 7),
+    "h30.md": "[b\\]]: x\n" * (n // 8),
+    # Tags whose quoted values hold `>`, or never close, or never open.
+    "h31.md": '<a t=">"' * (n // 8),
+    "h32.md": "<a t='" * (n // 6),
+    "h33.md": "<a t=\"x' " * (n // 9),
+    "h34.md": "<a =" + " " * n + "x",
+    # Unbounded titles and ids, escaped title delimiters, and open tags that
+    # nest quote kinds, run a quoted value into a name, or never close.
+    "h35.md": '[a](b "' + "x" * n,
+    "h36.md": '[a](b "\\' * (n // 8),
+    "h37.md": '<a id="x ' * (n // 9),
+    "h38.md": "<a t=\"<a u='" * (n // 12),
+    "h39.md": '<a t="' + "<a b " * (n // 5) + '" c="d"x',
+    "h40.md": '<a t="x"y ' * (n // 10),
+    "h41.md": "<a" + " a=b" * (n // 4),
+    # Definitions with titles that never close, destinations on the next
+    # line, backslash runs before `[`, attributes glued onto quoted values
+    # or opening with a digit, and a destination of references.
+    "h42.md": '[a]: b "x\n' * (n // 8),
+    "h43.md": "[a]:\n" * (n // 5),
+    "h44.md": "\\" * n + "[a](b",
+    "h45.md": "\\\\[" * (n // 3),
+    "h46.md": '<a x="y"' * (n // 8),
+    "h47.md": "<a 1" * (n // 4),
+    "h48.md": "[a](" + "&amp;" * (n // 5),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -440,7 +724,7 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
-ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, in prose and headings) finishes in bounded time"
+ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"

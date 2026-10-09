@@ -14,11 +14,16 @@ absolute links back into this repository. Each link is checked against that
 same tracked set:
 
   - the target of an inline link `[text](path#anchor)`, an image, a
-    reference definition `[ref]: path`, and the `href` or `src` of an HTML
-    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked
-    file, or a directory holding one, inside ROOT. An inline link's
-    destination is read up to 2048 characters: a longer one is not a link
-    to this gate (no file name in a git tree comes close). An untracked
+    reference definition `[ref]: path` (its destination on the same line
+    or the next, nothing but a title after it), and the `href` or `src` of
+    an HTML `<a>` or `<img>` tag (quoted or bare) must name a tracked
+    file, or a directory holding one, inside ROOT. A Markdown destination
+    is read the CommonMark way: no ASCII whitespace, balanced parentheses
+    (3 levels deep), backslash escapes of ASCII punctuation, or the `<...>`
+    form, which may hold spaces; a title may follow, double- or
+    single-quoted or in parentheses. Neither has a length limit. Escapes
+    are undone and character references (`&amp;`) decoded before
+    resolving, in an HTML value too. An untracked
     file on this machine does not count: GitHub
     renders the tracked tree, so a link to a gitignored `.local` file is broken
     there even though it resolves here. Case is compared exactly for the same
@@ -26,13 +31,19 @@ same tracked set:
     `?query` is dropped before resolving;
   - a full or collapsed reference link, `[text][ref]` or `[text][]`, must have
     a matching definition in the same file (labels compared case-folded, with
-    whitespace collapsed). A shortcut `[ref]` is not checked: it cannot be told
-    apart from bracketed prose;
+    whitespace collapsed). A backslash-escaped bracket does not end link
+    text or a label, and an escaped quote or paren does not end a title;
+    none of them crosses a blank line. A shortcut `[ref]` is not checked:
+    it cannot be told apart from bracketed prose;
+  - an `<a>` or `<img>` tag is read much the way GitHub's HTML5 parser
+    reads an HTML block (HTML_OPEN names the known misses): a `>` inside a
+    quoted value does not end it, and one that crosses a blank line is text, so a tag inside
+    it is still found;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
-    github-slugger numbers them, or an explicit `<a id="...">` /
-    `<a name="...">`. An anchor into any other file (a `#L10` line anchor), or
-    into a tracked symlink, is not checked;
+    github-slugger numbers them, or an explicit anchor, an `<a>` tag's
+    `id` or `name`. An anchor into any other file (a `#L10` line anchor),
+    or into a tracked symlink, is not checked;
   - an absolute `https://github.com/brunovenceslau/dotfiles/(blob|tree)/main/`
     link is resolved against the local tree the same way, in the YAML too.
 
@@ -50,10 +61,15 @@ the tree.
 
 Hostile input stays near-linear. A pattern that could rescan the rest of a
 line or file once per opener is bounded (a definition's label at
-CommonMark's 999 characters, a destination, a title or an `<a>` id at 2048)
-or stops at the next opener of its kind; everything else is a str.find loop
-or a lookup built in one pass. An HTML attribute value is read up to its
-closing quote by str.find, so it has no length cap.
+CommonMark's 999 characters, a heading's code span at 2048), stops at the
+next opener of its kind (a title or an attribute value at its own quote,
+never past a blank line), or crosses at most 3 later openers (a link
+destination, since each opener brings an unclosed parenthesis and a 4th
+level ends it); everything else is a str.find loop or a lookup built in
+one pass. No destination, title or attribute value has a length limit:
+each of the others was bounded once, which silently skipped a long link,
+and the test's hostile shapes, measured at 800 KB each, run in well under
+a second without one. HTML_OPEN says why an open tag's scan stays linear.
 
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
@@ -66,6 +82,8 @@ Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
 """
 
 import bisect
+import html
+import html.entities
 import os
 import re
 import subprocess
@@ -88,43 +106,136 @@ LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|[0-9]+[.)])(?:[ \t]|$)")
 # optional closing sequence backtracked quadratically on a run of spaces.
 ATX_OPEN = re.compile(r"^ {0,3}#{1,6}(?=[ \t]|$)")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-# `<a ... id="x">` (or name=): the attributes before it are read lazily, at
-# most 2048 characters and never past the next `<`, so a line of `<a `
-# openers costs each one the stretch up to the next.
-EXPLICIT = re.compile(r"<a(?=\s)[^<>]{0,2048}?(?<=\s)(?:id|name)=\"([^\"]{1,2048})\"")
+# A line break that is not a blank line, and the whitespace that may sit
+# between the parts of a link or a tag: never a blank line (a paragraph,
+# and an HTML block, ends there), and ASCII only. Python's `\s` also
+# matches U+00A0, U+0085 and U+2028, which CommonMark reads as ordinary
+# characters inside a destination.
+_PARA = r"\n(?![ \t]*\n)"
+_WS = r"(?:[ \t\r\f\v]|" + _PARA + r")"
+# A link destination follows CommonMark, in the body and in a heading alike:
+# no ASCII whitespace; a backslash escapes only ASCII punctuation (`\(` and
+# `\)` included), else it is a literal; balanced parentheses nest; it never
+# starts with `<`, since that opens the other form, `<...>`, which may hold
+# spaces and an escaped `\>`.
+# Nesting stops at 3 levels: GitHub's cmark-gfm allows 32 (inlines.c), but a
+# destination deeper than 3 is far past anything in a tracked doc, and a
+# deeper one is not read as a link here (pinned by a test) instead of a hang
+# risk. Linear time: the alternatives of every starred group start on
+# different characters (a lookahead splits the two backslash forms), so a
+# string splits into units one way only and a failed match gives each
+# position back once.
+_PUNCT = r"[!-/:-@\[-`{-~]"
+_DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\ \t\n\r\f\v]"
+_NEST = r"\((?:" + _DEST_CHAR + r")*\)"
+for _ in range(2):
+    _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
+_DEST_BARE = r"(?!<)(?:" + _DEST_CHAR + "|" + _NEST + r")+"
+_DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
+# Either form is read the way the renderer reads it (md_dest), in one
+# left-to-right pass as CommonMark does: a backslash escape is undone, and
+# an entity or numeric character reference (CommonMark 2.5: always closed by
+# `;`) is decoded, so `a\(b.md` names `a(b.md` and `a&amp;b.md` names
+# `a&b.md`, while `\&amp;` stays the literal text `&amp;`. md_ref decodes
+# the CommonMark way, not html.unescape's: a name must match an HTML5 entity
+# exactly (`&ampx;` stays literal, where HTML's legacy rule reads `&amp`
+# then `x;`), a reference with no `;` is never decoded in Markdown, and a
+# number is its code point, U+FFFD only for 0, a surrogate or past
+# U+10FFFF (HTML maps the C0 and C1 controls instead).
+_ENTITY = r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{0,31});"
+MD_DECODE = re.compile(r"\\(" + _PUNCT + ")|(" + _ENTITY + ")")
+ENTITY = re.compile(_ENTITY)
+
+
+def _span_char(c):
+    """One character of a run that ends at c: never c unescaped (a
+    backslash escapes it, `\\\\` being an escaped backslash) and never a
+    blank line. The alternatives start on different characters (a lookahead
+    splits the two backslash forms), so a run splits one way only."""
+    return r"[^" + c + r"\\\n]|\\[^\n]|\\(?=\n)|" + _PARA
+
+
+# Link text, a label and a title end at their own closer, never at an
+# escaped one, and never cross a blank line.
+_LABEL_CHAR = r"(?:" + _span_char(r"\[\]") + r")"
+# An opening bracket counts only after an even run of backslashes (none
+# included): the run is consumed whole from its start, which a lookbehind
+# pins, so `\\[a](b)` is a link and `\[a](b)` is not. Linear: a run is
+# entered only at its start.
+_OPEN = r"(?<!\\)(?:\\\\)*\["
 # [text](dest "title"): text may wrap across lines (never across a blank
 # line) and may hold one level of nested brackets, which covers an image
-# inside a link (a badge). The destination is bounded and ATOMIC (a
+# inside a link (a badge). The title is double-quoted, single-quoted or
+# parenthesized. The destination is either form above, captured as group 2
+# (`<...>`, without its brackets) or 3 (bare). The bare form is ATOMIC (a
 # lookahead captures it, a backreference consumes it, so it is never
-# backtracked into): unbounded, every `[a](b` on a line of them rescanned
-# the rest of the line. Nothing it could give back would let the match
-# succeed, since a destination never holds what may follow it.
-TEXT = r"((?:[^\[\]\n]|\n(?![ \t]*\n)|\[[^\[\]]*\])*)"
-LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*<?(?=([^)\s>]{1,2048}))\2>?"
-                  r"(?:\s+\"[^\"]{0,2048}\")?\s*\)")
-REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[([^\[\]]*)\]")
-# A definition's label holds no unescaped bracket and at most 999 characters
-# (CommonMark): unbounded, each line opening with `[` scanned the rest of the
-# file for a `]`.
-REFDEF = re.compile(r"^ {0,3}\[([^\[\]]{1,999})\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.M)
-# An `<a` or `<img` tag opener; its attributes are read up to the tag's own
-# `>` (found with str.find, so an unclosed tag costs one scan, not one per
-# opener). HTML_ATTR finds where an href or src value opens, and str.find
-# its closing quote (double or single) inside the tag.
-HTML_TAG = re.compile(r"<(?:a|img)(?=[\s>/])", re.I)
-HTML_ATTR = re.compile(r"\s(?:href|src)\s*=\s*([\"'])", re.I)
+# backtracked into): nothing it could give back would let the match
+# succeed, since a destination never ends where a dest character follows.
+TEXT = r"((?:" + _span_char(r"\[\]") + r"|\[" + _LABEL_CHAR + r"*\])*)"
+_TITLE = (r"(?:\"(?:" + _span_char(r"\"") + r")*\"|'(?:" + _span_char("'") + r")*'"
+          r"|\((?:" + _span_char(r"()") + r")*\))")
+LINK = re.compile(_OPEN + TEXT + r"\]\(" + _WS + r"*(?:" + _DEST_ANGLE
+                  + r"|(?=(" + _DEST_BARE + r"))\3)(?:" + _WS + r"+" + _TITLE + r")?"
+                  + _WS + r"*\)")
+REFLINK = re.compile(r"(?<!\])" + _OPEN + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]")
+# A definition (CommonMark 4.7): a label of at most 999 characters (an
+# escape pair counts as one here, so the bound is loose by at most half;
+# unbounded, each line opening with `[` scanned the rest of the file for a
+# `]`), a colon, the destination on the same line or the next (group 2 a
+# `<...>` one, group 3 a bare one), and an optional title after whitespace,
+# itself on the same line or the next. Only spaces may follow on its last
+# line; a title that fails that leaves the definition ending at the
+# destination, and anything else after the destination is no definition.
+REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*)?(?:"
+                    + _DEST_ANGLE + r"|(?=(" + _DEST_BARE + r"))\3)(?:(?:[ \t]+|[ \t]*\n[ \t]*)"
+                    + _TITLE + r"[ \t]*$|[ \t]*$)", re.M)
+# An `<a>` or `<img>` open tag. In a paragraph CommonMark (6.6) reads raw
+# HTML strictly, but in an HTML block (4.6, under a `<div>`) GitHub's HTML5
+# parser takes what 6.6 refuses, such as an attribute run straight onto a
+# quoted value (`title="x"y`) or a name opening with a digit (`1x`), and
+# renders a live link. The gate takes the lenient reading, since missing a
+# live link is the costly mistake. It keeps two rules both readings share:
+# a `>` inside a quoted value does not end the tag, and no tag crosses a
+# blank line. Anything else is text, so a tag inside it is still found.
+# The reading is lenient only in part, so the one-parse rule below holds:
+# HTML5 also reads `<a/href="t.md">`, `<a =x href="t.md">` and
+# `<a x<y href="t.md">` as live links, and the gate finds no attribute in
+# any of them (known misses).
+# html_attrs walks the attributes of a matched tag with HTML_ATTR.
+# Linear: a name, a bare value and a quoted value start on different
+# characters, and a name follows whitespace or a closing quote only, so a
+# tag parses one way only; a `<` outside a quoted value ends an opener's
+# scan, and an opener inside another's quoted value runs on only through
+# a value of the other quote kind, so scans overlap at most two deep.
+
+
+def _hattr(group):
+    """One attribute after its separator; group is "(" to capture the name
+    and the value (2 double-quoted, 3 single-quoted, 4 bare), "(?:" for
+    the copy inside HTML_OPEN."""
+    value = (r"(?:\"" + group + r"(?:[^\"\n]|" + _PARA + r")*)\"|'" + group
+             + r"(?:[^'\n]|" + _PARA + r")*)'|" + group + r"[^ \t\n\r\f\v\"'=<>`]+))")
+    return (r"(?:" + _WS + r"+|(?<=[\"']))" + group + r"[^ \t\n\r\f\v\"'=<>/]+)(?:"
+            + _WS + r"*=" + _WS + r"*" + value + r")?")
+
+
+HTML_ATTR = re.compile(_hattr("("))
+HTML_OPEN = re.compile(r"<(a|img)((?:" + _hattr("(?:") + r")*)" + _WS + r"*/?>", re.I)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
-# Printable, yet they reorder or hide what a terminal shows: the Arabic
-# letter mark, the zero-width space and joiners, the LRM and RLM marks, the
-# line and paragraph separators, the bidi embeddings and overrides, the bidi
-# isolates, and the zero-width no-break space (BOM).
+# Printable, yet they reorder or hide what a terminal shows: the soft
+# hyphen, the Arabic letter mark, the zero-width space and joiners, the LRM
+# and RLM marks, the line and paragraph separators, the bidi embeddings and
+# overrides, the word joiner and the invisible operators, the bidi isolates,
+# the zero-width no-break space (BOM), and the tag characters.
 BIDI_HIDDEN = frozenset(
-    [chr(0x061C), chr(0xFEFF)]
+    [chr(0x00AD), chr(0x061C), chr(0xFEFF)]
     + [chr(c) for c in range(0x200B, 0x2010)]
     + [chr(c) for c in range(0x2028, 0x202F)]
-    + [chr(c) for c in range(0x2066, 0x206A)])
+    + [chr(c) for c in range(0x2060, 0x2065)]
+    + [chr(c) for c in range(0x2066, 0x206A)]
+    + [chr(c) for c in range(0xE0000, 0xE0080)])
 
 
 class GateError(Exception):
@@ -138,8 +249,8 @@ def tty_safe(s):
     a name holding one would forge a second. A byte that was not UTF-8
     (decoded with surrogateescape) prints as its `\\xHH` as well. Beyond
     that rule, the characters that reorder or hide text without being
-    controls (BIDI_HIDDEN) print as `\\uHHHH`, so a report cannot show one
-    target while naming another."""
+    controls (BIDI_HIDDEN) print as `\\uHHHH` (`\\UHHHHHHHH` past U+FFFF),
+    so a report cannot show one target while naming another."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -148,7 +259,7 @@ def tty_safe(s):
         elif (o < 0x20 and ch != "\t") or 0x7F <= o <= 0x9F:
             out.append("\\x%02x" % o)
         elif ch in BIDI_HIDDEN:
-            out.append("\\u%04x" % o)
+            out.append("\\u%04x" % o if o <= 0xFFFF else "\\U%08x" % o)
         else:
             out.append(ch)
     return "".join(out)
@@ -330,24 +441,12 @@ def atx_text(rest):
     return rest
 
 
-# A link inside a heading, for slugify: it renders as its text. The destination
-# follows CommonMark: no whitespace; a backslash escapes only ASCII punctuation
-# (`\(` and `\)` included), else it is a literal; balanced parentheses nest;
-# or `<...>`, which may hold spaces. A quoted or parenthesized title may follow.
-# Nesting stops at 3 levels: GitHub's cmark-gfm allows 32 (inlines.c), but a
-# heading link deeper than 3 is far past anything in a tracked doc, and a
-# deeper one stays literal text here (pinned by a test) instead of a hang risk.
-# Linear time: the alternatives of the starred group start on different
-# characters (a lookahead splits the two backslash forms), and the optional
-# group holds the whole destination-title-spaces tail, so a run of spaces is
-# retried at most once per part, never once per start position.
-_PUNCT = r"[!-/:-@\[-`{-~]"
-_DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\\s]"
-_NEST = r"\((?:" + _DEST_CHAR + r")*\)"
-for _ in range(2):
-    _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
-_TAIL = (r"\(\s*(?:(?:<[^<>\n]*>|(?:" + _DEST_CHAR + "|" + _NEST + r")+)"
-         r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*)?\)")
+# A link inside a heading, for slugify: it renders as its text, whatever its
+# destination and title (the rules above LINK). The optional group holds
+# the whole destination-title-spaces tail, so a run of spaces is retried at
+# most once per part, never once per start position.
+_TAIL = (r"\(" + _WS + r"*(?:(?:" + _DEST_ANGLE + "|" + _DEST_BARE + r")"
+         r"(?:" + _WS + r"+" + _TITLE + r")?" + _WS + r"*)?\)")
 # An image shares the link's tail, else the `[alt](...)` part of an image with
 # a title would match as a link and leak its alt text; an escaped `!` makes it
 # a plain link.
@@ -371,6 +470,10 @@ def slugify(text):
     text = HEADING_IMAGE.sub("\0", text.strip())
     text = HEADING_LINK.sub(r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
+    # The code span's 2048 bound is the one kept for speed, by measurement:
+    # unbounded, a heading of backtick runs of every length 1..2000 (2 MB)
+    # took 26 s, against 0.3 s bounded, since each unpartnered run scans
+    # the rest of the line. A heading's code span never comes near 2048.
     for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
         rendered.append(_render_inline(text[pos:m.start()]))
         rendered.append(m.group(2))
@@ -404,6 +507,38 @@ class Slugger:
         return result
 
 
+def md_ref(ref):
+    """The text a CommonMark entity or numeric reference (`&...;`) stands for."""
+    if ref[1] == "#":
+        n = int(ref[3:-1], 16) if ref[2] in "xX" else int(ref[2:-1])
+        return chr(0xFFFD) if n == 0 or 0xD800 <= n < 0xE000 or n > 0x10FFFF else chr(n)
+    return html.entities.html5.get(ref[1:], ref)
+
+
+def md_dest(s):
+    return MD_DECODE.sub(lambda m: m.group(1) or md_ref(m.group(2)), s)
+
+
+def html_value(s):
+    """An HTML attribute value as the browser reads it: references decoded
+    by HTML's own rules (html.unescape), not CommonMark's."""
+    return ENTITY.sub(lambda m: html.unescape(m.group()), s)
+
+
+def html_attrs(text):
+    """(tag, name, offset, value) of every attribute given a value in an
+    `<a>` or `<img>` open tag, tag and name lowercased. The attributes tile
+    HTML_OPEN's group 2 with no gap, one parse only, so HTML_ATTR's walk is
+    the parse HTML_OPEN matched."""
+    for m in HTML_OPEN.finditer(text):
+        tag = m.group(1).lower()
+        for a in HTML_ATTR.finditer(text, m.start(2), m.end(2)):
+            for g in (2, 3, 4):
+                if a.group(g) is not None:
+                    yield tag, a.group(1).lower(), a.start(g), a.group(g)
+                    break
+
+
 def ref_label(s):
     return " ".join(s.split()).casefold()
 
@@ -435,9 +570,13 @@ class Tree:
             text = strip_code(read_text(self.root, rel), spans=False)
             lines = text.split("\n")
             slugger, res = Slugger(), set()
+            # An explicit anchor: an `<a>`'s id or name, the set the gate
+            # has always read. Whether GitHub keeps an id on other tags is
+            # unverified, and counting one it drops would hide a broken link.
+            for tag, name, _, value in html_attrs(text):
+                if tag == "a" and name in ("id", "name"):
+                    res.add(html_value(value))
             for i, ln in enumerate(lines):
-                for m in EXPLICIT.finditer(ln):
-                    res.add(m.group(1))
                 heading = None
                 m = ATX_OPEN.match(ln)
                 if m:
@@ -500,47 +639,34 @@ def check_file(tree, rel):
             found.append((line_of(m.start()), m.group(0), err))
     if not is_md:
         return sorted(set(found))
-    targets = []
+    targets = []   # (offset, as written, as resolved)
     pending = [(0, code_free)]
     while pending:
         base, text = pending.pop()
         for m in LINK.finditer(text):
-            targets.append((base + m.start(2), m.group(2)))
+            g = 2 if m.group(2) is not None else 3
+            targets.append((base + m.start(g), m.group(g), md_dest(m.group(g))))
             # An image inside a link (a badge) is a link of its own.
             pending.append((base + m.start(1), m.group(1)))
     labels = set()
     for m in REFDEF.finditer(code_free):
         labels.add(ref_label(m.group(1)))
-        targets.append((m.start(2), m.group(2)))
-    gt = -1
-    for m in HTML_TAG.finditer(code_free):
-        if m.start() < gt:
-            continue   # inside the previous tag, so an attribute, not a tag
-        gt = code_free.find(">", m.end())
-        if gt < 0:
-            break   # no later tag can close either
-        pos = m.end()
-        while True:
-            a = HTML_ATTR.search(code_free, pos, gt)
-            if not a:
-                break
-            close = code_free.find(a.group(1), a.end(), gt)
-            if close < 0:
-                pos = a.end()   # unclosed inside the tag: not a value; look on
-                continue
-            targets.append((a.end(), code_free[a.end():close]))
-            pos = close + 1
+        g = 2 if m.group(2) is not None else 3
+        targets.append((m.start(g), m.group(g), md_dest(m.group(g))))
+    for _, name, off, value in html_attrs(code_free):
+        if name in ("href", "src"):
+            targets.append((off, value, html_value(value)))
     for m in REFLINK.finditer(code_free):
         label = m.group(2) if m.group(2).strip() else m.group(1)
         if ref_label(label) not in labels:
             found.append((line_of(m.start()), "[%s]" % label,
                           "no such reference definition in this file"))
-    for off, t in targets:
+    for off, shown, t in targets:
         if SCHEME.match(t):
             continue   # external, or SELF above; never fetched
         err = resolve(tree, rel, t)
         if err:
-            found.append((line_of(off), t, err))
+            found.append((line_of(off), shown, err))
     return sorted(set(found))
 
 
