@@ -504,12 +504,15 @@ link-convention change.
 It exits 1 on a broken link, printing `FILE:LINE: reason: target`. The target
 is printed through `tty_safe`, which escapes by Unicode category (see
 `ESCAPED_CATEGORIES` in the script): control bytes as `\xHH`, and every
-other format, separator, private-use, surrogate or unassigned character as
-`\uHHHH` (`\UHHHHHHHH` past U+FFFF), so a report cannot show one target
-while naming another. It exits 2 when it cannot run: the root is not a
+character of a format, line or paragraph separator, private-use, surrogate
+or unassigned category as `\uHHHH` (`\UHHHHHHHH` past U+FFFF). Characters
+outside those categories print raw even when they look blank or alike (a
+space separator such as U+00A0, a variation selector), so a name can still
+resemble another. It exits 2 when it cannot run: the root is not a
 checkout's toplevel, git fails or warns, or a file is unreadable, not UTF-8,
 over `MAX_FILE_BYTES` (1 MiB, since the worst-case scan costs seconds per
-MB), or reached through a symlink swapped into the working tree.
+MB), or reached through a symlink swapped into the working tree (or no longer
+a regular file).
 `tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ### What `make commit-identity` checks

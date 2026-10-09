@@ -828,31 +828,50 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
 
-# blank_spans must stay linear with no comment in the text: scanning for the
-# next `<!--` again at every code span (it answers -1 once, not once per run)
-# turns a file of many spans quadratic. Compare growth, not wall time: the
-# same text at 4x the size may cost about 4x, and a quadratic one 16x, so a
-# ratio past 10 on the best of three runs separates them on any runner.
+# blank_spans must stay linear with no comment in the text. Two shapes, each
+# a quadratic hazard of its own: many paired spans (scanning for the next
+# `<!--` again at every span, when it answers -1 once, not once per run), and
+# K runs of distinct lengths with no partner followed by M paired runs (a
+# walk over the later runs to find a partner, instead of the one-pass lookup,
+# costs K x M: 0.4 s against 16 s at K=600, M=120000). Compare growth, not
+# wall time: each shape runs at 1x and 8x, a linear scan costs about 8x to 10x
+# (up to 17x under load), a quadratic one 64x, so a ratio past 23 on the best
+# of five runs, with the collector off, separates them on any runner. The
+# 5 ms floor keeps a very fast 1x run from inflating the ratio.
 python3 -I -B - "$repo_root/tests" <<'PY' || fail "blank_spans must scale linearly with no comment in the text"
-import sys, time
+import gc, sys, time
 sys.path.insert(0, sys.argv[1])
 import linkcheck
 
-def best(n):
-    text = "`a` b " * n
+def best(text):
     lo = None
-    for _ in range(3):
+    gc.disable()
+    for _ in range(5):
         t = time.perf_counter()
         linkcheck.blank_spans(text, True)
         dt = time.perf_counter() - t
         lo = dt if lo is None else min(lo, dt)
+    gc.enable()
     return lo
 
-small, big = best(20000), best(80000)
-if big > 10 * max(small, 0.005):
-    sys.exit("4x the spans cost %.1fx (%.3f s -> %.3f s)" % (big / small, small, big))
+def pairs(n):
+    return "`a` b " * n
+
+def distinct_then_pairs(k, m):
+    return "".join("`" * (j + 2) + " x " for j in range(k)) + pairs(m)
+
+bad = []
+for name, small, big in (
+        ("paired spans", pairs(10000), pairs(80000)),
+        ("distinct runs then pairs", distinct_then_pairs(100, 10000),
+         distinct_then_pairs(800, 80000))):
+    a, b = best(small), best(big)
+    if b > 23 * max(a, 0.005):
+        bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
+if bad:
+    sys.exit("; ".join(bad))
 PY
-ok "blank_spans grows linearly with the number of code spans when no comment is open"
+ok "blank_spans grows linearly with the number of code spans and unpartnered runs when no comment is open"
 
 # A file over MAX_FILE_BYTES is refused, one at the cap is read: the cap is
 # measured in bytes, before decoding, and read from the gate so the test
@@ -873,6 +892,32 @@ run
 [ "$rc" = 2 ] && grep -q 'docs/big\.md: over '"$cap"' bytes' <<<"$out" \
   || fail "a file one byte over MAX_FILE_BYTES must exit 2 (got $rc): $out"
 ok "a file over the size cap exits 2 and one at the cap is read"
+
+# The cap counts bytes, not characters: a file under it in characters and
+# over it in bytes is refused. The name is hostile (ESC, U+202E): the error
+# line must print it escaped.
+new_tree
+python3 -I - "$work/r/docs" "$cap" <<'PY'
+import os, sys
+d, cap = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(d, "wide\x1b\u202e.md"), "w", encoding="utf-8") as f:
+    f.write("\u00e9" * (cap // 2 + 1))
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 2 ] && grep -qF 'wide\x1b\u202e.md: over '"$cap"' bytes' <<<"$out" \
+  || fail "a file over the cap in bytes, not in characters, must exit 2 with its name escaped (got $rc): $out"
+ok "the cap counts bytes, and the over-cap error prints a hostile name escaped"
+
+# A tracked file swapped for a FIFO must fail closed, not wait for a writer.
+new_tree
+rm "$work/r/docs/guide.md"; mkfifo "$work/r/docs/guide.md"
+bounded_run 20 "$work/fifo.out" python3 -I -B "$gate" "$work/r" \
+  || fail "FIFO: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
+  || fail "FIFO: linkcheck blocked on a tracked file swapped for a FIFO"
+[ "$br_rc" = 2 ] || fail "FIFO: expected exit 2, got $br_rc: $(cat "$work/fifo.out")"
+ok "a tracked file swapped for a FIFO exits 2 without blocking"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"

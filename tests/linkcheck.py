@@ -75,8 +75,9 @@ Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
 run (not a git toplevel, git failed or warned, an unreadable or non-UTF-8
 file, one over MAX_FILE_BYTES, a file reached through a symlink swapped into
-the working tree, any unexpected error). Exit 2 is never a pass. Every printed line goes
-through tty_safe, since it echoes names and text from the scanned tree.
+the working tree or no longer a regular file, any unexpected error). Exit 2
+is never a pass. Every printed line goes through tty_safe, since it echoes
+names and text from the scanned tree.
 
 Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
 """
@@ -86,6 +87,7 @@ import html
 import html.entities
 import os
 import re
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -253,9 +255,12 @@ def tty_safe(s):
     printed as `\\xHH`. LF is escaped too, since each report is one line and
     a name holding one would forge a second. A byte that was not UTF-8
     (decoded with surrogateescape) prints as its `\\xHH` as well. Beyond
-    that rule, every other character of ESCAPED_CATEGORIES prints as
-    `\\uHHHH` (`\\UHHHHHHHH` past U+FFFF, so the digits never run
-    together), so a report cannot show one target while naming another.
+    that rule, a character of ESCAPED_CATEGORIES prints as `\\uHHHH`
+    (`\\UHHHHHHHH` past U+FFFF, so the digits never run together): those
+    reorder or hide text, or have no fixed shape. Characters outside those
+    categories print raw even when they look blank or alike (a space
+    separator such as U+00A0, a variation selector, a Hangul filler), so a
+    report is not proof against look-alike names.
     Printable non-ASCII (U+00E9) stays raw."""
     out = []
     for ch in s:
@@ -291,7 +296,14 @@ def read_text(root, rel):
     if os.path.realpath(path) != os.path.join(root, os.path.normpath(rel)):
         raise GateError("%s: reached through a symlink in the working tree" % rel)
     try:
-        with open(path, "rb") as f:
+        # O_NONBLOCK: opening a FIFO swapped in after main's isfile check
+        # would otherwise wait for a writer forever. The symlink case is
+        # already refused above, so O_NOFOLLOW would add nothing.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as f:
+            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+                raise GateError("%s: tracked as a regular file but not one "
+                                "in the working tree" % rel)
             # One byte past the cap, so a file that grew after git listed it
             # is refused too, and an oversized one is never read whole.
             data = f.read(MAX_FILE_BYTES + 1)
