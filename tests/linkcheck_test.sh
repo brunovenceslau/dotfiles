@@ -332,6 +332,48 @@ git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a Unicode anchor, a mailto: link and a tab-indented fence must pass (exit $rc): $out"
 ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
+
+# A heading holding a link renders as the link's text alone, whatever its
+# destination holds: balanced parentheses (a Wikipedia URL) nested up to 3
+# levels, an escaped paren, an angle-bracket form with a space, a quoted or
+# parenthesized title. A destination with a bare space, a backslash before a
+# non-punctuation character, or a 4th nesting level is not matched, so its
+# text stays literal (the depth limit is pinned on purpose). An image adds no
+# text to the rendered heading, so its id starts with the hyphen the space
+# beside it leaves (html-pipeline's TocFilter). `## Odd (text` is a regression
+# guard only: it passed before the fix.
+# External (https) destinations keep the unrelated link pass out of the way.
+# Expected ids follow github-slugger: lowercase, punctuation such as `()`
+# dropped, `_` kept, each space a `-`.
+new_tree
+cat >"$work/r/docs/paren.md" <<'MD'
+## ![i](https://e.com/a_(b)) [Foo](https://e.com/c_(d)) now
+
+## X [Foo](https://e.com/a_((b))) y
+
+## Z [Foo](https://e.com/a_(((b)))) w
+
+## E [Foo](https://e.com/a\(b) v
+
+## A [Foo](<https://e.com/a b> "t") [Bar](https://e.com/c 'ttl') [Baz](https://e.com/d (p)) u
+
+## S [a](b c) t
+
+## B [a](https://e.com/x\ y) t
+
+## D [Foo](https://e.com/a_((((b))))) q
+
+## Odd (text
+
+## ![i](https://e.com/u "t") Foo
+
+[1](#-foo-now) [2](#x-foo-y) [3](#z-foo-w) [4](#e-foo-v) [5](#a-foo-bar-baz-u)
+[6](#s-ab-c-t) [7](#b-ahttpsecomx-y-t) [8](#d-foohttpsecomab-q) [9](#odd-text) [10](#-foo)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a heading link must slug to its text, whatever its destination holds (exit $rc): $out"
+ok "a heading link slugs to its text: nesting to 3 levels, escaped paren, angle form, titles, image; a spaced or 4-deep destination stays literal"
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
@@ -377,6 +419,13 @@ shapes = {
     "h15.md": "# " + "<" * (2 * n),
     "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 2100)),
     "h17.md": "[a][" * (n // 4),
+    # A heading link or image whose destination is unclosed after a run of
+    # spaces and then a character (atx_text strips trailing spaces, so the
+    # spaces must be followed by something): once quadratic, 200 KB outlived 60 s.
+    "h18.md": "# [a](" + " " * n + "x",
+    "h19.md": "# ![a](" + " " * n + "x",
+    "h20.md": "# [a](x " + " " * n + '"',
+    "h21.md": "# [a](" + "(x" * (n // 2),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
