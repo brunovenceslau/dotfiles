@@ -660,6 +660,11 @@ install: doctor: signing key: <cause>
 install: doctor: ~/.gitconfig: a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it
 install: doctor: ~/.gitconfig: ~/.gitconfig sets <keys>, and git reads it after ~/.config/git/config - move its settings into <path> and remove it
 install: doctor: ~/.gitconfig: ~/.gitconfig is not a regular file - remove it
+install: doctor: plugins: <path> is not a regular file, so git cannot read this checkout - remove it or make it a file
+install: doctor: plugins: cannot list the plugin pins of <path> (<error>) - fix what git names, then run doctor again
+install: doctor: plugins: <plugin> is not initialized, so zsh starts without it - run: <path to install.sh> install
+install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory aside, then run: <path to install.sh> install
+install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory and its git directory <path> aside, then run: <path to install.sh> install
 ```
 
 The `git config --file` lines for `user.name` and `user.email` are the ones
@@ -677,13 +682,34 @@ agent's are in
 and the signing key's, with its hint joined after a ` - `, in
 [the signing key is stale](#the-signing-key-is-stale).
 `not reading the git config: <reason>` is the identity step's refusal, and
-doctor stops there; its reasons and fixes are in
+doctor skips the checks that read the git config, as it does for a
+`config.local` that is not a regular file; the other checks still run. Its
+reasons and fixes are in
 [the installer did not set the git identity](#the-installer-did-not-set-the-git-identity).
 
-**Cause.** The identity or signing setup is incomplete, or a tool it needs is
-missing. On a host that opted out of signing, a problem that matters only to
-signing prints as a `note:` line under `--verbose` instead; which ones are
-listed in [`install.sh doctor`](shell-reference.md#installsh-doctor).
+A plugin that is not initialized is the
+[empty plugin submodules](#degraded-shell) case:
+`./install.sh` initializes it at its pin, and `./install.sh link` does not
+touch submodules. A plugin whose commit cannot be read has a `.git` that
+names a gitdir that is gone, or a `HEAD` git cannot use. Moving the
+directory aside lets the installer initialize it again; when its git
+directory still exists, git would reuse it, so the line names that one to
+move aside too, but only one inside the checkout's own `.git/modules`.
+Moved, not removed: either may hold the plugin's own commits. A plugin at
+another commit than its pin is not a problem: the installer leaves a local
+change alone on purpose, and `--verbose` prints a `note:` with the command
+back to the pin. doctor fetches nothing into a partial clone. Its git is
+told not to (`GIT_NO_LAZY_FETCH`), which git honours from 2.45.0, and in the
+older lines from 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 and 2.44.1 on; a
+partial clone missing the trees the pins are in is then a `note:` under
+`--verbose`. With an older git a partial clone is not read at all, and the
+`note:` says so.
+
+**Cause.** The identity or signing setup is incomplete, a tool it needs is
+missing, or a plugin submodule is not in place. On a host that opted out of
+signing, a problem that matters only to signing prints as a `note:` line
+under `--verbose` instead; which ones are listed in
+[`install.sh doctor`](shell-reference.md#installsh-doctor).
 
 **Fix.** Apply the fix the line names, then run `./install.sh doctor` again
 until it prints nothing. The recipes behind most fixes are in

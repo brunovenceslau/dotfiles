@@ -48,13 +48,21 @@ There is no separate specification. The code and its comments are the spec.
 
 ## Ask the user first
 
-- Any change to the security model. Not an exhaustive list: SHA-pinned plugin
-  submodules and their static loader, the SSH signing setup, `fsckObjects`
-  forced on every fetch (the detached update sentinel included), the ambient
-  git-config scrubbing on the upgrade path (`vgit` in `install.sh`), and the
-  neutralized fast-syntax-highlighting runtime download.
-- Adding a submodule or any binary dependency.
-- Changing a link convention.
+The code span before an item is its surface id. A PR body asks for that
+surface's approval with one unticked line per surface the diff touches, in its
+approval checklist: `> - [ ] Approval: <surface id> - <what is asked>`. An
+agent never ticks it. A box under the PR template's "Ask-first surfaces" says
+the diff touches a surface; a ticked approval line says its approval is
+granted. The item without an id changes no path, so it is confirmed in the
+session instead.
+
+- `security-model`: any change to the security model. Not an exhaustive list:
+  SHA-pinned plugin submodules and their static loader, the SSH signing setup,
+  `fsckObjects` forced on every fetch (the detached update sentinel included),
+  the ambient git-config scrubbing on the upgrade path (`vgit` in
+  `install.sh`), and the neutralized fast-syntax-highlighting runtime download.
+- `dependency`: adding a submodule or any binary dependency.
+- `link-convention`: changing a link convention.
 - Running a remote interactive installer, such as the Homebrew bootstrap.
 
 ## Never

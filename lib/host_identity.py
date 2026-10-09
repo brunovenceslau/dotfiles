@@ -25,7 +25,9 @@
 #             a stale key or a shadowing signingkey; silent on signing for a
 #             host that opted out
 #   doctor    `install.sh doctor [--verbose]`: read only; print each problem
-#             in one line (every check with --verbose), exit 1 on a problem
+#             in one line (every check with --verbose), exit 1 on a problem;
+#             besides the identity and signing path it checks the plugin
+#             submodules of the checkout that holds --installer
 # `-I` keeps the current directory and PYTHON* variables out of sys.path, so a
 # planted module beside the cwd cannot run. It is never linked onto PATH: lib/
 # is not a tree the link engine walks. The behaviour (lookup order, matching
@@ -80,6 +82,7 @@ import os
 import platform
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -528,6 +531,9 @@ def entry_verifies(entry, principal, now):
     return ok and match_pattern_list(principal, entry.principals)
 
 
+# Combining marks: each draws on the character before it, never on its own.
+_MARKS = frozenset(["Mn", "Me"])
+
 # Unicode categories never allowed in a value that lands in a git ident line:
 # controls, invisible format characters, line and paragraph separators, and
 # the surrogates that stand for bytes that were not UTF-8.
@@ -538,10 +544,85 @@ def _clean(s):
     return not any(unicodedata.category(c) in _BAD_CATEGORIES for c in s)
 
 
-def _shown(text):
-    """TEXT as it can be printed: repr() when it holds a control or invisible
-    character, so a config value cannot rewrite the terminal."""
-    return text if _clean(text) else repr(text)
+def escape(s):
+    """One printable line: a backslash doubles, and a character that is not
+    printable (a control, LF, CR, a bidi or zero-width format character, a
+    byte that was not UTF-8) or that a terminal shows as nothing (the
+    _INVISIBLE code points, which Python counts as printable) prints as its
+    escape, so a value cannot forge a second line, rewrite the terminal or
+    hide part of the message. The same rule as
+    .githooks/commit_identity.py's escape(), kept beside it rather than
+    imported: each file runs alone (tests/host_identity_units.py holds the
+    two to the same output)."""
+    out = []
+    for ch in s:
+        o = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif 0xDC80 <= o <= 0xDCFF:
+            out.append("\\x%02x" % (o - 0xDC00))
+        elif ch.isprintable() and not _invisible(ch):
+            out.append(ch)
+        elif o <= 0xFF:
+            out.append("\\x%02x" % o)
+        elif o <= 0xFFFF:
+            out.append("\\u%04x" % o)
+        else:
+            out.append("\\U%08x" % o)
+    return "".join(out)
+
+
+def quoted(s):
+    """S escaped and in single quotes, a quote inside it spelled \\x27, so
+    the value cannot close its quotes and read as message text. The
+    backslash escape() doubles keeps \\x27 from being read back as one."""
+    return "'%s'" % escape(s).replace("'", "\\x27")
+
+
+def _shown(value):
+    """VALUE (a config value, an origin, a path, a tool's message) as a
+    message prints it: bare when escape() leaves it as it is and it is not
+    empty, does not start or end with a space and holds no run of two
+    spaces (combining marks left out of both tests), else quoted(). An
+    empty or edge-spaced value would print as nothing or blur into the
+    words around it, and a run of spaces could push the words after it to
+    the start of a soft-wrapped row, where they look like a line of their
+    own. That is all the quotes promise: a value cannot add a line break,
+    rewrite the terminal or hide characters, and a long value of single
+    spaces stays bare and can still wrap like any long text. Applied to each
+    interpolated value at its call site, never to a whole line: the line's
+    literal text is what docs/troubleshooting.md quotes, and it must print as
+    written.
+
+    Unlike .githooks/commit_identity.py, which quotes every value, a plain
+    value stays bare here: docs/troubleshooting.md, docs/signing-key.md and
+    tests/host_identity_test.sh hold the bare shapes of these lines, and the
+    property this guards is that no value can act on the terminal or pass
+    for message text, which the quotes of an unusual value already give.
+    tests/host_identity_units.py checks statically that every value put into
+    a string goes through an escaper."""
+    value = str(value)
+    # A combining mark (Mn, Me) after a space draws nothing of its own, so a
+    # space-mark run would hide a run of spaces: the space tests read the
+    # value without its marks.
+    spaced = "".join(c for c in value if unicodedata.category(c) not in _MARKS)
+    if spaced and spaced == spaced.strip() and "  " not in spaced and escape(value) == value:
+        return value
+    return quoted(value)
+
+
+def shell_word(path):
+    """PATH as one word of a command a message tells the operator to run
+    (the installer, config.local), quoted by shlex.quote() so a space, a `$`
+    or a backslash in it stays one literal word and the command runs as
+    printed; a plain path stays bare, so the quoted messages keep their
+    shape. A path holding a character escape() spells out (a control, a
+    bidi mark, a byte that is not UTF-8) is quoted in its escaped spelling
+    instead: it can never reach the terminal raw, and the command then
+    names that spelling, a path no shell turns back into the real one."""
+    if escape(path) == path.replace("\\", "\\\\"):
+        return shlex.quote(path)
+    return shlex.quote(escape(path))
 
 
 def usable_principal(p):
@@ -590,12 +671,12 @@ _SHELL_ACTIVE = '"\\$`!'
 # _BAD_CATEGORIES lets through (they are letters, marks or symbols, not
 # format characters): the Hangul fillers, the combining grapheme joiner,
 # the Khmer and Mongolian invisible vowels and selectors, the variation
-# selectors, the braille blank, the Egyptian hieroglyph blanks and the
-# Khitan small script filler. A suggested name holding one would look like
-# a different name than the one written.
+# selectors, the braille blank, the Egyptian hieroglyph blanks, the Khitan
+# small script filler and the musical null notehead. A suggested name
+# holding one would look like a different name than the one written.
 _INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
               (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
-              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0x1D159, 0x1D159), (0xE0100, 0xE01EF))
 # Unassigned (Cn) and private-use (Co) code points have no agreed glyph, so
 # a suggestion holding one may render as another name. Only the suggestion
 # refuses them: valid_name(), which decides what is written, does not, and
@@ -608,20 +689,33 @@ def _invisible(c):
     return any(lo <= o <= hi for lo, hi in _INVISIBLE)
 
 
+# The longest full name the missing-name line suggests: a longer one would
+# wrap that line on a common terminal, and a name that long is more likely
+# a GECOS field holding something else than the operator's name.
+SUGGESTED_NAME_MAX = 100
+
+
 def suggested_name(name):
     """The value the missing-name line puts after --name: NAME when
     install.sh identity would accept it, a shell passes it through double
     quotes unchanged, and it reads on screen as what it is (a letter or a
     digit, no space but U+0020, no invisible, unassigned or private-use
-    code point), else the placeholder. Through _shown() as well, so a control character could
-    never reach the terminal even if valid_name() were loosened."""
-    if (name and valid_name(name)
+    code point, at most SUGGESTED_NAME_MAX characters), and it prints bare
+    through _shown(), else the placeholder.
+    That last test keeps the double quotes of the suggested command around
+    the name alone: a name _shown() quotes (a space at an edge, a run of
+    two) would be pasted with its single quotes as part of it.
+    missing_name_line() puts it in through _shown() as well, so a control
+    character could never reach the terminal even if valid_name() were
+    loosened."""
+    if (name and len(name) <= SUGGESTED_NAME_MAX and valid_name(name)
             and not any(c in _SHELL_ACTIVE for c in name)
             and any(c.isalnum() for c in name)
             and not any(c.isspace() and c != " " for c in name)
             and not any(_invisible(c) for c in name)
-            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)):
-        return _shown(name)
+            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)
+            and _shown(name) == name):
+        return name
     return "Full Name"
 
 
@@ -639,20 +733,22 @@ def missing_name_line(host):
     is the operator's to choose, so the account's full name is a
     suggestion."""
     return 'identity: user.name is not set - run: %s identity --name "%s"' % (
-        host.installer, suggested_name(account_name()))
+        shell_word(host.installer), _shown(suggested_name(account_name())))
 
 
 # --- reading files and running tools -----------------------------------------
 
 
-def read_small_file(path):
+def read_small_file(path, nofollow=False):
     """(bytes, None) or (None, reason) for a regular file of at most MAX_FILE.
 
     Opened non-blocking and checked with fstat, so a FIFO or a device named
-    in the config never hangs or feeds the step.
+    in the config never hangs or feeds the step. NOFOLLOW refuses a final
+    symlink too (O_NOFOLLOW), for a file whose place is all that names it.
     """
+    flags = os.O_RDONLY | os.O_NONBLOCK | (os.O_NOFOLLOW if nofollow else 0)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        fd = os.open(path, flags)
     except OSError as e:
         return None, e.strerror
     try:
@@ -767,7 +863,7 @@ def _getcwd_in(path):
         try:
             back_path = os.getcwd()
         except OSError:
-            raise Refusal("cannot open the current directory to return to it (%s)" % e)
+            raise Refusal("cannot open the current directory to return to it (%s)" % _shown(e))
     try:
         os.chdir(path)
         return os.getcwd()
@@ -780,7 +876,7 @@ def _getcwd_in(path):
         except OSError as e:
             # This process stays in the empty directory, which
             # git_release() then removes: its working directory may be gone.
-            raise Refusal("cannot return to the current directory (%s)" % e)
+            raise Refusal("cannot return to the current directory (%s)" % _shown(e))
         finally:
             if back is not None:
                 os.close(back)
@@ -789,30 +885,32 @@ def _getcwd_in(path):
 def _isolate(place):
     """None once git is proven to run outside any repository from PLACE,
     else the reason it cannot."""
-    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
-        value = os.environ.get(name)
+    for env_name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        value = os.environ.get(env_name)
         if value and not os.path.isabs(value):
-            return "%s=%s is not an absolute path, so git would look for it where git runs" % (name, value)
+            return "%s=%s is not an absolute path, so git would look for it where git runs" % (env_name, _shown(value))
     try:
-        place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+        with _Held():
+            place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+            _left.add(place.made)
         cwd = _getcwd_in(place.made)
-    except Refusal as e:
-        return str(e)
+    except Refusal as refusal:
+        return str(refusal)
     except OSError as e:
-        return "cannot make an empty directory for git and enter it: %s" % e
+        return "cannot make an empty directory for git and enter it: %s" % _shown(e)
     ceiling = os.path.dirname(cwd)
     # ':' separates ceilings: a path holding one would be half-applied.
     if os.pathsep in ceiling:
-        return "%s holds %r, which GIT_CEILING_DIRECTORIES cannot express" % (ceiling, os.pathsep)
+        return "%s holds %r, which GIT_CEILING_DIRECTORIES cannot express" % (_shown(ceiling), os.pathsep)
     # Anyone who can rename entries here could swap the empty directory for
     # one inside a repository. Only the plain case is refused; the rest is a
     # deferred decision (docs/architecture.md, "Deferred decisions").
     try:
         st = os.stat(ceiling)
     except OSError as e:
-        return "cannot stat %s: %s" % (ceiling, e.strerror)
+        return "cannot stat %s: %s" % (_shown(ceiling), e.strerror)
     if st.st_mode & stat.S_IWOTH and not st.st_mode & stat.S_ISVTX:
-        return "%s is writable by every user and not sticky" % ceiling
+        return "%s is writable by every user and not sticky" % _shown(ceiling)
     # The proof, not the premise: git itself must find no repository from
     # there. In the C locale, so its first line can be matched exactly; any
     # other failure (a config file git cannot parse, a repository it refuses
@@ -822,9 +920,9 @@ def _isolate(place):
     env.pop("LANGUAGE", None)
     rc, out, err = _run_git(["rev-parse", "--git-dir"], cwd, env)
     if rc == 0:
-        return "git finds a repository (%s) from the empty directory %s" % (out, cwd)
+        return "git finds a repository (%s) from the empty directory %s" % (_shown(out), _shown(cwd))
     if not err.startswith("fatal: not a git repository"):
-        return "git cannot start (%s)" % (err or "exit %d" % rc)
+        return "git cannot start (%s)" % (_shown(err) if err else "exit %d" % rc)
     place.cwd = cwd
     return None
 
@@ -862,9 +960,12 @@ def git_release():
     """Remove the empty directory and forget the decision. Explicit, not a
     finalizer's: the directory is gone when this returns."""
     global _git_place
-    if _git_place is not None and _git_place.made is not None:
-        shutil.rmtree(_git_place.made, ignore_errors=True)
-    _git_place = None
+    # Held: a signal that lands mid-removal waits for it to finish.
+    with _Held():
+        if _git_place is not None and _git_place.made is not None:
+            shutil.rmtree(_git_place.made, ignore_errors=True)
+            _left.discard(_git_place.made)
+        _git_place = None
 
 
 def git(args):
@@ -874,6 +975,42 @@ def git(args):
     if reason is not None:
         return 127, "", reason
     return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
+
+
+def repo_git(checkout, args):
+    """Run git on the repository of the framework checkout CHECKOUT, the
+    second and only other way this file runs git; return what _run_git()
+    returns.
+
+    git() runs outside every repository and reads the user's global and
+    system config, since that config IS what the identity checks judge. This
+    one is the opposite: it reads the checkout's own repository (doctor's
+    plugin pins), with the global and system config scrubbed, as install.sh's
+    vgit scrubs them, so no user or machine config can steer what it reads,
+    and a config.local that blocks (a FIFO) or a git that cannot be kept out
+    of a repository leaves it working. The repository-local environment, the
+    GIT_CONFIG_* injections and the traces go as in git_env(); GIT_DIR is
+    then set to CHECKOUT/.git, so git discovers nothing: a checkout that is
+    not a repository is said to be one, and a repository around it (a $HOME
+    that is one) is never read in its place, whatever its path holds (a ':'
+    no ceiling could express, an APFS spelling). GIT_NO_LAZY_FETCH keeps a
+    partial clone from fetching a missing object from its promisor remote,
+    where git honours it (lazy_fetch_off()); on a git that does not, doctor
+    reads no object in a partial clone. The checkout's own
+    .git/config still applies: whoever can write it owns the working tree,
+    the same scope as vgit. Only config and object reads go through here
+    (config, ls-tree), never a command that runs a filter, a hook or an
+    fsmonitor."""
+    env = git_env(os.path.dirname(checkout))
+    del env["GIT_CEILING_DIRECTORIES"]  # no discovery: GIT_DIR is explicit
+    env["GIT_DIR"] = os.path.join(checkout, ".git")
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_NO_LAZY_FETCH"] = "1"
+    env["LC_ALL"] = "C"
+    env.pop("LANGUAGE", None)
+    return _run_git(args, checkout, env)
 
 
 class Value(object):
@@ -972,7 +1109,7 @@ def load_revocation(path):
     """
     data, why = read_small_file(path)
     if data is None:
-        return None, "identity: cannot read gpg.ssh.revocationFile %s: %s - writing nothing" % (path, why)
+        return None, "identity: cannot read gpg.ssh.revocationFile %s: %s - writing nothing" % (_shown(path), why)
     if data.startswith(KRL_MAGIC):
         return None, None
     keys = set()
@@ -984,23 +1121,73 @@ def load_revocation(path):
             # ssh-keygen reads such a line only up to the NUL; what it then
             # revokes is not this step's to guess (see the header).
             return None, ("identity: gpg.ssh.revocationFile %s line %d holds a NUL byte - writing nothing"
-                          % (path, n))
+                          % (_shown(path), n))
         key, _ = _read_key(stripped + "\n", 0)
         if key is None:
             return None, ("identity: gpg.ssh.revocationFile %s line %d is not a public key - writing nothing"
-                          % (path, n))
+                          % (_shown(path), n))
         keys.add(key)
     return frozenset(keys), None
 
 
+# The signals entry() unwinds on, running every finally on the way out.
+UNWINDING = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+# Every temporary file or directory made and not yet removed, added in the
+# same _Held block that makes it and dropped in the one that removes it.
+# A signal can still land after a normal way out enters a finally and
+# before that finally's _Held blocks it; the unwind then skips the removal,
+# and entry() removes what is left here instead (_remove_left()).
+_left = set()
+
+
+class _Held(object):
+    """A block during which the UNWINDING signals wait: one that arrives is
+    delivered when the block ends. Wraps the creation of a temporary file or
+    directory AND the assignments that record it (in its own variable and in
+    _left), inside the try whose finally removes it, so no signal can unwind
+    between the two and leave one nobody removes; and wraps that finally's
+    removal, so a signal that lands while it runs on a normal way out cannot
+    cut it short."""
+
+    def __enter__(self):
+        self.old = signal.pthread_sigmask(signal.SIG_BLOCK, UNWINDING)
+
+    def __exit__(self, *exc):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
+        return False
+
+
+def _remove_left():
+    """Remove every temporary file or directory still in _left: entry()'s
+    last cleanup on a signal, for one whose own cleanup the signal skipped.
+    Best effort, the signals held: the process dies of the signal next."""
+    with _Held():
+        for path in sorted(_left):
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        _left.clear()
+
+
 def krl_revokes(path, key):
     """`ssh-keygen -Q` against a KRL: True revoked, False not, None unknown
-    (an unwritable TMPDIR included: that is a refusal, never a traceback)."""
+    (an unwritable TMPDIR included: that is a refusal, never a traceback).
+    The key goes to ssh-keygen in a temporary file, removed by the finally
+    below on every way out: a return, an error, ^C, and a SIGTERM or SIGHUP
+    (entry() turns those into an exception, Terminated)."""
     pub = None
     try:
-        fd, pub = tempfile.mkstemp(prefix="host_identity.", suffix=".pub")
+        with _Held():
+            fd, pub = tempfile.mkstemp(prefix="host_identity.", suffix=".pub")
+            _left.add(pub)
         with os.fdopen(fd, "w") as fh:
-            fh.write("%s %s\n" % key)
+            fh.write(" ".join(key) + "\n")
         p = subprocess.run(
             ["ssh-keygen", "-Q", "-f", path, pub],
             stdin=subprocess.DEVNULL,
@@ -1011,11 +1198,14 @@ def krl_revokes(path, key):
     except (OSError, subprocess.TimeoutExpired):
         return None
     finally:
-        if pub is not None:
-            try:
-                os.unlink(pub)
-            except OSError:
-                pass
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if pub is not None:
+                _left.discard(pub)
+                try:
+                    os.unlink(pub)
+                except OSError:
+                    pass
     return {0: False, 1: True}.get(p.returncode)
 
 
@@ -1109,7 +1299,7 @@ class Host(object):
         if v.set and v.text:
             return os.path.join(self.home, os.path.expanduser(v.text)), "gpg.ssh.allowedSignersFile", None
         if v.error:
-            return None, None, "identity: could not read gpg.ssh.allowedSignersFile (%s) - writing nothing" % v.err
+            return None, None, "identity: could not read gpg.ssh.allowedSignersFile (%s) - writing nothing" % _shown(v.err)
         xdg = os.environ.get("XDG_CONFIG_HOME", "")
         if not xdg or not os.path.isabs(xdg):
             xdg = os.path.join(self.home, ".config")
@@ -1119,34 +1309,35 @@ class Host(object):
         return None, None, None
 
     def signers(self):
-        """(path, source, entries) or (None, None, message-lines) once."""
+        """(path, source, entries, None) or (None, None, None, message-lines),
+        once."""
         if self._signers is None:
             self._signers = self._read_signers()
         return self._signers
 
     def _read_signers(self):
-        path, source, err = self.locate_signers()
+        path, source, said = self.locate_signers()
         if path is None:
-            if err:
-                return None, None, [err]
-            return None, None, [
+            if said:
+                return None, None, None, [said]
+            return None, None, None, [
                 "identity: no allowed-signers file found - writing nothing",
                 "identity:   set CANGA_HOST_ALLOWED_SIGNERS or gpg.ssh.allowedSignersFile, or",
                 "identity:   create ~/.config/git/allowed_signers (one `<email> <keytype> <key>` per line)",
             ]
         data, why = read_small_file(path)
         if data is None:
-            return None, None, [
+            return None, None, None, [
                 "identity: cannot read the allowed-signers file %s (from %s): %s - writing nothing"
-                % (path, source, why)
+                % (_shown(path), source, why)
             ]
         entries, bad = parse_allowed_signers(data)
-        lines = decode_lines(data)
-        self._bad_keys = [(n, keys_named(lines[n - 1])) for n in bad]
+        rows = decode_lines(data)
+        self._bad_keys = [(n, keys_named(rows[n - 1])) for n in bad]
         if bad:
             note("identity: skipped malformed allowed-signers line(s) %s in %s"
-                 % (", ".join(str(n) for n in bad), path))
-        return path, source, entries
+                 % (", ".join("%d" % n for n in bad), _shown(path)))
+        return path, source, entries, None
 
     def malformed_lines(self):
         """The line numbers of the allowed-signers file this step skipped as
@@ -1174,13 +1365,13 @@ class Host(object):
     def _read_revocation(self):
         v = self.effective("gpg.ssh.revocationFile", typ="path")
         if v.error:
-            return None, "identity: could not read gpg.ssh.revocationFile (%s) - writing nothing" % v.err
+            return None, "identity: could not read gpg.ssh.revocationFile (%s) - writing nothing" % _shown(v.err)
         if not v.set or not v.text:
             self._revoked_plain = frozenset()
             return None, None
         path = os.path.join(self.home, os.path.expanduser(v.text))
-        self._revoked_plain, err = load_revocation(path)
-        return path, err
+        self._revoked_plain, why = load_revocation(path)
+        return path, why
 
     def is_revoked(self, key):
         """True, False, or None when the revocation file cannot answer."""
@@ -1253,12 +1444,12 @@ class Host(object):
             return None
         # Whole literals: docs/troubleshooting.md quotes them verbatim.
         rev_path, _ = self.revocation()
-        where = "in " + path if email is None else "for %s in %s" % (email, path)
+        why = "in " + _shown(path) if email is None else "for %s in %s" % (_shown(email), _shown(path))
         if None in states:
-            msg = "identity: ssh-keygen -Q could not check the ssh-agent key(s) listed %s against gpg.ssh.revocationFile %s - writing nothing"
-            return msg % (where, rev_path)
-        msg = "identity: every ssh-agent key listed %s is revoked by gpg.ssh.revocationFile %s - writing nothing"
-        return msg % (where, rev_path)
+            form = "identity: ssh-keygen -Q could not check the ssh-agent key(s) listed %s against gpg.ssh.revocationFile %s - writing nothing"
+            return form % (why, _shown(rev_path))
+        form = "identity: every ssh-agent key listed %s is revoked by gpg.ssh.revocationFile %s - writing nothing"
+        return form % (why, _shown(rev_path))
 
     def why_invalid(self, entries, key, email):
         """Why KEY does not verify for EMAIL, or None when it does."""
@@ -1275,7 +1466,7 @@ class Host(object):
             if ok:
                 return None
             reasons.append("line %d: %s" % (e.lineno, why))
-        return "; ".join(reasons) or "not listed for " + email
+        return "; ".join(reasons) or "not listed for " + _shown(email)
 
 
 # --- writing config.local ---------------------------------------------------
@@ -1287,22 +1478,71 @@ def _copy_fd(src_fd, dst_path):
         shutil.copyfileobj(src, out)
 
 
+def _copy_new(src_path, dst_path, mode):
+    """Copy SRC_PATH to DST_PATH, a name that must not exist yet: backup_once's
+    fallback where hard links are not supported. The stdlib has no rename
+    that refuses an existing name, so the copy goes straight into DST_PATH,
+    made with O_CREAT|O_EXCL: the name is then this run's own, and a copy
+    that fails (a full disk, a signal) removes it, recorded in _left like a
+    temp file meanwhile, rather than leave a partial file the next run would
+    keep as the pristine .bak. Removing it never touches a file someone else
+    made: an existing name fails the create, before anything is recorded."""
+    done = False
+    out = None
+    try:
+        with _Held():
+            out = os.open(dst_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            _left.add(dst_path)
+        # The create's mode passes through the umask; the hard-link path
+        # keeps the source mode exactly, so this one does too.
+        os.fchmod(out, mode)
+        with os.fdopen(os.dup(out), "wb") as dst, open(src_path, "rb") as src:
+            shutil.copyfileobj(src, dst)
+        # Closed here, not in the finally: a deferred write error (EIO, a
+        # full NFS quota) surfaces on close and must fail the copy. Dropped
+        # before the close, so a failed close is never closed again.
+        fd, out = out, None
+        os.close(fd)
+        done = True
+    finally:
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        # Best effort, each step on its own: a deferred EIO on close still
+        # lets the unlink run, and neither hides the error that got here.
+        with _Held():
+            if out is not None:
+                try:
+                    os.close(out)
+                except OSError:
+                    pass
+            if dst_path in _left:
+                _left.discard(dst_path)
+                if not done:
+                    try:
+                        os.unlink(dst_path)
+                    except OSError:
+                        pass
+
+
 def backup_once(path, src_fd, mode):
     """Copy the open config.local (SRC_FD) to PATH.bak unless a .bak exists.
 
     The first .bak is the pristine pre-framework copy and the one worth
     keeping (lib/link.sh, _link_backup), so an existing one is never
     replaced. A hard link of a finished temp file publishes it atomically
-    and refuses an existing name; where hard links are not supported, an
-    O_CREAT|O_EXCL create keeps the same no-clobber.
+    and refuses an existing name; where hard links are not supported,
+    _copy_new() keeps the same no-clobber and removes a .bak it could not
+    finish.
     """
     bak = path + ".bak"
     if os.path.lexists(bak):
-        log("identity: keeping the existing backup %s" % bak)
+        log("identity: keeping the existing backup %s" % _shown(bak))
         return
-    fd, tmp = tempfile.mkstemp(prefix=".config.local.bak.", dir=os.path.dirname(path))
-    os.close(fd)
+    tmp = None
     try:
+        with _Held():
+            fd, tmp = tempfile.mkstemp(prefix=".config.local.bak.", dir=os.path.dirname(path))
+            _left.add(tmp)
+        os.close(fd)
         _copy_fd(src_fd, tmp)
         os.chmod(tmp, mode)
         try:
@@ -1310,12 +1550,14 @@ def backup_once(path, src_fd, mode):
         except OSError as e:
             if e.errno == errno.EEXIST:
                 raise
-            out = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            with os.fdopen(out, "wb") as dst, open(tmp, "rb") as src:
-                shutil.copyfileobj(src, dst)
+            _copy_new(tmp, bak, mode)
     finally:
-        os.unlink(tmp)
-    log("identity: backed up %s -> %s" % (path, bak))
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if tmp is not None:
+                _left.discard(tmp)
+                os.unlink(tmp)
+    log("identity: backed up %s -> %s" % (_shown(path), _shown(bak)))
 
 
 def write_keys(path, items):
@@ -1330,49 +1572,61 @@ def write_keys(path, items):
     """
     d = os.path.dirname(path)
     src = None
+    tmp = None
+    # One finally for the whole write: the descriptor and the staged file
+    # are released on every way out, a refusal and a signal included.
     try:
         try:
             src = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError as e:
             if e.errno == errno.ELOOP:
-                warn("identity: refusing to write through the symlink %s - add the keys by hand" % path)
+                warn("identity: refusing to write through the symlink %s - add the keys by hand" % _shown(path))
                 return False
             if e.errno != errno.ENOENT:
-                warn("identity: cannot open %s: %s" % (path, e.strerror))
+                warn("identity: cannot open %s: %s" % (_shown(path), e.strerror))
                 return False
-        if src is not None and not stat.S_ISREG(os.fstat(src).st_mode):
-            warn("identity: %s is not a regular file - writing nothing" % path)
+        try:
+            if src is not None and not stat.S_ISREG(os.fstat(src).st_mode):
+                warn("identity: %s is not a regular file - writing nothing" % _shown(path))
+                return False
+            os.makedirs(d, exist_ok=True)
+            with _Held():
+                fd, tmp = tempfile.mkstemp(prefix=".config.local.", dir=d)
+                _left.add(tmp)
+            os.close(fd)
+        except OSError as e:
+            warn("identity: cannot stage a write next to %s: %s" % (_shown(path), e.strerror))
             return False
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".config.local.", dir=d)
-        os.close(fd)
-    except OSError as e:
-        warn("identity: cannot stage a write next to %s: %s" % (path, e.strerror))
-        if src is not None:
-            os.close(src)
-        return False
-    try:
-        if src is not None:
-            mode = stat.S_IMODE(os.fstat(src).st_mode)
-            _copy_fd(src, tmp)
-            os.chmod(tmp, mode)
-        for key, value in items:
-            rc, _, err = git(["config", "--file", tmp, key, value])
-            if rc != 0:
-                warn("identity: git config could not set %s: %s" % (key, err))
-                return False
-        if src is not None:
-            backup_once(path, src, mode)
-        os.replace(tmp, path)
-        tmp = None
-    except OSError as e:
-        warn("identity: cannot write %s: %s" % (path, e.strerror))
-        return False
+        try:
+            if src is not None:
+                mode = stat.S_IMODE(os.fstat(src).st_mode)
+                _copy_fd(src, tmp)
+                os.chmod(tmp, mode)
+            for key, value in items:
+                rc, _, err = git(["config", "--file", tmp, key, value])
+                if rc != 0:
+                    warn("identity: git config could not set %s: %s" % (_shown(key), _shown(err)))
+                    return False
+            if src is not None:
+                backup_once(path, src, mode)
+            # Held: the rename and dropping the record are one step, so the
+            # last cleanup never looks for a name the rename took away.
+            with _Held():
+                os.replace(tmp, path)
+                _left.discard(tmp)
+                tmp = None
+        except OSError as e:
+            warn("identity: cannot write %s: %s" % (_shown(path), e.strerror))
+            return False
     finally:
-        if src is not None:
-            os.close(src)
-        if tmp is not None and os.path.lexists(tmp):
-            os.unlink(tmp)
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if src is not None:
+                os.close(src)
+            if tmp is not None:
+                _left.discard(tmp)
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
     return True
 
 
@@ -1380,7 +1634,7 @@ def write_keys(path, items):
 
 
 def hint_rerun(host):
-    warn("identity:   then run: %s identity [--name \"Full Name\"]" % host.installer)
+    warn("identity:   then run: %s identity [--name \"Full Name\"]" % shell_word(host.installer))
 
 
 def require_ssh_format(host):
@@ -1391,10 +1645,10 @@ def require_ssh_format(host):
     if v.set and v.text == "ssh":
         return True
     if v.error:
-        warn("identity: cannot read gpg.format (%s) - writing nothing" % v.err)
+        warn("identity: cannot read gpg.format (%s) - writing nothing" % _shown(v.err))
         return False
     warn("identity: gpg.format is %s, not ssh - writing nothing"
-         % (repr(v.text) if v.set else "unset"))
+         % (quoted(v.text) if v.set else "unset"))
     warn("identity:   see \"Framework git settings do not apply\" in docs/troubleshooting.md")
     return False
 
@@ -1404,16 +1658,16 @@ def refuse_unclear(host, keys, path):
     unclear = host.unclear_lines(keys)
     if not unclear:
         return False
-    nums = ", ".join(str(n) for n in unclear)
-    warn("identity: malformed allowed-signers line(s) %s in %s name an ssh-agent key - writing nothing" % (nums, path))
+    nums = ", ".join("%d" % n for n in unclear)
+    warn("identity: malformed allowed-signers line(s) %s in %s name an ssh-agent key - writing nothing" % (nums, _shown(path)))
     warn("identity:   ssh-keygen may read such a line differently; fix or remove it, then re-run")
     return True
 
 
 def require_revocation(host):
-    path, err = host.revocation()
-    if err:
-        warn(err)
+    path, said = host.revocation()
+    if said:
+        warn(said)
         return False
     return True
 
@@ -1430,20 +1684,20 @@ def select(host, pairs, email):
     if email:
         pairs = set(pk for pk in pairs if pk[0] == email)
         if not pairs:
-            lines = ["identity: no ssh-agent key is listed for user.email %s - writing nothing" % email]
-            lines += ["identity:   listed for this agent instead: " + p for p in principals]
+            lines = ["identity: no ssh-agent key is listed for user.email %s - writing nothing" % _shown(email)]
+            lines += ["identity:   listed for this agent instead: " + _shown(p) for p in principals]
             return None, lines
     elif len(principals) > 1:
         lines = ["identity: more than one identity matches the ssh-agent keys - writing nothing"]
         for p, k in sorted(pairs):
-            lines.append("identity:   %s %s" % (p, fingerprint(k)))
+            lines.append("identity:   %s %s" % (_shown(p), fingerprint(k)))
         lines.append("identity:   set the one this host commits as first, then re-run:")
-        lines.append("identity:   git config --file %s user.email <email>" % host.config_local)
+        lines.append("identity:   git config --file %s user.email <email>" % shell_word(host.config_local))
         return None, lines
     keys = sorted(set(k for _, k in pairs))
     email = email or principals[0]
     if len(keys) > 1:
-        lines = ["identity: more than one ssh-agent key is listed for %s - writing nothing" % email]
+        lines = ["identity: more than one ssh-agent key is listed for %s - writing nothing" % _shown(email)]
         lines += ["identity:   key %s" % fingerprint(k) for k in keys]
         lines.append("identity:   keep only this host's signing key in the agent (ssh-add -d), or retire")
         lines.append("identity:   the other entry in the allowed-signers file, then re-run")
@@ -1553,49 +1807,49 @@ def identity(host, name):
     """Write what is absent; never replace a value. Returns an exit status."""
     if not require_ssh_format(host) or not require_revocation(host):
         return 1
-    path, source, entries = host.signers()
+    path, source, entries, lines = host.signers()
     if path is None:
-        for line in entries:
-            warn(line)
+        for said in lines:
+            warn(said)
         hint_rerun(host)
         return 1
     keys, why = host.agent()
     if keys is None:
         warn(why)
         warn("identity:   load this host's signing key with ssh-add, then run:")
-        warn("identity:   %s identity [--name \"Full Name\"]" % host.installer)
+        warn("identity:   %s identity [--name \"Full Name\"]" % shell_word(host.installer))
         return 1
     if refuse_unclear(host, keys, path):
         return 1
     pairs = host.candidates(entries, keys)
     if not pairs:
-        revoked = host.why_no_candidate(entries, keys, path)
-        if revoked:
-            warn(revoked)
+        said = host.why_no_candidate(entries, keys, path)
+        if said:
+            warn(said)
             warn("identity:   load a key that is not revoked, list it in the allowed-signers file,")
             hint_rerun(host)
             return 1
-        warn("identity: no ssh-agent key is listed for the git namespace in %s - writing nothing" % path)
+        warn("identity: no ssh-agent key is listed for the git namespace in %s - writing nothing" % _shown(path))
         warn("identity:   add `<email> <keytype> <key>` for this host's signing key there,")
         hint_rerun(host)
         return 1
     email_v = host.effective("user.email")
     if email_v.error:
-        warn("identity: cannot read user.email (%s) - writing nothing" % email_v.err)
+        warn("identity: cannot read user.email (%s) - writing nothing" % _shown(email_v.err))
         return 1
     if email_v.set and not any(p == email_v.text for p, _ in pairs):
         # Name the cause when the revocation file is what removed this
         # email's keys, rather than calling them unlisted.
         mine = [e for e in entries if match_pattern_list(email_v.text, e.principals)]
-        revoked = host.why_no_candidate(mine, keys, path, email_v.text)
-        if revoked:
-            warn(revoked)
-            warn("identity:   load a key for %s that is not revoked, then re-run" % email_v.text)
+        said = host.why_no_candidate(mine, keys, path, email_v.text)
+        if said:
+            warn(said)
+            warn("identity:   load a key for %s that is not revoked, then re-run" % _shown(email_v.text))
             return 1
     chosen, lines = select(host, pairs, email_v.text if email_v.set else "")
     if chosen is None:
-        for line in lines:
-            warn(line)
+        for said in lines:
+            warn(said)
         return 1
     email, sigkey = chosen
 
@@ -1604,7 +1858,7 @@ def identity(host, name):
         desired.append(("user.name", name, None))
     desired += [
         ("user.email", email, None),
-        ("user.signingkey", "key::%s %s" % sigkey, None),
+        ("user.signingkey", "key::" + " ".join(sigkey), None),
         # Effectively true already wherever git reads the tracked config, so
         # this is written only where it does not (and an existing copy in
         # config.local is left alone, like any equal value).
@@ -1629,7 +1883,7 @@ def identity(host, name):
             desired.append(("gpg.ssh.allowedSignersFile", path, None))
         elif cur.set and not same_file(os.path.join(host.home, os.path.expanduser(cur.text)), path):
             warn("identity: CANGA_HOST_ALLOWED_SIGNERS (%s) differs from gpg.ssh.allowedSignersFile (%s),"
-                 % (path, cur.text))
+                 % (_shown(path), _shown(cur.text)))
             warn("identity:   which git verifies with")
 
     to_write = []
@@ -1642,7 +1896,7 @@ def identity(host, name):
         eff = host.effective(key, typ)
         bad = [v for v in (local, eff) if v.error]
         if bad:
-            warn("identity: cannot read %s (%s) - leaving it" % (key, bad[0].err))
+            warn("identity: cannot read %s (%s) - leaving it" % (_shown(key), _shown(bad[0].err)))
             conflicts += 1
             continue
         if typ == "bool" and eff.set and eff.text == "false" and not (local.set and local.text == "true"):
@@ -1652,33 +1906,33 @@ def identity(host, name):
             # in config.local that another level overrides is NOT one: it is
             # reported as overridden below.
             kept.append("identity: %s is false (%s) - kept as this host's exception, so it stays off"
-                        % (key, last_origin(host, key)))
+                        % (_shown(key), _shown(last_origin(host, key))))
             continue
         if typ == "bool" and local.set and local.text == "false" and eff.set and eff.text == "true":
             # The reverse: config.local says false, a later level says true and
             # wins. Nothing to write; the effective value is what signs.
             kept.append("identity: %s is false in %s, but %s sets it true and wins"
-                        % (key, host.config_local, last_origin(host, key)))
+                        % (_shown(key), _shown(host.config_local), _shown(last_origin(host, key))))
             continue
         if local.set and equal_value(host, key, local.text, want, sigkey):
             # Right in config.local, but another level may still win: the
             # value a commit sees is the effective one.
             if eff.set and not equal_value(host, key, eff.text, want, sigkey):
-                warn("identity: %s is overridden by %s - leaving it: %s" % (key, last_origin(host, key), eff.text))
+                warn("identity: %s is overridden by %s - leaving it: %s" % (_shown(key), _shown(last_origin(host, key)), _shown(eff.text)))
                 conflicts += 1
             continue
         cur = local if local.set else eff
         if not cur.set:
             to_write.append((key, want, typ))
         elif not equal_value(host, key, cur.text, want, sigkey):
-            warn("identity: %s is already set to a different value - leaving it: %s" % (key, cur.text))
+            warn("identity: %s is already set to a different value - leaving it: %s" % (_shown(key), _shown(cur.text)))
             conflicts += 1
 
     if tag_kept:
         kept.append(tag_kept)
     if _captured is None:
-        for line in kept:
-            log(line)
+        for said in kept:
+            log(said)
     if conflicts:
         # Nothing at all next to a conflict: an email, or tag.gpgsign = true,
         # written beside a signing key this step did not choose would pair
@@ -1692,18 +1946,18 @@ def identity(host, name):
         # includes is written but never read.
         included, err = host.includes_local()
         if err is not None:
-            warn("identity: cannot read include.path (%s) - writing nothing" % err)
+            warn("identity: cannot read include.path (%s) - writing nothing" % _shown(err))
             return 1
         if not included:
-            warn("identity: git does not read %s (no [include] reaches it) - writing nothing" % host.config_local)
+            warn("identity: git does not read %s (no [include] reaches it) - writing nothing" % _shown(host.config_local))
             warn("identity:   see \"Framework git settings do not apply\" in docs/troubleshooting.md")
             return 1
         if not write_keys(host.config_local, [(k, v) for k, v, _ in to_write]):
             return 1
-        log("identity: wrote %s to %s" % (", ".join(k for k, _, _ in to_write), host.config_local))
+        log("identity: wrote %s to %s" % (", ".join(_shown(k) for k, _, _ in to_write), _shown(host.config_local)))
         if _captured is not None:
-            for line in kept:
-                log(line)
+            for said in kept:
+                log(said)
         # Read every written key back through the effective config: a later
         # file can still override what was just written.
         for key, want, typ in to_write:
@@ -1712,10 +1966,10 @@ def identity(host, name):
                 origins = host.origins(key)
                 origin = origins[-1][0] if origins else "nowhere"
                 warn("identity: %s reads %s from %s after the write, not the value written"
-                     % (key, repr(back.text) if back.set else "unset", origin))
+                     % (_shown(key), quoted(back.text) if back.set else "unset", _shown(origin)))
                 conflicts += 1
     elif not conflicts:
-        log("identity: already configured for %s (%s)" % (email, fingerprint(sigkey)))
+        log("identity: already configured for %s (%s)" % (_shown(email), fingerprint(sigkey)))
 
     if conflicts:
         return 1
@@ -1731,75 +1985,75 @@ def rotate(host):
         return 1
     email_v = host.effective("user.email")
     if email_v.error:
-        warn("identity: cannot read user.email (%s) - writing nothing" % email_v.err)
+        warn("identity: cannot read user.email (%s) - writing nothing" % _shown(email_v.err))
         return 1
     if not email_v.set:
-        warn("identity: --rotate needs user.email - run %s identity first" % host.installer)
+        warn("identity: --rotate needs user.email - run %s identity first" % shell_word(host.installer))
         return 1
     email = email_v.text
     origins, err = host.origins_or_error("user.signingkey")
     if err is not None:
-        warn("identity: --rotate: cannot read user.signingkey (%s) - writing nothing" % err)
+        warn("identity: --rotate: cannot read user.signingkey (%s) - writing nothing" % _shown(err))
         return 1
     if not origins:
-        warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % host.installer)
+        warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % shell_word(host.installer))
         return 1
     origin, old_value = origins[-1]
     if not host.is_local_origin(origin):
         warn("identity: --rotate: user.signingkey comes from %s, not %s - edit it there"
-             % (origin, host.config_local))
+             % (_shown(origin), _shown(host.config_local)))
         return 1
     old, _ = resolve_signingkey(old_value, host.home)
     if old is None:
-        warn("identity: --rotate: user.signingkey (%s) names no readable public key - refusing" % old_value)
+        warn("identity: --rotate: user.signingkey (%s) names no readable public key - refusing" % _shown(old_value))
         return 1
-    path, _, entries = host.signers()
+    path, _, entries, lines = host.signers()
     if path is None:
-        for line in entries:
-            warn(line)
+        for said in lines:
+            warn(said)
         return 1
     why = host.why_invalid(entries, old, email)
     if why is None:
         warn("identity: --rotate: %s is still valid for %s in %s - nothing to rotate"
-             % (fingerprint(old), email, path))
+             % (fingerprint(old), _shown(email), _shown(path)))
         return 1
-    keys, err = host.agent()
+    keys, said = host.agent()
     if keys is None:
-        warn(err)
+        warn(said)
         return 1
     if refuse_unclear(host, keys, path):
         return 1
     new = sorted(set(k for p, k in host.candidates(entries, keys) if p == email))
     if len(new) != 1:
         warn("identity: --rotate: %d ssh-agent keys are valid for %s in %s - refusing"
-             % (len(new), email, path))
+             % (len(new), _shown(email), _shown(path)))
         for k in new:
             warn("identity:   key %s" % fingerprint(k))
         return 1
     new = new[0]
-    value = "key::%s %s" % new
+    value = "key::" + " ".join(new)
     if not write_keys(host.config_local, [("user.signingkey", value)]):
         return 1
     log("identity: rotated user.signingkey for %s: %s -> %s (old key: %s)"
-        % (email, fingerprint(old), fingerprint(new), why))
-    log("identity:   it was: %s" % old_value)
+        % (_shown(email), fingerprint(old), fingerprint(new), why))
+    log("identity:   it was: %s" % _shown(old_value))
     back = host.effective("user.signingkey")
     if not back.set or resolve_signingkey(back.text, host.home)[0] != new:
-        warn("identity: user.signingkey reads %s after the write, not the new key" % repr(back.text))
+        warn("identity: user.signingkey reads %s after the write, not the new key" % quoted(back.text))
         return 1
     return 0
 
 
 def stale_reason(host, key):
     """(email, path, why) when KEY no longer verifies for the effective
-    user.email in the allowed-signers file, or None when it does or when
-    there is nothing to judge it by (no user.email, no file)."""
+    user.email in the allowed-signers file, or (None, None, None) when it
+    does or when there is nothing to judge it by (no user.email, no file)."""
     email_v = host.effective("user.email")
-    path, _, entries = host.signers()
+    path, _, entries, _ = host.signers()
     if path is None or not email_v.set:
-        return None
+        return None, None, None
     why = host.why_invalid(entries, key, email_v.text)
-    return None if why is None else (email_v.text, path, why)
+    return (None, None, None) if why is None else (email_v.text, path, why)
 
 
 def check_signing_key(host, agent_said=False):
@@ -1810,13 +2064,13 @@ def check_signing_key(host, agent_said=False):
     the same cause."""
     fmt = host.effective("gpg.format")
     if fmt.error:
-        warn("identity: cannot read gpg.format (%s) - user.signingkey not checked" % fmt.err)
+        warn("identity: cannot read gpg.format (%s) - user.signingkey not checked" % _shown(fmt.err))
         return True
     if fmt.text != "ssh":
         return False  # a GPG key id is not ours to judge
     origins, err = host.origins_or_error("user.signingkey")
     if err is not None:
-        warn("identity: cannot read user.signingkey (%s) - not checked" % err)
+        warn("identity: cannot read user.signingkey (%s) - not checked" % _shown(err))
         return True
     if not origins:
         return False
@@ -1824,7 +2078,7 @@ def check_signing_key(host, agent_said=False):
     outside = [o for o, _ in origins if not host.is_local_origin(o)]
     for origin in outside:
         tail = " - the last one git reads wins" if len(origins) > 1 else ""
-        warn("identity: user.signingkey is set in %s, outside %s%s" % (_shown(origin), host.config_local, tail))
+        warn("identity: user.signingkey is set in %s, outside %s%s" % (_shown(origin), _shown(host.config_local), tail))
         reported = True
     value = origins[-1][1]
     key, needs_agent = resolve_signingkey(value, host.home)
@@ -1835,15 +2089,15 @@ def check_signing_key(host, agent_said=False):
     if key is None:
         warn("identity: user.signingkey (%s) names no readable SSH public key - signing will fail" % _shown(value))
         return True
-    _, rev_err = host.revocation()
-    stale = None if rev_err else stale_reason(host, key)
-    if rev_err:
-        warn(rev_err.replace(" - writing nothing", ""))
+    _, said = host.revocation()
+    email, path, why = (None, None, None) if said else stale_reason(host, key)
+    if said:
+        warn(_untailed(said))
         reported = True
-    elif stale is not None:
+    elif why is not None:
         warn("identity: user.signingkey %s is not valid for %s in %s (%s)"
-             % ((fingerprint(key),) + stale))
-        warn("identity:   new signatures will not verify; run: %s identity --rotate" % host.installer)
+             % (fingerprint(key), _shown(email), _shown(path), why))
+        warn("identity:   new signatures will not verify; run: %s identity --rotate" % shell_word(host.installer))
         reported = True
     if needs_agent:
         keys, _ = host.agent()
@@ -1861,8 +2115,9 @@ def overridden_line(host):
     found = overridden_signing(host)
     if not found:
         return 0
-    what = "; ".join("%s = false from %s" % kv for kv in found)
-    warn("identity: signing is off against %s: %s - see %s identity" % (host.config_local, what, host.installer))
+    what = "; ".join("%s = false from %s" % (_shown(k), _shown(o)) for k, o in found)
+    warn("identity: signing is off against %s: %s - see %s identity"
+         % (_shown(host.config_local), what, shell_word(host.installer)))
     return 1
 
 
@@ -1879,17 +2134,16 @@ def stale_line(host):
     # quiet on what it cannot judge (identity and check name the error).
     origins = host.origins("user.signingkey")
     key = resolve_signingkey(origins[-1][1], host.home)[0] if origins else None
-    stale = stale_reason(host, key) if key is not None else None
-    if stale is None:
+    email, path, why = stale_reason(host, key) if key is not None else (None, None, None)
+    if why is None:
         return 0
-    email, path, why = stale
     # --rotate refuses while the revocation file cannot be checked, so that
     # case points at the details instead.
     if host.is_revoked(key) is None:
-        msg = "identity: user.signingkey %s is not valid for %s in %s (%s) - see %s identity"
+        form = "identity: user.signingkey %s is not valid for %s in %s (%s) - see %s identity"
     else:
-        msg = "identity: user.signingkey %s is not valid for %s in %s (%s) - run %s identity --rotate"
-    warn(msg % (fingerprint(key), email, path, why, host.installer))
+        form = "identity: user.signingkey %s is not valid for %s in %s (%s) - run %s identity --rotate"
+    warn(form % (fingerprint(key), _shown(email), _shown(path), why, shell_word(host.installer)))
     return 1
 
 
@@ -1904,14 +2158,14 @@ def auto(host):
     # docs/troubleshooting.md quotes them verbatim.
     if os.environ.get("SSH_CONNECTION"):
         if commits_fail_closed(host):
-            msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys); every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
+            form = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys); every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
         else:
-            msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
-        warn(msg % host.installer)
+            form = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
+        warn(form % shell_word(host.installer))
         return 1, None
     rc = identity(host, None)
     if rc != 0 and commits_fail_closed(host):
-        return rc, FAIL_CLOSED % host.installer
+        return rc, FAIL_CLOSED % shell_word(host.installer)
     return rc, None
 
 
@@ -1925,7 +2179,7 @@ def global_reads_local(host):
     if glob is None or same_file(glob, xdg_config):
         return True
     warn("identity: GIT_CONFIG_GLOBAL=%s is not %s, so git would not read %s - writing nothing"
-         % (glob, xdg_config, host.config_local))
+         % (_shown(glob), _shown(xdg_config), _shown(host.config_local)))
     return False
 
 
@@ -1944,7 +2198,7 @@ def local_is_regular(host):
     """local_absent_or_regular(), saying why when it is False."""
     if local_absent_or_regular(host):
         return True
-    warn("identity: %s is not a regular file - writing nothing" % host.config_local)
+    warn("identity: %s is not a regular file - writing nothing" % _shown(host.config_local))
     return False
 
 
@@ -1976,8 +2230,11 @@ def gitconfig_finding(host):
     rc, out, _ = git(["config", "--file", path, "--name-only", "--get-regexp", GITCONFIG_IDENTITY])
     names = sorted(set(out.split("\n"))) if rc == 0 and out else []
     if names:
+        # A subsection can hold a comma or a quote: such a name is quoted,
+        # so the comma-joined list still reads as its names.
         return "problem", ("~/.gitconfig sets %s, and git reads it after ~/.config/git/config - move its settings into %s and remove it"
-                           % (", ".join(names), host.config_local))
+                           % (", ".join(quoted(n) if "," in n or "'" in n else _shown(n) for n in names),
+                              _shown(host.config_local)))
     return "info", "~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it"
 
 
@@ -1989,12 +2246,12 @@ def advisory(host):
     about signing on a host that opted out (opted_out()); ~/.gitconfig is
     reported either way, since it shadows the identity of every commit,
     signed or not. Always returns 0."""
-    level, text = gitconfig_finding(host)
+    level, finding = gitconfig_finding(host)
     if level != "ok":
-        warn(_shown(text))
+        warn(finding)
     if opted_out(host):
         return 0
-    inst = host.installer
+    inst = shell_word(host.installer)
     sign = host.effective("commit.gpgsign", "bool")
     if sign.error:
         warn("commit.gpgsign is not a boolean git reads (%s) - git refuses every commit until it is fixed"
@@ -2021,14 +2278,14 @@ def advisory(host):
         elif not any(k == "commit.gpgsign" for k, _ in overridden):
             warn("  An explicit false from %s is kept as this host's exception, and" % _shown(origin))
             warn("  %s identity leaves it. To sign, remove it there; to keep" % inst)
-            warn("  this host from signing on purpose, set the false in %s." % host.config_local)
+            warn("  this host from signing on purpose, set the false in %s." % _shown(host.config_local))
     # A stale key, a user.signingkey set outside config.local, and a gpgsign
     # that a later file turns off against config.local. identity() reports
     # the last itself, as a conflict; only check says it here.
     check_signing_key(host)
     for key, origin in overridden:
         warn("identity: %s is true in %s, but %s sets it false and wins - signing stays off"
-             % (key, host.config_local, _shown(origin)))
+             % (_shown(key), _shown(host.config_local), _shown(origin)))
     return 0
 
 
@@ -2036,12 +2293,18 @@ def advisory(host):
 #
 # `install.sh doctor` runs every check in CHECKS, in order. A check is one
 # method of Doctor: it only reads (git config, files, `ssh-add -L`,
-# `ssh-keygen`) and records findings. It opens no network connection of its
-# own, though a forwarded agent answers over its SSH session. Each tool runs
-# under a timeout; each file is opened without blocking and read up to a
-# size cap (read_small_file()). A finding is ok, info or a problem; a
-# problem is one line naming what is wrong, where it comes from and the fix,
-# written as ONE literal so docs/troubleshooting.md can quote it
+# `ssh-keygen`, the checkout's plugin pins through repo_git() and each
+# submodule's HEAD as a file) and records findings. It opens no network
+# connection of its own, though a forwarded agent answers over its SSH
+# session; in a partial clone, on a git that cannot be told not to fetch
+# (lazy_fetch_off()), the plugin check reads no object. A check that reads
+# the git config is an identity check (the third field of its CHECKS entry):
+# a config.local that is not a regular file, or a git that cannot be kept
+# outside every repository, is reported once and skips those checks only.
+# Each tool runs under a timeout; each file is opened without blocking and
+# read up to a size cap (read_small_file()). A finding is ok, info or a
+# problem; a problem is one line naming what is wrong, where it comes from
+# and the fix, written as ONE literal so docs/troubleshooting.md can quote it
 # (tests/troubleshooting_messages_test.sh). By default only the problems
 # print; --verbose prints every finding and a verdict. On a host that opted
 # out of signing (opted_out()), a problem marked signing-only is recorded as
@@ -2053,46 +2316,232 @@ GIT_SSH_SIGNING = (2, 34)
 TOOL_TIMEOUT = 15
 
 
+WRITING_NOTHING = " - writing nothing"
+
+
+def _untailed(msg):
+    """MSG without its ` - writing nothing` tail. Only a tail: the same
+    words inside a path the message names stay as they are."""
+    return msg[:-len(WRITING_NOTHING)] if msg.endswith(WRITING_NOTHING) else msg
+
+
 def _bare(msg):
     """A refusal message without its `identity: ` head and its
     ` - writing nothing` tail: the cause alone."""
     if msg.startswith("identity: "):
         msg = msg[len("identity: "):]
-    return msg.replace(" - writing nothing", "")
+    return _untailed(msg)
 
 
 def _capture(fn, *args):
     """Run FN with warn() collecting instead of printing: (result, lines)."""
     global _captured
-    saved, _captured = _captured, []
+    outer, _captured = _captured, []
     try:
         result = fn(*args)
     finally:
-        lines, _captured = _captured, saved
+        lines, _captured = _captured, outer
     return result, lines
 
 
 def _grouped(lines):
     """Warning lines folded into one line per cause: each indented hint joins
     the line before it."""
-    out = []
-    for line in lines:
-        if line.startswith("identity:   ") and out:
-            out[-1] += " - " + line[len("identity:   "):]
+    folded = []
+    for said in lines:
+        if said.startswith("identity:   ") and folded:
+            folded[-1] += " - " + said[len("identity:   "):]
         else:
-            out.append(_bare(line))
-    return out
+            folded.append(_bare(said))
+    return folded
+
+
+# A commit id as git prints it: SHA-1 or SHA-256, lower-case hex.
+OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _first_line(path, nofollow=False):
+    """(the first line of the small file PATH without its newline, None), or
+    (None, why it cannot be read). NOFOLLOW as read_small_file() takes it."""
+    data, why = read_small_file(path, nofollow)
+    if data is None:
+        return None, "%s: %s" % (_shown(path), why)
+    return data.split(b"\n", 1)[0].decode("utf-8", "replace").rstrip("\r"), None
+
+
+# What submodule_commit() finds in a submodule's directory.
+ABSENT = "absent"          # no .git: not initialized (`-` in git submodule status)
+AT = "at"                  # checked out at the commit returned with it
+UNRESOLVED = "unresolved"  # HEAD names a ref these files do not resolve
+UNREADABLE = "unreadable"  # .git, its gitdir or HEAD cannot be read
+
+
+def submodule_commit(path, modules):
+    """(state, commit, why, gitdir) for the submodule checked out at PATH,
+    read from files alone: its .git (a gitfile naming its gitdir, or the
+    gitdir itself), that gitdir's HEAD, and the ref HEAD names, loose or
+    packed, each opened without following a final symlink. Never git in the
+    submodule: even `git status` with optional locks and the fsmonitor off
+    runs a clean filter the submodule's config names. STATE is ABSENT, AT
+    (COMMIT is set), UNRESOLVED (a reftable, or another worktree's ref store)
+    or UNREADABLE; WHY says why for the last two. GITDIR is set only for
+    UNREADABLE, when .git is a gitfile naming a gitdir that exists under
+    MODULES (the superproject's modules directory, resolved, or None): git
+    reuses that gitdir when the submodule is initialized again. One outside
+    it is never named, so a gitfile cannot steer the fix at another path."""
+    dotgit = os.path.join(path, ".git")
+    try:
+        st = os.lstat(dotgit)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return ABSENT, None, None, None
+        return UNREADABLE, None, "%s: %s" % (_shown(dotgit), e.strerror), None
+    separate = None
+    if stat.S_ISDIR(st.st_mode):
+        gitdir = dotgit  # a submodule cloned before git absorbed gitdirs
+    else:
+        line, why = _first_line(dotgit)
+        if line is None:
+            return UNREADABLE, None, why, None
+        if not line.startswith("gitdir: "):
+            return UNREADABLE, None, "%s does not name a gitdir" % _shown(dotgit), None
+        # A relative gitdir is relative to the submodule's directory. Joined,
+        # never normalized: the kernel then resolves each `..` the way git does.
+        gitdir = os.path.join(path, line[len("gitdir: "):])
+        real = os.path.realpath(gitdir)
+        separate = gitdir if (modules and os.path.isdir(gitdir)
+                              and real.startswith(modules + os.sep)) else None
+    head_path = os.path.join(gitdir, "HEAD")
+    head, why = _first_line(head_path, True)
+    if head is None:
+        return UNREADABLE, None, why, separate
+    if OBJECT_ID.match(head):
+        return AT, head, None, None
+    if not head.startswith("ref: "):
+        return UNREADABLE, None, "%s is neither a commit nor a ref" % _shown(head_path), separate
+    ref = head[len("ref: "):]
+    if not ref.startswith("refs/") or ".." in ref.split("/") or "\0" in ref:
+        return UNREADABLE, None, "%s names %s, which is not a ref" % (_shown(head_path), _shown(ref)), separate
+    loose, _ = _first_line(os.path.join(gitdir, ref), True)
+    if loose is not None and OBJECT_ID.match(loose.strip()):
+        return AT, loose.strip(), None, None
+    data, _ = read_small_file(os.path.join(gitdir, "packed-refs"), True)
+    for record in (data or b"").decode("utf-8", "replace").splitlines():
+        parts = record.split(" ")
+        if len(parts) == 2 and parts[1] == ref and OBJECT_ID.match(parts[0]):
+            return AT, parts[0], None, None
+    return (UNRESOLVED, None, "%s names %s, which its files do not resolve" % (_shown(head_path), _shown(ref)),
+            None)
+
+
+# Where the SHA-pinned zsh plugins live: doctor's plugin check reads the
+# gitlinks under this directory only.
+PLUGIN_DIR = "zsh/plugins/"
+# The config keys that make a repository a partial clone: the remote.<name>
+# form git writes today, and the extensions.partialClone older git wrote.
+PARTIAL_CLONE = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+# The first release of each line that honours GIT_NO_LAZY_FETCH: the 2024-04
+# security releases taught promisor-remote.c to refuse a lazy fetch under it
+# (v2.39.4, v2.40.2, v2.41.1, v2.42.2, v2.43.4, v2.44.1; v2.39.3 lacks it),
+# and every release from v2.45.0 on has it. Read from git/git at those tags.
+NO_LAZY_FETCH_FROM = {(2, 39): 4, (2, 40): 2, (2, 41): 1, (2, 42): 2, (2, 43): 4, (2, 44): 1}
+
+
+def repo_dirs(checkout):
+    """(gitdir, commondir) of the checkout's repository, read from files as
+    git reads them: CHECKOUT/.git itself, or the gitdir a gitfile names (a
+    linked worktree), whose `commondir` file names the shared one. (None,
+    None) when there is none to read; git then names why."""
+    dotgit = os.path.join(checkout, ".git")
+    if os.path.isdir(dotgit):
+        gitdir = dotgit
+    else:
+        line, _ = _first_line(dotgit)
+        if line is None or not line.startswith("gitdir: "):
+            return None, None
+        gitdir = os.path.join(checkout, line[len("gitdir: "):])
+    common, _ = _first_line(os.path.join(gitdir, "commondir"), True)
+    return gitdir, (os.path.join(gitdir, common) if common else gitdir)
+
+
+def lazy_fetch_off(checkout):
+    """True when the git that repo_git() runs honours GIT_NO_LAZY_FETCH
+    (NO_LAZY_FETCH_FROM), so a missing object fails a read instead of being
+    fetched. Asked once per run, from `git --version`."""
+    rc, out, _ = repo_git(checkout, ["--version"])
+    m = re.match(r"git version (\d+)\.(\d+)(?:\.(\d+))?", out) if rc == 0 else None
+    if m is None:
+        return False
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if (major, minor) >= (2, 45):
+        return True
+    first = NO_LAZY_FETCH_FROM.get((major, minor))
+    return first is not None and patch >= first
+
+
+def _git_bool(value):
+    """VALUE as git's boolean parser reads it (git_parse_maybe_bool()): None
+    for a key with no `=` (true), "" for an empty value (false). A value git
+    would refuse counts as true here, the side that reads nothing."""
+    if value is None:
+        return True
+    v = value.strip().lower()
+    if v in ("true", "yes", "on"):
+        return True
+    if v in ("", "false", "no", "off"):
+        return False
+    try:
+        return int(v, 0) != 0
+    except ValueError:
+        return True
+
+
+def partial_clone(checkout):
+    """True when the checkout's repository is a partial clone, where reading
+    an object it does not hold would fetch it. Read from its config, which
+    fetches nothing. With --includes: the include chain of the repository's
+    own config is what every other git command there reads too (ls-tree
+    included), so a promisor set through include.path counts. It only reads
+    the files that chain names, under repo_git()'s timeout."""
+    rc, out, _ = repo_git(checkout, ["config", "--local", "--includes", "-z", "--get-regexp", PARTIAL_CLONE])
+    if rc != 0:
+        return False
+    for record in out.split("\0"):
+        if not record:
+            continue
+        key, newline, value = record.partition("\n")
+        if key.startswith("extensions.") or _git_bool(value if newline else None):
+            return True
+    return False
+
+
+def plugin_pins(checkout):
+    """(pins, None) or (None, git's error, unescaped). PINS lists (path,
+    commit) for each submodule under PLUGIN_DIR that the checkout's HEAD
+    records, read by one `git ls-tree` through repo_git(); the pathspec
+    keeps every other entry out."""
+    rc, out, err = repo_git(checkout, ["ls-tree", "-z", "--full-tree", "HEAD", "--", PLUGIN_DIR])
+    if rc != 0:
+        return None, (err or "exit %d" % rc)
+    pins = []
+    for record in out.split("\0"):
+        meta, _, name = record.partition("\t")
+        fields = meta.split(" ")
+        if len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit":
+            pins.append((name, fields[2]))
+    return pins, None
 
 
 class Doctor(object):
     """The checks of `install.sh doctor`. A check method records what it
     found in self.found; doctor() runs CHECKS and labels each finding with
-    the name of the check that recorded it."""
+    the name of the check that recorded it. OPTED_OUT_ORIGIN is opted_out()'s
+    answer, or None when the git config could not be read."""
 
-    def __init__(self, host):
+    def __init__(self, host, opted_out_origin):
         self.host = host
         self.found = []  # (level, text)
-        self.opted_out_origin = opted_out(host)
+        self.opted_out_origin = opted_out_origin
 
     def ok(self, text):
         self.found.append(("ok", text))
@@ -2115,33 +2564,33 @@ class Doctor(object):
         rc, out, err = git(["--version"])
         if rc != 0:
             self.problem("git did not run (%s) - install the Command Line Tools (xcode-select --install)"
-                         % (err or out or "exit %d" % rc))
+                         % (_shown(err or out) if err or out else "exit %d" % rc))
             return
         m = re.match(r"git version (\d+)\.(\d+)", out)
         if m and (int(m.group(1)), int(m.group(2))) < GIT_SSH_SIGNING:
-            self.problem("%s cannot sign with SSH keys (2.34 or later can) - upgrade git" % out, signing=True)
+            self.problem("%s cannot sign with SSH keys (2.34 or later can) - upgrade git" % _shown(out), signing=True)
         else:
-            self.ok(out)
+            self.ok(_shown(out))
         glob = os.environ.get("GIT_CONFIG_GLOBAL")
         xdg_config = os.path.join(os.path.dirname(host.config_local), "config")
         if glob is not None and not same_file(glob, xdg_config):
             self.problem("GIT_CONFIG_GLOBAL=%s is not %s, so git does not read %s - unset it"
-                         % (glob, xdg_config, host.config_local))
+                         % (_shown(glob), _shown(xdg_config), _shown(host.config_local)))
             return
         included, err = host.includes_local()
         if included:
-            self.ok("an [include] reaches %s" % host.config_local)
+            self.ok("an [include] reaches %s" % _shown(host.config_local))
         elif err is not None:
             self.problem("cannot read include.path (%s) - check the file git -C ~ config --show-origin --get-all include.path names"
-                         % err)
+                         % _shown(err))
         else:
             self.problem('no [include] reaches %s, so git never reads it - see "Framework git settings do not apply" in docs/troubleshooting.md'
-                         % host.config_local)
+                         % _shown(host.config_local))
 
     def python3(self):
         # Reached only through a python3 that runs: install.sh reports one
         # that does not before calling this file.
-        self.ok("%s (%s)" % (platform.python_version(), sys.executable))
+        self.ok("%s (%s)" % (platform.python_version(), _shown(sys.executable)))
 
     def ssh_keygen(self):
         path = shutil.which("ssh-keygen")
@@ -2160,19 +2609,19 @@ class Doctor(object):
                 timeout=TOOL_TIMEOUT,
             )
         except (OSError, subprocess.TimeoutExpired) as e:
-            self.problem("ssh-keygen did not run (%s) - git signs and verifies with it; install OpenSSH" % e,
+            self.problem("ssh-keygen did not run (%s) - git signs and verifies with it; install OpenSSH" % _shown(e),
                          signing=True)
             return
-        said = (p.stdout + p.stderr).decode("utf-8", "replace")
-        if "option -- Y" in said or "usage:" in said:
+        output = (p.stdout + p.stderr).decode("utf-8", "replace")
+        if "option -- Y" in output or "usage:" in output:
             self.problem("%s does not support -Y, which git signs and verifies with - install OpenSSH 8.2 or later"
-                         % path, signing=True)
+                         % _shown(path), signing=True)
         else:
-            self.ok("%s supports -Y" % path)
+            self.ok("%s supports -Y" % _shown(path))
 
     def values(self):
         host = self.host
-        inst = host.installer
+        inst = shell_word(host.installer)
         cl = host.config_local
         off = self.opted_out_origin
         for key in ("user.name", "user.email", "user.useConfigOnly", "user.signingkey", "commit.gpgsign",
@@ -2180,13 +2629,13 @@ class Doctor(object):
             origins = host.origins(key)
             if origins:
                 origin, value = origins[-1]
-                self.ok("%s = %s (%s)" % (key, value, origin))
+                self.ok("%s = %s (%s)" % (_shown(key), _shown(value), _shown(origin)))
             else:
-                self.ok("%s is unset" % key)
+                self.ok("%s is unset" % _shown(key))
         fmt = host.effective("gpg.format")
         if not (fmt.set and fmt.text == "ssh"):
             self.problem('gpg.format is %s, not ssh - see "Framework git settings do not apply" in docs/troubleshooting.md'
-                         % (repr(fmt.text) if fmt.set else "unset"), signing=True)
+                         % (quoted(fmt.text) if fmt.set else "unset"), signing=True)
         # The tracked config sets user.useConfigOnly = true: git then refuses
         # every commit, signed or not, without a user.name and a user.email,
         # so the lines for those two say so. A false (config.local may set
@@ -2195,7 +2644,7 @@ class Doctor(object):
         refuses = only.set and only.text == "true"
         if only.set and only.text == "false":
             self.info("user.useConfigOnly = false from %s: git invents a name and an email from this account and host when none is set"
-                      % last_origin(host, "user.useConfigOnly"))
+                      % _shown(last_origin(host, "user.useConfigOnly")))
         # Each line ONE literal, fix included: docs/troubleshooting.md quotes
         # them. The `git config --file` fixes are an opted-out host's, where
         # `install.sh identity` needs a signing key.
@@ -2214,29 +2663,29 @@ class Doctor(object):
             v = host.effective(key)
             if v.error:
                 self.problem("cannot read %s (%s) - check the file git -C ~ config --show-origin --get %s names"
-                             % (key, v.err, key), signing=signing)
+                             % (_shown(key), _shown(v.err), _shown(key)), signing=signing)
             elif v.unset and key == "user.name":
-                self.problem(name_local % cl if off else name_step % inst)
+                self.problem(name_local % shell_word(cl) if off else name_step % inst)
             elif v.unset and key == "user.email":
-                self.problem(email_local % cl if off else email_step % inst)
+                self.problem(email_local % shell_word(cl) if off else email_step % inst)
             elif v.unset and signing and commits_fail_closed(host):
                 self.problem("user.signingkey is not set, so git refuses every commit - run: %s identity, or opt this host out of signing (see docs/signing-key.md)"
                              % inst, signing=True)
             elif v.unset:
-                self.problem("%s is not set - run: %s identity" % (key, inst), signing=signing)
+                self.problem("%s is not set - run: %s identity" % (_shown(key), inst), signing=signing)
         for key, verb in (("user.useConfigOnly", "run most commands"), ("commit.gpgsign", "commit"),
                           ("tag.gpgsign", "tag")):
             v = host.effective(key, "bool")
             if v.error:
                 # git dies on such a value: `fatal: bad boolean config value`.
                 self.problem("%s is not a boolean git reads (%s) - git refuses to %s until it is; fix it in the file git -C ~ config --show-origin --get %s names"
-                             % (key, v.err, verb, key))
+                             % (_shown(key), _shown(v.err), verb, _shown(key)))
         sign = host.effective("commit.gpgsign", "bool")
         overridden = overridden_signing(host)
         if off:
             # One literal: docs/signing-key.md quotes it verbatim.
-            msg = "commit.gpgsign = false from %s: respected as this host's opt-out; the automatic step stays quiet and writes nothing"
-            self.ok(msg % off)
+            form = "commit.gpgsign = false from %s: respected as this host's opt-out; the automatic step stays quiet and writes nothing"
+            self.ok(form % _shown(off))
         elif sign.unset:
             # The tracked config sets it: unset means that config is not read.
             self.problem('commit.gpgsign is not set, so git does not read the framework git config and commits are not signed - see "Framework git settings do not apply" in docs/troubleshooting.md')
@@ -2244,35 +2693,36 @@ class Doctor(object):
             origin = last_origin(host, "commit.gpgsign")
             if host.is_local_origin(origin):
                 self.info("commit.gpgsign = false from %s, but tag.gpgsign is true: tags are signed, so the signing checks apply"
-                          % origin)
+                          % _shown(origin))
             else:
                 # Not an opt-out (opted_out()): a file outside config.local
                 # may be nobody's decision for this host.
                 self.problem("commit.gpgsign = false from %s, outside %s, so commits are not signed - remove it there to sign, or set the false in %s to opt out"
-                             % (origin, cl, cl))
+                             % (_shown(origin), _shown(cl), _shown(cl)))
         for key, origin in overridden:
             self.problem("%s is true in %s, but %s sets it false and wins - remove the false there, or the true in %s"
-                         % (key, cl, origin, cl))
+                         % (_shown(key), _shown(cl), _shown(origin), _shown(cl)))
         if host.effective("gpg.ssh.allowedSignersFile", "path").unset:
             self.problem("gpg.ssh.allowedSignersFile is not set, so git cannot verify signatures - run: %s identity"
                          % inst, signing=True)
 
     def trust_root(self):
         host = self.host
-        path, source, entries = host.signers()
+        path, source, entries, lines = host.signers()
         if path is None:
-            self.problem("%s - see docs/signing-key.md" % _bare(entries[0]), signing=True)
+            why = lines[0]  # the first line of the refusal (signers())
+            self.problem("%s - see docs/signing-key.md" % _bare(why), signing=True)
             return
         n = len(entries)
-        self.ok("%s (from %s): %d entr%s" % (path, source, n, "y" if n == 1 else "ies"))
+        self.ok("%s (from %s): %d entr%s" % (_shown(path), source, n, "y" if n == 1 else "ies"))
         bad = host.malformed_lines()
         if bad:
-            self.info("skipped malformed line(s) %s in %s" % (", ".join(str(k) for k in bad), path))
-        rev_path, err = host.revocation()
-        if err:
-            self.problem("%s - see docs/signing-key.md" % _bare(err), signing=True)
+            self.info("skipped malformed line(s) %s in %s" % (", ".join("%d" % k for k in bad), _shown(path)))
+        rev_path, why = host.revocation()
+        if why:
+            self.problem("%s - see docs/signing-key.md" % _bare(why), signing=True)
         elif rev_path:
-            self.ok("gpg.ssh.revocationFile %s is readable" % rev_path)
+            self.ok("gpg.ssh.revocationFile %s is readable" % _shown(rev_path))
 
     def ssh_agent(self):
         host = self.host
@@ -2287,18 +2737,18 @@ class Doctor(object):
                 self.info(_bare(why))
             return
         self.ok("%d key(s) in the ssh-agent" % len(keys))
-        path, _, entries = host.signers()
+        path, _, entries, _ = host.signers()
         if path is None:
             return
         unclear = host.unclear_lines(keys)
         if unclear:
             self.problem("malformed allowed-signers line(s) %s in %s name an ssh-agent key - fix or remove them"
-                         % (", ".join(str(k) for k in unclear), path), signing=True)
+                         % (", ".join("%d" % k for k in unclear), _shown(path)), signing=True)
         pairs = sorted(host.candidates(entries, keys))
         for p, k in pairs:
-            self.ok("%s is listed for %s in %s" % (fingerprint(k), p, path))
+            self.ok("%s is listed for %s in %s" % (fingerprint(k), _shown(p), _shown(path)))
         if not pairs:
-            self.info("no ssh-agent key is listed for the git namespace in %s" % path)
+            self.info("no ssh-agent key is listed for the git namespace in %s" % _shown(path))
 
     def signing_key(self):
         host = self.host
@@ -2306,11 +2756,11 @@ class Doctor(object):
         # line per cause, its hint joined to it. An agent that cannot be
         # read is the ssh-agent check's line, not a second one here.
         reported, lines = _capture(check_signing_key, host, True)
-        for line in _grouped(lines):
+        for finding in _grouped(lines):
             if reported:
-                self.problem(line, signing=True)
+                self.problem(finding, signing=True)
             else:
-                self.info(line)
+                self.info(finding)
         origins = host.origins("user.signingkey")
         if reported or not origins or host.effective("gpg.format").text != "ssh":
             return
@@ -2320,10 +2770,10 @@ class Doctor(object):
         if needs_agent and host.agent()[0] is None:
             return
         email_v = host.effective("user.email")
-        path, _, _ = host.signers()
+        path, _, _, _ = host.signers()
         how = "loaded in the ssh-agent" if needs_agent else "signs from its private key file"
         if email_v.set and path is not None:
-            self.ok("%s verifies for %s in %s, %s" % (fingerprint(key), email_v.text, path, how))
+            self.ok("%s verifies for %s in %s, %s" % (fingerprint(key), _shown(email_v.text), _shown(path), how))
         else:
             self.ok("%s, %s (no user.email or allowed-signers file to verify it against)"
                     % (fingerprint(key), how))
@@ -2331,65 +2781,140 @@ class Doctor(object):
     def ssh_session(self):
         if os.environ.get("SSH_CONNECTION"):
             self.info("SSH_CONNECTION is set: the automatic step writes nothing in this session; %s identity, run on purpose, still works"
-                      % self.host.installer)
+                      % shell_word(self.host.installer))
         else:
             self.ok("not an SSH session")
 
     def gitconfig(self):
-        level, text = gitconfig_finding(self.host)
+        level, finding = gitconfig_finding(self.host)
         if level == "problem":
-            self.problem(text)
+            self.problem(finding)
         elif level == "info":
-            self.info(text)
+            self.info(finding)
         else:
-            self.ok(text)
+            self.ok(finding)
+
+    def plugins(self):
+        # The SHA-pinned zsh plugin submodules: each pin the checkout's HEAD
+        # records, against the commit its directory has checked out. Only
+        # files are read in a submodule (submodule_commit()).
+        inst = shell_word(self.host.installer)
+        checkout = os.path.dirname(os.path.abspath(self.host.installer))
+        repo_gitdir, common = repo_dirs(checkout)
+        config = os.path.join(common, "config") if common else None
+        try:
+            mode = os.stat(config).st_mode if config else None
+        except OSError:
+            mode = None  # absent: git names that itself
+        if mode is not None and not stat.S_ISREG(mode):
+            # git opens it for every command: a FIFO would hold each one.
+            self.problem("%s is not a regular file, so git cannot read this checkout - remove it or make it a file"
+                         % _shown(config))
+            return
+        partial = partial_clone(checkout)
+        if partial and not lazy_fetch_off(checkout):
+            # This git would fetch a missing tree even for ls-tree.
+            self.info("%s is a partial clone, and this git cannot read it without fetching what it lacks - not checked"
+                      % _shown(checkout))
+            return
+        pins, err = plugin_pins(checkout)
+        if pins is None and partial:
+            # GIT_NO_LAZY_FETCH stopped a fetch: the trees are not here.
+            self.info("%s is a partial clone without the trees the plugin pins are in (%s) - not checked"
+                      % (_shown(checkout), _shown(err)))
+            return
+        if pins is None:
+            self.problem("cannot list the plugin pins of %s (%s) - fix what git names, then run doctor again"
+                         % (_shown(checkout), _shown(err)))
+            return
+        # The only place a fix may name a plugin's gitdir (submodule_commit()).
+        modules = os.path.realpath(os.path.join(repo_gitdir, "modules")) if repo_gitdir else None
+        for path, pin in pins:
+            state, commit, why, gitdir = submodule_commit(os.path.join(checkout, path), modules)
+            if state == UNREADABLE and gitdir is not None:
+                # Moved aside, never removed: either may hold the plugin's
+                # own commits. git reuses the gitdir on the next init, so it
+                # goes too.
+                self.problem("cannot read which commit %s is at (%s) - move that directory and its git directory %s aside, then run: %s install"
+                             % (_shown(path), why, _shown(gitdir), inst))
+            elif state == UNREADABLE:
+                self.problem("cannot read which commit %s is at (%s) - move that directory aside, then run: %s install"
+                             % (_shown(path), why, inst))
+            elif state == ABSENT:
+                # ensure_submodules (`install`) initializes it; `link` never
+                # touches submodules.
+                self.problem("%s is not initialized, so zsh starts without it - run: %s install"
+                             % (_shown(path), inst))
+            elif state == UNRESOLVED:
+                self.info("cannot tell which commit %s is at: %s" % (_shown(path), why))
+            elif commit == pin:
+                self.ok("%s is at its pin %s" % (_shown(path), _shown(pin[:12])))
+            else:
+                # A local bump: ensure_submodules leaves it alone on purpose,
+                # and dotfiles-upgrade refuses the dirty tree it makes, so it
+                # is not the way back to the pin.
+                self.info("%s is at %s, not its pin %s: a local change, left as it is - to return to the pin, run: git -C %s -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update -- %s"
+                          % (_shown(path), _shown(commit[:12]), _shown(pin[:12]), shell_word(checkout),
+                             shell_word(path)))
 
 
-# (name, Doctor method): the checks, in the order they print.
+# (name, Doctor method, reads the git config): the checks, in the order they
+# print. A check that reads the git config (through git() or a Host read) is
+# an identity check: when config.local is not a regular file or git cannot be
+# kept outside every repository, doctor() reports that once, under `git`, and
+# skips these; every other check still runs.
 CHECKS = (
-    ("git", Doctor.git),
-    ("python3", Doctor.python3),
-    ("ssh-keygen", Doctor.ssh_keygen),
-    ("values", Doctor.values),
-    ("trust root", Doctor.trust_root),
-    ("ssh-agent", Doctor.ssh_agent),
-    ("signing key", Doctor.signing_key),
-    ("ssh session", Doctor.ssh_session),
-    ("~/.gitconfig", Doctor.gitconfig),
+    ("git", Doctor.git, True),
+    ("python3", Doctor.python3, False),
+    ("ssh-keygen", Doctor.ssh_keygen, False),
+    ("values", Doctor.values, True),
+    ("trust root", Doctor.trust_root, True),
+    ("ssh-agent", Doctor.ssh_agent, True),
+    ("signing key", Doctor.signing_key, True),
+    ("ssh session", Doctor.ssh_session, False),
+    ("~/.gitconfig", Doctor.gitconfig, True),
+    ("plugins", Doctor.plugins, False),
 )
 
 
 def doctor(host, verbose):
     """Run CHECKS; print the problems (everything with VERBOSE). Writes
     nothing. Returns 1 when a problem was found, else 0."""
+    reason = None
     if not local_absent_or_regular(host):
         # Before any git read (see local_absent_or_regular()); one literal,
         # quoted in docs/troubleshooting.md.
-        log(_shown("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
-                   % host.config_local))
-        return 1
-    reason = git_isolate()
+        reason = ("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
+                   % _shown(host.config_local))
+    else:
+        why = git_isolate()
+        if why is not None:
+            # Every identity check reads through git(), so each would report
+            # this one cause as a problem of its own (an unset gpg.format, a
+            # git that did not run). One literal, quoted in
+            # docs/troubleshooting.md.
+            reason = "doctor: git: not reading the git config: %s" % why
+    problems = 0
     if reason is not None:
-        # Every check reads through git(), so each would report this one
-        # cause as a problem of its own (an unset gpg.format, a git that
-        # did not run). One literal, quoted in docs/troubleshooting.md.
-        log(_shown("doctor: git: not reading the git config: %s" % reason))
-        return 1
-    d = Doctor(host)
-    findings = []
-    for name, method in CHECKS:
+        # The one line for every identity check; the others still run. Under
+        # `git`, the first check in CHECKS, so the order holds.
+        log(reason)
+        problems += 1
+    d = Doctor(host, None if reason is not None else opted_out(host))
+    for name, method, reads_config in CHECKS:
+        if reads_config and reason is not None:
+            continue
         d.found = []
         method(d)
-        findings += [(level, name, text) for level, text in d.found]
-    problems = 0
-    for level, check, text in findings:
-        if level == "problem":
-            problems += 1
-        if level == "problem" or verbose:
-            # Config values, origins and paths are printed through _shown()
-            # here, once: none of them can rewrite the terminal.
-            log("doctor: %s: %s%s" % (check, "note: " if level == "info" else "", _shown(text)))
+        for level, finding in d.found:
+            if level == "problem":
+                problems += 1
+            if level == "problem" or verbose:
+                # FINDING is printed as it is: each check put every value in
+                # it through _shown(), so the literal around it stays bare.
+                log("doctor: %s: %s%s" % (_shown(name), "note: " if level == "info" else "", finding))
     if verbose:
+        # The verdict is the whole run's, identity or not.
         if problems:
             log("doctor: verdict: %d problem(s) need action" % problems)
         elif d.opted_out_origin:
@@ -2409,7 +2934,7 @@ def run(host, mode, name, report_stale, verbose=False):
     # Before any git read, so a mode never acts on reads that only failed.
     reason = git_isolate()
     if reason is not None:
-        warn(_shown("identity: not reading the git config: %s" % reason))
+        warn("identity: not reading the git config: %s" % reason)
         return (0 if mode == "check" else 1), None
     if mode == "check":
         return advisory(host), None
@@ -2450,9 +2975,9 @@ def run(host, mode, name, report_stale, verbose=False):
 
 def headline(lines):
     """The first warning that states a cause (hint lines are indented)."""
-    for line in lines:
-        if not line.startswith("identity:   "):
-            return line
+    for said in lines:
+        if not said.startswith("identity:   "):
+            return said
     return lines[0] if lines else ""
 
 
@@ -2510,31 +3035,86 @@ def main(argv):
     # line (log(), not a warning) and then the name line, since rc 0 keeps
     # every warning; a run that cannot write prints its one cause line, and
     # the name line comes on a later run.
+    # Each line is printed as it is: every value in it went through
+    # _shown() or shell_word() where it was put in, the suffixes' installer
+    # path included, so this is no place to escape it a second time.
     if lines:
         if rc == 0:
-            for line in lines:
-                warn(line)
+            for said in lines:
+                warn(said)
         else:
-            line = headline(lines)
+            said = headline(lines)
             if consequence:
-                line += consequence
-            elif "%s identity" % host.installer not in line:
-                line += " (details: %s identity)" % host.installer
-            warn(line)
+                said += consequence
+            elif "%s identity" % shell_word(host.installer) not in said:
+                said += " (details: %s identity)" % shell_word(host.installer)
+            warn(said)
     return rc
 
 
+# Set by the first UNWINDING signal, so the ones after it are ignored.
+_unwinding = False
+
+
+class Terminated(BaseException):
+    """A SIGTERM or SIGHUP, raised where the process is, as ^C raises
+    KeyboardInterrupt, so every finally on the way out runs (the KRL key
+    file, git's empty directory). A BaseException, so no `except
+    Exception` swallows it."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+def _unwind(signum, frame):
+    """The handler entry() installs for the UNWINDING signals. The first
+    one unwinds, as KeyboardInterrupt for ^C, else Terminated; any one after
+    it returns at once, so it cannot cut short the cleanup the first one
+    starts. The handler stays installed rather than being swapped for
+    SIG_IGN: Python may already hold a second signal it has not handled
+    yet, and one whose handler became SIG_IGN meanwhile is reported as
+    "ignored due to race condition" on stderr. _die_of() then ends the
+    process by the first signal itself."""
+    global _unwinding
+    if _unwinding:
+        return
+    _unwinding = True
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
+    raise Terminated(signum)
+
+
+def _die_of(signum):
+    """End this process by SIGNUM itself, not a plain exit: a shell waiting
+    on it then sees the signal, as it would for any command killed by it."""
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    return 128 + signum  # only if SIGNUM is blocked
+
+
 def entry(argv):
-    """main(), with an interrupt reported without a traceback. main()'s
-    finally has already removed git's empty directory by then. The process
-    then dies of SIGINT itself, not a plain exit 130: a shell waiting on it
-    stops too, as it would for any command killed by ^C."""
+    """main(), with an interrupt or a termination reported without a
+    traceback. main()'s finally has already removed git's empty directory
+    by then, and krl_revokes() its key file; _remove_left() removes any
+    temporary one a signal kept its cleanup from removing. A SIGTERM or SIGHUP the caller
+    left at its default unwinds like ^C (Terminated), and ^C keeps its
+    KeyboardInterrupt, all three through _unwind(); one the caller ignores
+    (nohup) stays ignored."""
+    global _unwinding
+    _unwinding = False
+    for signum in UNWINDING:
+        default = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
+        if signal.getsignal(signum) == default:
+            signal.signal(signum, _unwind)
     try:
         return main(argv)
     except KeyboardInterrupt:
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        os.kill(os.getpid(), signal.SIGINT)
-        return 130  # only if SIGINT is blocked
+        _remove_left()
+        return _die_of(signal.SIGINT)
+    except Terminated as e:
+        _remove_left()
+        return _die_of(e.signum)
 
 
 if __name__ == "__main__":

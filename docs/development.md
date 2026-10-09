@@ -532,17 +532,19 @@ scope and the file, and the command that removes it, then one line pointing
 at `git -c`:
 
 ```text
-commit-identity: check: refusing: user.email 'a@b' is set at scope local in /path/.git/config; fix: git config --file /path/.git/config --unset-all user.email
+commit-identity: check: refusing: user.email 'a@b' is set at scope local in '/path/.git/config'; fix: git config --file '/path/.git/config' --unset-all user.email
 ```
 
-Control characters, bidi and zero-width characters in a value or a path print
-as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`, so a value
-cannot forge a line. The file is shell-quoted wherever it is printed, so a path
-holding its own `; fix:` cannot pass for a second fix. When the escaping
-changes a path, the fix names the key to remove from that file instead of a
-command, which would name another file. It exits 2 when it cannot answer:
-outside a repository, on a config git refuses to parse, or on a wrong
-argument.
+Control characters, bidi and zero-width characters, and the code points a
+terminal shows as blank (a Hangul filler, the braille blank), in a value or
+a path print as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`,
+so a value cannot forge a line. A value and a file print the same way: in
+single quotes, with a quote inside spelled `\x27`, so a path holding its own
+`; fix:` stays inside its quotes and cannot pass for a second fix. When that
+spelling changes a path, the fix names the key to remove from that file
+instead of a command, which would name another file. It exits 2 when it
+cannot answer: outside a repository, on a config git refuses to parse, or on
+a wrong argument.
 
 The same rule runs as two git hooks, `.githooks/pre-commit` and
 `.githooks/pre-push`, which run `.githooks/commit_identity.py`. `pre-push`
@@ -562,8 +564,8 @@ commit-identity: pre-push: refusing: commit <oid> has committer email 'a@b', not
 This catches an identity removed from the config before the push: the
 commits made under it still carry it. Emails are compared exactly, case
 included, so a case-only difference refuses: that fails closed. The first 20
-offending commits in `git rev-list` order (newest first) are named, then one
-line counts the rest.
+offending commits in `git rev-list` order (by commit date, newest first) are
+named, then one line counts the rest.
 
 The commits compared are those a pushed tip reaches and no remote-tracking
 ref and no remote oid on git's stdin reaches. Any ref under `refs/remotes/`
@@ -575,8 +577,15 @@ GitHub's own merge commits; one the remote holds under a ref never fetched
 here is still compared. A replace ref (`refs/replace/`) is not followed,
 since the push sends the original commit. A deletion sends no commit and
 passes without an identity; a push with commits to compare and no effective
-identity exits 2. While a config refusal stands, the commits are not
-compared, since the effective identity is then the one being refused.
+identity exits 2. A push with nothing left to send passes: git still runs
+the hook, with an empty pipe on stdin. A stdin that is not a pipe (closed,
+or `/dev/null`), which `git push` never gives, a pushed object this
+repository lacks (a full object name as the source, which git hands the hook
+before it looks it up), and a pushed commit whose raw headers hold a NUL or
+not exactly one `author` and one `committer` header (built by hand: git's
+own readers disagree on which one counts) exit 2. While a config refusal
+stands, the commits are not compared, since the effective identity is then
+the one being refused.
 
 A foreign author is refused on purpose: a cherry-pick that keeps someone
 else's authorship, or their merge, does not match the effective identity.
@@ -596,8 +605,11 @@ its repository, so the gate passes there.
 The guard catches accidents. It is not an enforcement boundary: a merge, a
 rebase or a cherry-pick skips `pre-commit`, a commit already on any remote
 this repository tracks is not compared again, and `--no-verify` or a
-repository `core.hooksPath` skips both hooks. The backstop on GitHub is the
-signed-commits rule of the `main-protection` branch ruleset (see
+repository `core.hooksPath` skips both hooks. A crafted push passes too,
+harder than `--no-verify`: a refspec source holding an LF splits its line on
+the hook's stdin, so its first half can name any commit as one the remote
+holds. The backstop on GitHub is the signed-commits rule of the
+`main-protection` branch ruleset (see
 [Repository settings](#repository-settings)).
 
 ## CI
@@ -882,7 +894,12 @@ The identity step and `install.sh doctor` live in `lib/host_identity.py`;
    only reads: a tool under a timeout, a file through `read_small_file()`
    (non-blocking, size-capped). It states each problem as one line with its
    fix, and passes `signing=True` only for a problem that matters to signing
-   alone, which an opted-out host sees as a note.
+   alone, which an opted-out host sees as a note. Its `CHECKS` entry says
+   whether it reads the git config (through `git()` or a `Host` read): such
+   a check is skipped when that config cannot be read safely, and every
+   other check must not depend on it. git in the checkout itself goes
+   through `repo_git()` only, which leaves the global and system config
+   out, and never runs inside a plugin submodule.
 4. A change to how the allowed-signers file is read needs a vector in
    `tests/fixtures/allowed_signers/verify-git.txt`.
    `tests/host_identity_test.sh` checks every vector against `ssh-keygen` in
@@ -899,8 +916,7 @@ is until its trigger fires. The ones about the framework's behaviour are in
 
 | Decision | Kept for now | Reopen when |
 | --- | --- | --- |
-| Extend `install.sh doctor` to the framework's other dependencies (gh auth and its scopes, Homebrew, the pinned plugins, and the like) | `doctor` checks the identity and signing path and the tools it uses: git, python3, ssh-keygen, the ssh-agent | A pull request opens that changes `CHECKS` in `lib/host_identity.py`, or a host breaks on one of those dependencies without a `doctor` line naming it |
-| Give the differential leg's key comparison a bucket check of its own | The leg compares each key spelling with `ssh-keygen -l`, with no assertion that it saw at least one refused and one matching spelling, so a module side that always agreed would pass | The next change to `tests/host_identity_conformance.py` |
+| Extend `install.sh doctor` to gh (its login, token and scopes) and Homebrew | `doctor` checks the identity and signing path, the tools it uses (git, python3, ssh-keygen, the ssh-agent) and the plugin submodules | A pull request opens that adds a gh or Homebrew check to `CHECKS` in `lib/host_identity.py`, or a host breaks on gh or Homebrew without a `doctor` line naming it |
 | Test two identity runs writing `config.local` at once | One writer per run: a temporary file and a rename, and the first `.bak` is never replaced; no concurrency test | A host reports a corrupt `config.local` or a second `.bak` |
 | Test the identity step's macOS-only paths on Linux: a case-insensitive APFS spelling of `TMPDIR`, `/var` as a link to `/private/var`, and an execute-only or deleted working directory | The macOS CI legs run `tests/host_identity_test.sh`: every case there runs under the macOS `TMPDIR` in `/var/folders`, a case-insensitive spelling of `TMPDIR` is run there and skipped elsewhere, and an execute-only working directory must either work or give the one refusal for it. A deleted working directory is not tested | The first macOS run of the identity step that reports a refusal, or a macOS CI leg that fails one of these cases |
 | Hold the test `.py` files to the Python 3.9 floor, in `tests/host_identity_units.py` and the Makefile `py-syntax` leg | The floor is checked for `lib/host_identity.py` only | A test `.py` file uses syntax newer than 3.9, or CI gains a 3.9 leg |

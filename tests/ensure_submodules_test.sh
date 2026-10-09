@@ -128,4 +128,20 @@ out="$(
 grep -q 'submodule init failed' <<<"$out" \
   || fail "a refused corrupt submodule did not warn: $out"
 
-echo "ensure_submodules_test: OK (wiring + detect-and-heal + no-op on healthy + corrupt object refused)"
+# --- (3) the failure line names the checkout as one pasteable word ------------
+# A checkout path holding an ESC prints as a $'...' word in the suggested
+# git -C command, never raw and never inside "..." (where a pasted $( or a
+# backtick would run). A git stub reports a missing submodule, then fails.
+escdir="$work/co$(printf '\033')[2J\$(x)"
+mkdir -p "$escdir" "$work/stub"
+: > "$escdir/.gitmodules"
+printf '#!/bin/sh\ncase " $* " in *" status "*) echo "-0000000 zsh/plugins/x" ;; *) exit 1 ;; esac\n' > "$work/stub/git"
+chmod u+x "$work/stub/git"
+out="$(PATH="$work/stub:$PATH" bash -c '. "$1"; DOTFILES="$2"; ensure_submodules' _ "$installer" "$escdir" 2>&1)" || true
+want="run: git -C \$'$work/co\\x1b[2J\$(x)' -c fetch.fsckObjects=true"
+grep -qF -- "$want" <<<"$out" || fail "the submodule failure line does not quote the checkout path: $out"
+case $out in *"$(printf '\033')"*) fail "the submodule failure line holds a raw ESC: $out" ;; esac
+word="${out#*run: git -C }"; word="${word%% -c *}"
+[ "$(eval "printf '%s' $word")" = "$escdir" ] || fail "the printed word does not name the checkout: $word"
+
+echo "ensure_submodules_test: OK (wiring + detect-and-heal + no-op on healthy + corrupt object refused + quoted failure line)"

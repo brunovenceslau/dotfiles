@@ -164,15 +164,18 @@ login and exits non-zero until they match the file. See
 
 These surfaces are not settled by a good patch. Open an issue first and get an
 answer, because a pull request that changes one of them will be closed on the
-question rather than on the code.
+question rather than on the code. The code span before an item is its surface
+id, the name a pull request's approval checklist uses for it; the item without
+one changes no path.
 
-- **Any change to the security model.** Not an exhaustive list: the SHA-pinned
-  plugin submodules and their static loader, the SSH signing setup,
-  `fsckObjects` forced on every fetch (the detached update sentinel included),
-  the ambient git-config scrubbing on the upgrade path (`vgit` in `install.sh`),
-  and the neutralized fast-syntax-highlighting runtime download.
-- **Adding a submodule or any binary dependency.**
-- **Changing a link convention.**
+- `security-model`: **Any change to the security model.** Not an exhaustive
+  list: the SHA-pinned plugin submodules and their static loader, the SSH
+  signing setup, `fsckObjects` forced on every fetch (the detached update
+  sentinel included), the ambient git-config scrubbing on the upgrade path
+  (`vgit` in `install.sh`), and the neutralized fast-syntax-highlighting
+  runtime download.
+- `dependency`: **Adding a submodule or any binary dependency.**
+- `link-convention`: **Changing a link convention.**
 - **Running a remote interactive installer**, such as the Homebrew bootstrap.
 
 Two more rules sit next to that list and are worth repeating, because breaking

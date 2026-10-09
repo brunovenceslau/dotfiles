@@ -39,7 +39,11 @@ real_ssh_add="$(command -v ssh-add)"
 # No trailing slash: macOS's TMPDIR ends in one, and a "T//" in $work would
 # not match the origins git prints, which may spell the path with one slash.
 tmp="${TMPDIR:-/tmp}"
-work="$(mktemp -d "${tmp%/}/host_identity_test.XXXXXX")"
+# Resolved once (pwd -P), as install.sh resolves its own directory: every
+# path a case expects to read back (the installer, a fixture checkout) is
+# then spelled the way the step prints it, also where TMPDIR sits behind a
+# symlink (macOS: /var -> /private/var).
+work="$(cd "$(mktemp -d "${tmp%/}/host_identity_test.XXXXXX")" && pwd -P)"
 # Every run of the step makes an empty directory for git under TMPDIR: pinned
 # here so a case that leaves one behind fails the suite (checked at the end)
 # instead of littering the caller's /tmp. Cases that test TMPDIR set their own.
@@ -98,6 +102,36 @@ EOF
 chmod u+x "$work/fakebin/ssh-add"
 
 export GIT_CONFIG_SYSTEM=/dev/null
+# --- the checkout every case runs: a fixture, never this one ----------------
+# install.sh and lib/ as they are now, committed in a fixture repository with
+# one real plugin submodule under zsh/plugins/ from a local bare repository,
+# and cloned with it initialized. doctor checks the plugins of the checkout
+# that holds the installer, so the suite does not depend on how this one was
+# cloned. fx runs the fixtures' own git commands (never the step) with no
+# ambient config.
+fx() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.name=t -c user.email=t@t \
+    -c commit.gpgsign=false -c protocol.file.allow=always "$@"
+}
+# mkcheckout DIR - install.sh and lib/ of this tree, in DIR (no git there).
+mkcheckout() {
+  mkdir -p "$1/lib"
+  cat "$repo_root/install.sh" > "$1/install.sh"; chmod u+x "$1/install.sh"
+  for f in "$repo_root"/lib/*.sh "$module"; do cat "$f" > "$1/lib/${f##*/}"; done
+}
+fx init -q --bare -b main "$work/plug.git"
+fx init -q -b main "$work/plug-wt"
+echo one > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" add p.zsh; fx -C "$work/plug-wt" commit -qm one
+pin="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+echo two > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" commit -qam two
+bump="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+fx -C "$work/plug-wt" push -q "$work/plug.git" "$pin:refs/heads/main" "$bump:refs/heads/next"
+co="$work/co"
+fx init -q -b main "$co"; mkcheckout "$co"
+fx -C "$co" submodule add -q "$work/plug.git" zsh/plugins/demo
+fx -C "$co" add -A; fx -C "$co" commit -qm fixture
+fx clone -q --recurse-submodules "$co" "$work/self"
+installer="$work/self/install.sh"
 # No agent of the caller's is ever reachable from this suite (see the e2e case).
 unset GIT_CONFIG_GLOBAL GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT CANGA_HOST_ALLOWED_SIGNERS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION
 unset FAKE_AGENT_DOWN
@@ -1425,6 +1459,57 @@ printf '#!/bin/sh\nexit 1\n' > "$work/nopy/python3"; chmod u+x "$work/nopy/pytho
 rc=0; out="$(PATH="$work/nopy" "$installer" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable"
 has "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $installer identity)" "python3 unusable names the full installer path"
+# A checkout path is untrusted text and the line names it in a command: a
+# path holding a quote, an ESC, a newline and UTF-8 prints as one $'...'
+# word, every byte outside printable ASCII as \xNN, and that word pasted into
+# a shell names the real path. The high bytes come from valid UTF-8 (e-acute,
+# 0xc3 0xa9), never a lone byte: APFS refuses a name that is not valid UTF-8.
+# They exercise _shell_word's 255 mask only on the macOS legs, where
+# install.sh runs under /bin/bash 3.2 (a negative "'c" there); bash 4 and
+# later read them as positive with or without the mask. The directory is
+# made, not symlinked: install.sh resolves its own with pwd -P.
+escdir="$work/co'$(printf '\033')[2J\\x$(printf '\n\303\251')"
+mkdir -p "$escdir"
+ln -s "$repo_root/install.sh" "$escdir/install.sh"
+ln -s "$repo_root/lib" "$escdir/lib"
+rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
+expect_rc 1 "python3 unusable, quoted checkout path"
+# $work is resolved (see its creation), so $escdir is spelled the way
+# install.sh resolves its own directory (cd + pwd -P, DOTFILES at its top).
+has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
+raw_free() {
+  local LC_ALL=C b
+  for b in "$(printf '\033')" "$(printf '\303')" "$(printf '\251')"; do
+    case $out in *"$b"*) fail "$1: output holds a raw byte (output: $out)" ;; esac
+  done
+  case $out in *"
+"*) fail "$1: output holds a raw newline (output: $out)" ;; esac
+}
+raw_free "python3 unusable"
+word="${out#*then run }"; word="${word% identity)}"
+[ "$(eval "printf '%s' $word")" = "$escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
+ok
+
+# --- install.sh _shell_word: the shapes, and LC_ALL kept ----------------------
+fresh
+sw() { bash -c '. "$1"; _shell_word "$2"' _ "$installer" "$1"; }
+for pair in "/a/b-c_d.e@f%g+h=i:j,k|/a/b-c_d.e@f%g+h=i:j,k" "|''" "\\|'\\'" "a b|'a b'" "it's|'it'\\''s'" \
+  "$(printf 'n\nl')|\$'n\\x0al'" "$(printf 'd\177')|\$'d\\x7f'" "$(printf 'q\047\033')|\$'q\\'\\x1b'"; do
+  want="${pair##*|}"; got="$(sw "${pair%|*}")"
+  [ "$got" = "$want" ] || fail "_shell_word: [$got], want [$want]"
+done
+bash -c '. "$1"; unset LC_ALL; _shell_word "$(printf "\351")" >/dev/null; [ -z "${LC_ALL+x}" ]' _ "$installer" \
+  || fail "_shell_word leaked its LC_ALL=C into the caller"
+# Under a UTF-8 caller locale the helper still works on bytes: without its
+# own LC_ALL=C, ${s:i:1} would take e-acute as one character and spell it
+# \xe9 (its code point), not its two UTF-8 bytes.
+utf8="$(locale -a 2>/dev/null | grep -iE '^(C|en_US)\.utf-?8$' | sed -n 1p)" || utf8=""
+if [ -n "$utf8" ]; then
+  got="$(LC_ALL="$utf8" bash -c '. "$1"; _shell_word "$2"' _ "$installer" "$(printf 'x\303\251')")"
+  [ "$got" = "\$'x\\xc3\\xa9'" ] || fail "_shell_word under $utf8: [$got], want [\$'x\\xc3\\xa9']"
+else
+  echo "SKIP: _shell_word under a UTF-8 locale (locale -a lists no C.UTF-8 or en_US.UTF-8)"
+fi
 ok
 
 # --- a config.local that is not a regular file: refused before any git read ---
@@ -1589,11 +1674,11 @@ advise
 has "user.signingkey ('~/.ssh/x\\x1b[2J') names no readable SSH public key" "the advisory escapes a control character"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw escape byte: $out"
 # A ~/.gitconfig key name with control bytes (ESC and BEL in a subsection) is
-# printed escaped by the advisory too, as doctor prints it.
+# printed escaped and quoted by the advisory too, as doctor prints it.
 printf '[user "\033]0;PWNED\007"]\n\tx = 1\n' > "$HOME/.gitconfig"
 rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
 expect_rc 0 "advisory, a ~/.gitconfig key with control bytes"
-has "~/.gitconfig sets user.\\x1b]0;PWNED\\x07.x, and git reads it after" "the advisory escapes a ~/.gitconfig key name"
+has "~/.gitconfig sets 'user.\\x1b]0;PWNED\\x07.x', and git reads it after" "the advisory escapes a ~/.gitconfig key name"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw ESC from ~/.gitconfig: $out"
 ! grep -q "$(printf '\007')" <<<"$out" || fail "the advisory printed a raw BEL from ~/.gitconfig: $out"
 rm -f "$HOME/.gitconfig"
@@ -1934,6 +2019,177 @@ git config --file "$local_cfg" user.name "$(printf 'Jane\033[2JDoe')"
 doc --verbose
 has "Jane\\x1b[2JDoe" "doctor escapes a control character"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "doctor printed a raw escape byte: $out"
+ok
+
+# --- doctor: the plugin submodules, read from files, and the early exit's scope
+# $co is the fixture the suite's checkout was cloned from (see its top); each
+# submodule state is staged there or in a clone of it.
+pdoc() { rc=0; out="$("$1/install.sh" doctor "${@:2}" 2>&1)" || rc=$?; }
+# paste CMD - run a command exactly as doctor printed it, as a shell reads it.
+paste_run() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null bash -c "$1" >/dev/null 2>&1; }
+dhealthy
+# Healthy: `submodule add` leaves HEAD a ref (refs/heads/main), resolved loose.
+pdoc "$co"; expect_rc 0 "doctor, plugin at its pin"; [ -z "$out" ] || fail "doctor, plugin at its pin: $out"
+pdoc "$co" --verbose; expect_rc 0 "doctor --verbose, plugin at its pin"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "doctor names a plugin at its pin"
+# Only gitlinks under zsh/plugins/ are pins: a submodule elsewhere and a file
+# there are not read.
+mkdir -p "$co/zsh/plugins"; echo notes > "$co/zsh/plugins/README"
+fx -C "$co" update-index --add --cacheinfo "160000,$pin,vendor/other"
+fx -C "$co" add zsh/plugins/README; fx -C "$co" commit -qm "not plugins"
+pdoc "$co" --verbose; expect_rc 0 "doctor, a gitlink outside zsh/plugins/"
+lacks "vendor/other" "a gitlink outside zsh/plugins/ is not a plugin pin"
+lacks "README" "a file under zsh/plugins/ is not a plugin pin"
+fx -C "$co" rm -q --cached vendor/other; fx -C "$co" commit -qm "no other"
+# The same, with the ref packed.
+fx -C "$co/zsh/plugins/demo" pack-refs --all
+pdoc "$co" --verbose; expect_rc 0 "doctor, plugin ref packed"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "doctor resolves a packed ref"
+# A local bump is a note, never a problem, and its command returns to the pin.
+fx -C "$co/zsh/plugins/demo" fetch -q origin next; fx -C "$co/zsh/plugins/demo" checkout -q "$bump"
+snap_co="$(HOME="$co" snap)"
+pdoc "$co"; expect_rc 0 "doctor, plugin bumped"; [ -z "$out" ] || fail "doctor, plugin bumped: $out"
+pdoc "$co" --verbose; expect_rc 0 "doctor --verbose, plugin bumped"
+fix="git -C $co -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update -- zsh/plugins/demo"
+has "doctor: plugins: note: zsh/plugins/demo is at ${bump:0:12}, not its pin ${pin:0:12}: a local change, left as it is - to return to the pin, run: $fix" "doctor notes a local bump"
+lacks "dotfiles-upgrade" "a moved pin is not sent to dotfiles-upgrade"
+[ "$(HOME="$co" snap)" = "$snap_co" ] || fail "doctor wrote in the checkout"
+paste_run "$fix" || fail "the bumped plugin's fix did not run"
+pdoc "$co" --verbose; has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "the bump's fix returns to the pin"
+# A HEAD naming a ref its files do not hold (a reftable store reads so).
+cogd="$co/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo"
+printf 'ref: refs/heads/nowhere\n' > "$co/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$co" --verbose; expect_rc 0 "doctor, unresolved plugin HEAD"
+has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at: $cogd/HEAD names refs/heads/nowhere, which its files do not resolve" "doctor notes an unresolved HEAD"
+# A HEAD naming a path out of refs/ is never followed.
+printf 'ref: refs/../../x\n' > "$co/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$co"; expect_rc 1 "doctor, plugin HEAD naming refs/.."
+has "doctor: plugins: cannot read which commit zsh/plugins/demo is at ($cogd/HEAD names refs/../../x, which is not a ref) - move that directory and its git directory $cogd aside, then run: $co/install.sh install" "a HEAD out of refs/ is refused, with both to move"
+printf '%s\n' "$pin" > "$co/.git/modules/zsh/plugins/demo/HEAD"
+# A non-recursive clone leaves the directory empty: a problem, fixed by install.
+fx clone -q "$co" "$work/co2"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin not initialized"; one "doctor, plugin not initialized"
+has "doctor: plugins: zsh/plugins/demo is not initialized, so zsh starts without it - run: $work/co2/install.sh install" "doctor names an uninitialized plugin and install"
+# A config.local git would block on, and git refused outright, stop only the
+# identity checks: the plugin line still comes, and so does the verdict.
+mv "$local_cfg" "$work/plug_local"; mkfifo "$local_cfg"
+bounded_run 20 "$work/doctor.out" "$work/co2/install.sh" doctor --verbose || fail "bounded_run could not start (no job control)"
+[ "$br_hung" -eq 0 ] && [ "$br_stuck" -eq 0 ] || fail "doctor hung on a FIFO config.local (plugins)"
+rc="$br_rc"; out="$(cat "$work/doctor.out")"
+expect_rc 1 "doctor, FIFO config.local and a plugin not initialized"
+has "doctor: git: $local_cfg is not a regular file" "the FIFO line still comes first"
+has "doctor: plugins: zsh/plugins/demo is not initialized" "a FIFO config.local stops only the identity checks"
+has "doctor: python3: " "a FIFO config.local leaves python3 checked"
+lacks "doctor: values:" "a FIFO config.local skips the identity checks"
+has "doctor: verdict: 2 problem(s) need action" "the verdict counts the early exit and the plugin"
+rm -f "$local_cfg"; mv "$work/plug_local" "$local_cfg"
+# The second runner reads the checkout with every ambient config scrubbed: a
+# global config git cannot parse, a malformed GIT_CONFIG_PARAMETERS and a
+# GIT_DIR elsewhere stop the identity checks, never the plugin check.
+printf '[broken\n' > "$work/broken.gitconfig"
+rc=0; out="$(GIT_CONFIG_GLOBAL="$work/broken.gitconfig" GIT_CONFIG_PARAMETERS="'bogus" GIT_DIR="$work/nowhere" \
+  "$co/install.sh" doctor --verbose 2>&1)" || rc=$?
+expect_rc 1 "doctor, git config unreadable"
+has "doctor: git: not reading the git config: " "an unreadable global config stops the identity checks"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "the plugin check runs under a broken global config"
+has "doctor: verdict: 1 problem(s) need action" "the verdict follows the early exit"
+# A gitfile naming a gitdir that is gone: only the directory is moved aside.
+fx -C "$work/co2" submodule update -q --init
+printf 'gitdir: ../../../.git/modules/gone\n' > "$work/co2/zsh/plugins/demo/.git"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin gitdir gone"; one "doctor, plugin gitdir gone"
+has "doctor: plugins: cannot read which commit zsh/plugins/demo is at ($work/co2/zsh/plugins/demo/../../../.git/modules/gone/HEAD: " "doctor names an unreadable plugin"
+has " - move that directory aside, then run: $work/co2/install.sh install" "the gone gitdir's fix moves the directory only"
+mv "$work/co2/zsh/plugins/demo" "$work/demo.aside1"
+fx -C "$work/co2" submodule update -q --init || fail "moving the unreadable plugin aside did not let it initialize again"
+pdoc "$work/co2"; expect_rc 0 "doctor, plugin initialized again"; [ -z "$out" ] || fail "doctor after the fix: $out"
+# A gitdir that exists with a HEAD git cannot use: git reuses that gitdir on
+# init, so the fix moves it aside too, and init then starts afresh.
+gd2="$work/co2/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo"
+printf 'nonsense\n' > "$work/co2/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin HEAD unusable"; one "doctor, plugin HEAD unusable"
+has " - move that directory and its git directory $gd2 aside, then run: $work/co2/install.sh install" "an unusable HEAD's fix moves its gitdir too"
+mv "$work/co2/zsh/plugins/demo" "$work/demo.aside2"; mv "$work/co2/.git/modules/zsh/plugins/demo" "$work/gitdir.aside2"
+fx -C "$work/co2" submodule update -q --init || fail "moving the plugin and its gitdir aside did not let it initialize again"
+pdoc "$work/co2"; expect_rc 0 "doctor, plugin and gitdir initialized again"; [ -z "$out" ] || fail "doctor after the gitdir fix: $out"
+# Not a git checkout, even inside a repository whose path holds a ':' (which
+# no GIT_CEILING_DIRECTORIES entry can express): the pins are not listed, and
+# the outer repository, which pins a plugin, is never read in its place.
+outer="$work/out:er"
+fx init -q -b main "$outer"; fx -C "$outer" update-index --add --cacheinfo "160000,$pin,zsh/plugins/demo"
+fx -C "$outer" commit -qm outer; mkcheckout "$outer/co3"
+pdoc "$outer/co3"; expect_rc 1 "doctor, not a git checkout"; one "doctor, not a git checkout"
+has "doctor: plugins: cannot list the plugin pins of $outer/co3 (fatal: not a git repository: '$outer/co3/.git') - fix what git names, then run doctor again" "doctor names a checkout that is not one, never the outer repository"
+# A repository with no commit yet: HEAD names nothing to list.
+fx init -q -b main "$work/unborn"; mkcheckout "$work/unborn"
+pdoc "$work/unborn"; expect_rc 1 "doctor, unborn HEAD"; one "doctor, unborn HEAD"
+has "doctor: plugins: cannot list the plugin pins of $work/unborn (fatal: " "doctor names an unborn HEAD"
+# A partial clone fetches nothing. Where git honours GIT_NO_LAZY_FETCH (the
+# module's own table, lazy_fetch_off()), ls-tree fails on the missing trees
+# and says so; a git that would fetch (one reporting 2.44.0, a stub around
+# the real one) reads no object at all.
+fx clone -q --bare "$co" "$work/super.git"; fx -C "$work/super.git" config uploadpack.allowFilter true
+fx clone -q --no-checkout --filter=tree:0 "file://$work/super.git" "$work/pc"; mkcheckout "$work/pc"
+objects() { find "$1/.git/objects" -type f | LC_ALL=C sort; }
+mkdir -p "$work/oldgit"
+printf '#!/bin/sh
+[ "$1" = --version ] && { echo "git version 2.44.0"; exit 0; }
+exec %s "$@"
+' "$(command -v git)" > "$work/oldgit/git"
+chmod u+x "$work/oldgit/git"
+honours="$(python3 -I -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("host_identity", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+print("yes" if mod.lazy_fetch_off(sys.argv[2]) else "no")' "$module" "$work/pc")"
+before="$(objects "$work/pc")"
+pdoc "$work/pc" --verbose; expect_rc 0 "doctor, partial clone without its trees"
+if [ "$honours" = yes ]; then
+  has "doctor: plugins: note: $work/pc is a partial clone without the trees the plugin pins are in (" "doctor notes a partial clone it could not list without fetching"
+else
+  has "doctor: plugins: note: $work/pc is a partial clone, and this git cannot read it without fetching what it lacks - not checked" "doctor notes a partial clone this git would fetch into"
+fi
+[ "$(objects "$work/pc")" = "$before" ] || fail "doctor fetched into a partial clone"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/pc/install.sh" doctor --verbose 2>&1)" || rc=$?
+expect_rc 0 "doctor, partial clone, a git that would fetch"
+has "doctor: plugins: note: $work/pc is a partial clone, and this git cannot read it without fetching what it lacks - not checked" "a git that would fetch reads nothing in a partial clone"
+[ "$(objects "$work/pc")" = "$before" ] || fail "doctor fetched into a partial clone (a git that would fetch)"
+# A partial clone that holds its trees is checked where git honours
+# GIT_NO_LAZY_FETCH: it is not skipped for being partial.
+fx clone -q --filter=blob:none "file://$work/super.git" "$work/pc2"
+before="$(objects "$work/pc2")"
+pdoc "$work/pc2"
+if [ "$honours" = yes ]; then
+  expect_rc 1 "doctor, a blob:none clone"
+  has "doctor: plugins: zsh/plugins/demo is not initialized" "a partial clone holding its trees is checked"
+fi
+[ "$(objects "$work/pc2")" = "$before" ] || fail "doctor fetched into a blob:none clone"
+# A promisor set through the repository's include chain counts too.
+fx clone -q "$co" "$work/inc"
+printf '[remote "origin"]\n\tpromisor = true\n' > "$work/inc.gitconfig"
+fx -C "$work/inc" config include.path "$work/inc.gitconfig"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/inc/install.sh" doctor --verbose 2>&1)" || rc=$?
+has "doctor: plugins: note: $work/inc is a partial clone, and this git cannot read it" "a promisor set through include.path counts"
+# An empty promisor value is false, as git reads it: not a partial clone.
+printf '[remote "origin"]\n\tpromisor =\n' > "$work/inc.gitconfig"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/inc/install.sh" doctor --verbose 2>&1)" || rc=$?
+lacks "partial clone" "an empty promisor value is false"
+has "doctor: plugins: zsh/plugins/demo is not initialized" "a repository with promisor = (empty) is checked"
+# A .git/config that is not a regular file: said at once, nothing run in it.
+mv "$work/inc/.git/config" "$work/inc.config"; mkfifo "$work/inc/.git/config"
+bounded_run 20 "$work/doctor.out" "$work/inc/install.sh" doctor || fail "bounded_run could not start (no job control)"
+[ "$br_hung" -eq 0 ] && [ "$br_stuck" -eq 0 ] || fail "doctor hung on a FIFO .git/config"
+rc="$br_rc"; out="$(cat "$work/doctor.out")"
+expect_rc 1 "doctor, FIFO .git/config"; one "doctor, FIFO .git/config"
+has "doctor: plugins: $work/inc/.git/config is not a regular file, so git cannot read this checkout - remove it or make it a file" "doctor names a FIFO .git/config"
+rm -f "$work/inc/.git/config"; mv "$work/inc.config" "$work/inc/.git/config"
+# A gitfile that names a directory outside the superproject's modules: the
+# fix never names it.
+fx -C "$work/inc" submodule update -q --init
+mkdir -p "$work/elsewhere"; printf 'nonsense\n' > "$work/elsewhere/HEAD"
+printf 'gitdir: %s\n' "$work/elsewhere" > "$work/inc/zsh/plugins/demo/.git"
+pdoc "$work/inc"; expect_rc 1 "doctor, a gitfile naming a path outside the modules"
+has " - move that directory aside, then run: $work/inc/install.sh install" "a gitdir outside the modules is not named in the fix"
+lacks "its git directory" "a gitdir outside the modules is not named in the fix"
 ok
 
 # --- --rotate and identity on an opted-out host -------------------------------

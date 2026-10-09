@@ -117,6 +117,22 @@ grep -qE '^\*[[:space:]]+@[A-Za-z0-9-]+' .github/CODEOWNERS \
   || fail ".github/CODEOWNERS must carry a catch-all '* @owner' rule"
 ok "CODEOWNERS carries a catch-all rule"
 
+# --- The ask-first surface ids agree ------------------------------------------
+# A PR's approval checklist names a surface by its id, and two lists carry the
+# ids: CONTRIBUTING.md's canonical one and CLAUDE.md's. An id added to or
+# renamed in only one of them would leave a checklist line that one list does
+# not define, so the two sets must be equal, and neither may be empty.
+surface_ids() {  # FILE HEADING: the `id` of each "- `id`: " item in that section
+  awk -v h="$2" '$0 == h { on = 1; next } on && /^## / { exit } on' "$1" \
+    | sed -n 's/^- `\([a-z0-9-]*\)`: .*/\1/p' | sort
+}
+claude_ids="$(surface_ids CLAUDE.md '## Ask the user first')"
+contrib_ids="$(surface_ids CONTRIBUTING.md '## Ask before you build any of these')"
+[ -n "$claude_ids" ] || fail "CLAUDE.md's 'Ask the user first' list carries no surface id"
+[ "$claude_ids" = "$contrib_ids" ] \
+  || fail "the ask-first surface ids differ: CLAUDE.md has '$(tr '\n' ' ' <<<"$claude_ids")', CONTRIBUTING.md has '$(tr '\n' ' ' <<<"$contrib_ids")'"
+ok "CLAUDE.md and CONTRIBUTING.md carry the same ask-first surface ids"
+
 # --- The Code of Conduct keeps its upstream attribution -----------------------
 # CODE_OF_CONDUCT.md is the Contributor Covenant under CC BY-SA 4.0. That
 # licence requires the attribution to survive, and reuse_gate_test.sh separately

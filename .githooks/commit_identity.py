@@ -36,7 +36,10 @@ the effective identity is then the polluted one.
 
 A guardrail against accidents, not an enforcement boundary: merge, rebase
 and cherry-pick skip pre-commit, and `--no-verify` or a repository
-core.hooksPath skips both hooks.
+core.hooksPath skips both hooks. A crafted push passes as well, harder
+than `--no-verify`: a refspec source holding an LF (`HEAD^{/...}` matching
+a message written for it) splits its ref line in two, and the first half
+can name any oid as one the remote holds.
 
 Allowed, by design: `git -c user.email=...` per command (scope `command`,
 GIT_CONFIG_COUNT included; the recipe for a scratch commit), the
@@ -49,8 +52,11 @@ line git writes on stdin before anything else, so git never meets a closed
 pipe on a large push. A deletion pushes no commit and needs no identity.
 
 Exits 2 when it cannot answer (not a repository, git failing, a ref line of
-an unexpected shape, no effective identity while there are commits to
-compare), never 0.
+an unexpected shape, a `pre-push` stdin that is not a pipe, a pushed object
+the repository lacks, a pushed commit whose raw headers hold a NUL or not
+exactly one author and one committer header, no effective identity while
+there are commits to compare), never 0. An empty pipe is git saying nothing
+is left to push, and passes.
 
 Self-contained on purpose: it runs from a git hook in any checkout of this
 repository, so it imports nothing from lib/ and only the standard library,
@@ -58,7 +64,7 @@ and `-I` keeps the current directory off sys.path.
 """
 
 import os
-import shlex
+import stat
 import subprocess
 import sys
 
@@ -75,11 +81,31 @@ CALLERS = ("pre-commit", "pre-push", "check")
 PREFIX = "commit-identity"
 
 
+# Code points a terminal shows as nothing or as a plain space, though Python
+# counts them printable (letters, marks or symbols, not format characters):
+# the Hangul fillers, the combining grapheme joiner, the Khmer and Mongolian
+# invisible vowels and selectors, the variation selectors, the braille blank,
+# the Egyptian hieroglyph blanks, the Khitan small script filler and the
+# musical null notehead. The same list as lib/host_identity.py's _INVISIBLE.
+_INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+              (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0x1D159, 0x1D159), (0xE0100, 0xE01EF))
+
+
+def _invisible(c):
+    o = ord(c)
+    return any(lo <= o <= hi for lo, hi in _INVISIBLE)
+
+
 def escape(s):
     """One printable line: a backslash doubles, and a character that is not
     printable (a control, LF, a bidi or zero-width format character, a byte
-    that was not UTF-8) prints as its escape, so a value cannot forge a
-    second line or hide part of the message."""
+    that was not UTF-8) or that a terminal shows as nothing (the _INVISIBLE
+    code points, which Python counts as printable) prints as its escape, so
+    a value cannot forge a second line or hide part of the message. The same
+    rule as lib/host_identity.py's escape(), kept beside it rather than
+    imported: each file runs alone (tests/host_identity_units.py holds the
+    two to the same output)."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -87,7 +113,7 @@ def escape(s):
             out.append("\\\\")
         elif 0xDC80 <= o <= 0xDCFF:
             out.append("\\x%02x" % (o - 0xDC00))
-        elif ch.isprintable():
+        elif ch.isprintable() and not _invisible(ch):
             out.append(ch)
         elif o <= 0xFF:
             out.append("\\x%02x" % o)
@@ -100,8 +126,10 @@ def escape(s):
 
 def quoted(s):
     """s escaped and in single quotes, a quote inside it spelled \\x27, so
-    a value cannot close its quotes and add a "fix:" of its own. The
-    backslash escape() doubles keeps \\x27 from being read back as one."""
+    a value or a path cannot close its quotes and add a "fix:" of its own.
+    The backslash escape() doubles keeps \\x27 from being read back as one.
+    When this is s itself in single quotes, it is also the shell word for s:
+    inside single quotes a POSIX shell reads every character literally."""
     return "'%s'" % escape(s).replace("'", "\\x27")
 
 
@@ -129,9 +157,9 @@ def git_env(gdir):
     commits the push sends: a push ignores refs/replace/, so a replacement
     would otherwise show a clean identity in place of the one going out.
     GIT_NO_LAZY_FETCH keeps a partial clone from fetching a missing object
-    over the network to answer a hook: a remote oid it lacks is skipped
-    (--ignore-missing) instead. A git that knows it honours it, an older
-    one ignores it."""
+    over the network to answer a hook: missing() reports a remote oid it
+    lacks instead. A git that knows it honours it, an older one ignores
+    it."""
     return dict(os.environ, GIT_DIR=gdir, GIT_NO_REPLACE_OBJECTS="1",
                 GIT_NO_LAZY_FETCH="1")
 
@@ -202,22 +230,23 @@ def refusals(gdir):
         if path is None:
             where = "from %s" % escape(origin)
             fix = "remove it from that source"
-        elif os.path.isabs(path) and escape(path) == path:
-            # Quoted: the path is absolute and escapes to itself, so it
-            # holds nothing a shell or a terminal would act on, and the
-            # quote keeps a space or a `$` in it one literal word. The `in`
-            # text is quoted the same way, so a path holding its own
-            # "; fix: ..." cannot pass for a fix ahead of the real one.
-            where = "in %s" % shlex.quote(path)
-            fix = "git config --file %s --unset-all %s" % (
-                shlex.quote(path), key)
         else:
-            # No command: the printed path is escaped (a backslash doubled,
-            # a control character spelled out) or is not absolute, so a
-            # command naming it would name another file, which may not
-            # exist. The escaped text is still quoted, for the reason above.
-            where = "in %s" % shlex.quote(escape(path))
-            fix = "remove %s from that file (path shown escaped)" % key
+            # Quoted the way a value is, so a path holding its own
+            # "; fix: ..." stays inside its quotes and cannot pass for a
+            # fix ahead of the real one.
+            where = "in %s" % quoted(path)
+            if os.path.isabs(path) and quoted(path) == "'%s'" % path:
+                # The quoted text is the path itself in single quotes, so
+                # it is one literal shell word (a space or a `$` included)
+                # and the command names this very file from anywhere.
+                fix = "git config --file %s --unset-all %s" % (
+                    quoted(path), key)
+            else:
+                # No command: the printed path is spelled differently (a
+                # backslash doubled, a quote or a control character
+                # spelled out) or is not absolute, so a command naming it
+                # would name another file, which may not exist.
+                fix = "remove %s from that file (path shown escaped)" % key
         lines.append("%s %s is set at scope %s %s; fix: %s"
                      % (key, shown, scope, where, fix))
     return lines
@@ -239,7 +268,9 @@ def ref_lines(data):
         lines.pop()
     for line in lines:
         # rsplit: LOCAL_REF is the refspec's source as typed, so it can hold
-        # spaces (`HEAD^{/fix bug}`); the last three fields cannot.
+        # spaces (`HEAD^{/fix bug}`); the last three fields cannot. An LF in
+        # it splits the line, which no reader of this stream can undo (see
+        # the module docstring).
         fields = line.rsplit(b" ", 3)
         if len(fields) != 4 or not (is_oid(fields[1]) and is_oid(fields[3])):
             fail("pre-push: a ref line on stdin has an unexpected shape")
@@ -251,43 +282,134 @@ def ref_lines(data):
     return tips, known
 
 
+def missing(gdir, oids):
+    """The oids, of those given, that this repository does not hold, from
+    one `git cat-file --batch-check` reading them all on stdin."""
+    order = sorted(oids)
+    p = subprocess.run(
+        ["git", "cat-file", "--batch-check=%(objectname)"],
+        input="".join("%s\n" % o for o in order).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(gdir))
+    if p.returncode != 0:
+        git_failed("'git cat-file'", p)
+    # One line per oid, in input order: the oid when held, `OID missing`
+    # when not. Anything else, the answer is "cannot tell".
+    lines = p.stdout.split(b"\n")
+    if lines[-1] != b"" or len(lines) - 1 != len(order):
+        fail("'git cat-file' printed an unexpected shape")
+    gone = set()
+    for oid, line in zip(order, lines):
+        if line == ("%s missing" % oid).encode():
+            gone.add(oid)
+        elif line != oid.encode():
+            fail("'git cat-file' printed an unexpected shape")
+    return gone
+
+
 def pushed_commits(gdir, tips, known):
     """(oid, author email, committer email) of each commit the push sends.
 
     Reachable from a pushed tip, minus what any remote-tracking ref or a
     remote oid already reaches. The revisions go on stdin (`^` for an
     exclusion, which every git reads there), so a push of many refs cannot
-    outgrow the argument list. --ignore-missing drops a remote oid this
-    repository has never fetched; a local oid always exists, since git
-    just read it to push it. A tree or blob tip lists no commit."""
+    outgrow the argument list. A remote oid this repository has never
+    fetched leaves the exclusions. A pushed tip it lacks exits 2: git
+    hands a full object name given as a refspec source to the hook before
+    it looks the object up, and rev-list cannot read what is not there. A
+    tree or blob tip lists no commit."""
     if not tips:
         return []
+    gone = missing(gdir, tips | known)
+    lost = sorted(tips & gone)
+    if lost:
+        fail("pre-push: the pushed object %s is not in this repository"
+             % lost[0])
     revs = "".join("%s\n" % t for t in sorted(tips))
-    revs += "".join("^%s\n" % k for k in sorted(known))
+    revs += "".join("^%s\n" % k for k in sorted(known - gone))
     # MUST stay in this order: git reads stdin where `--stdin` stands, and
     # `--not` turns every revision after it into an exclusion, so the tips
     # come before it and the remote-tracking refs after it.
     p = subprocess.run(
-        ["git", "rev-list", "--ignore-missing", "--format=%ae%x00%ce",
-         "--stdin", "--not", "--remotes"],
+        ["git", "rev-list", "--stdin", "--not", "--remotes"],
         input=revs.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=git_env(gdir))
     if p.returncode != 0:
         git_failed("'git rev-list'", p)
-    # Two lines per commit: `commit OID`, then AUTHOR NUL COMMITTER. git
-    # takes LF and NUL out of an identity it writes, so any other shape is
-    # a commit object built by hand, and the answer is "cannot tell".
     lines = p.stdout.split(b"\n")
-    if lines[-1] != b"" or (len(lines) - 1) % 2:
+    if lines[-1] != b"" or not all(is_oid(o) for o in lines[:-1]):
         fail("'git rev-list' printed an unexpected shape")
-    out = []
-    for i in range(0, len(lines) - 1, 2):
-        head, emails = lines[i], lines[i + 1].split(b"\0")
-        if not head.startswith(b"commit ") or not is_oid(head[7:]) \
-                or len(emails) != 2:
-            fail("'git rev-list' printed an unexpected shape")
-        out.append((head[7:].decode(), decode(emails[0]), decode(emails[1])))
+    oids = [o.decode() for o in lines[:-1]]
+    if not oids:
+        return []
+    return [(oid,) + idents(oid, body)
+            for oid, body in commit_objects(gdir, oids)]
+
+
+def commit_objects(gdir, oids):
+    """(oid, raw object bytes) of each commit, from one `git cat-file
+    --batch`. Raw bytes, not a formatted view: `git rev-list --header`
+    re-encodes the message (i18n.logOutputEncoding) and stops a header at a
+    NUL, while %ae and %ce read past it, so a second author or committer
+    after a NUL would pass unseen. GIT_NO_REPLACE_OBJECTS (git_env()) makes
+    cat-file read the object the push sends."""
+    p = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        input="".join("%s\n" % o for o in oids).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(gdir))
+    if p.returncode != 0:
+        git_failed("'git cat-file'", p)
+    # Per oid, in input order: OID SP TYPE SP SIZE LF, SIZE bytes, LF.
+    data, pos, out = p.stdout, 0, []
+    for oid in oids:
+        nl = data.find(b"\n", pos)
+        head = data[pos:nl].split(b" ") if nl >= 0 else []
+        if len(head) != 3 or head[0] != oid.encode() \
+                or head[1] != b"commit" or not head[2].isdigit():
+            fail("'git cat-file' printed an unexpected shape")
+        end = nl + 1 + int(head[2])
+        if data[end:end + 1] != b"\n":
+            fail("'git cat-file' printed an unexpected shape")
+        out.append((oid, data[nl + 1:end]))
+        pos = end + 1
+    if pos != len(data):
+        fail("'git cat-file' printed an unexpected shape")
     return out
+
+
+def idents(oid, body):
+    """(author email, committer email) from a raw commit object. Its
+    headers run up to the first blank line (all of it when there is none).
+    A NUL among them, or anything but exactly one author and one committer
+    header, is "cannot tell": git's own readers disagree on such a commit
+    (%ae reads the last author header, `git show` the first, and a NUL
+    stops some readers and not others)."""
+    headers = body.split(b"\n\n", 1)[0]
+    if b"\0" in headers:
+        fail("pre-push: commit %s has a NUL in its headers, so who made it "
+             "is unclear" % oid)
+    # A continuation line (inside gpgsig or mergetag) starts with a space,
+    # so it never matches a header name.
+    lines = headers.split(b"\n")
+    emails = []
+    for name in (b"author ", b"committer "):
+        found = [h for h in lines if h.startswith(name)]
+        if len(found) != 1:
+            fail("pre-push: commit %s has %d %sheaders, so who made it "
+                 "is unclear" % (oid, len(found), name.decode()))
+        emails.append(header_email(oid, found[0]))
+    return tuple(emails)
+
+
+def header_email(oid, header):
+    """The email in an author or committer header (NAME <EMAIL> TIME TZ),
+    read the way git's split_ident_line() reads it: from the first `<` to
+    the first `>` after it."""
+    lt = header.find(b"<")
+    gt = header.find(b">", lt + 1)
+    if lt < 0 or gt < 0:
+        fail("pre-push: commit %s has no <email> in its %s header"
+             % (oid, header.split(b" ", 1)[0].decode()))
+    return decode(header[lt + 1:gt])
 
 
 def ident_email(gdir, var):
@@ -338,7 +460,19 @@ def main(argv):
         return 2
     caller = argv[1]
     stdin = b""
-    if caller == "pre-push" and sys.stdin is not None:
+    if caller == "pre-push":
+        # git always writes the ref lines on a pipe, empty when nothing is
+        # left to push. Anything else means something between git and this
+        # hook dropped them: "cannot tell", never a pass. That covers a
+        # closed stdin (None in Python) and /dev/null, which is what a
+        # closed stdin becomes once `#!/usr/bin/env bash` runs the wrapper
+        # (measured on Linux), and which would read as an empty pipe. A
+        # runner that hands its hooks a socketpair is refused too; none is
+        # wired here, and wiring one reopens accepting S_ISSOCK.
+        if sys.stdin is None \
+                or not stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode):
+            fail("pre-push: stdin is not git's pipe, so what is pushed is "
+                 "unknown")
         stdin = sys.stdin.buffer.read()
     gdir = git_dir()
     lines, pointer = refusals(gdir), None

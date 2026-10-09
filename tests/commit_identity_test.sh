@@ -233,8 +233,8 @@ printf '[user]\n\temail = i@x\n' > "$r/.git/inc"
 if try_commit "$r"; then
   fail "a user.email in an included file must be refused"
 fi
-grep -qF "user.email 'i@x' is set at scope local in $r/.git/inc;" "$work/err" \
-  && grep -qF "fix: git config --file $r/.git/inc --unset-all user.email" \
+grep -qF "user.email 'i@x' is set at scope local in '$r/.git/inc';" "$work/err" \
+  && grep -qF "fix: git config --file '$r/.git/inc' --unset-all user.email" \
     "$work/err" \
   || fail "the refusal must name scope local and the included file: $(err)"
 ok "a user.email in a relative [include] file is refused at scope local"
@@ -250,7 +250,7 @@ wt_cfg="$r/.git/worktrees/r-wtc-linked/config.worktree"
 if try_commit "$work/r-wtc-linked"; then
   fail "a worktree-scoped user.email in a linked worktree must be refused"
 fi
-grep -qF "is set at scope worktree in $wt_cfg;" "$work/err" \
+grep -qF "is set at scope worktree in '$wt_cfg';" "$work/err" \
   || fail "the refusal must name the linked worktree's config.worktree: $(err)"
 try_commit "$r" \
   || fail "the main worktree does not read it, so it must pass: $(err)"
@@ -374,6 +374,106 @@ git -C "$r" push -q --force origin main 2>"$work/err" \
 git -C "$r" remote add fork "$work/fork.git"; git init -q --bare "$work/fork.git"
 git -C "$r" push -q fork main 2>"$work/err" || fail "pre-push: a second remote must pass: $(err)"
 ok "pre-push tolerates a new branch, a deletion, a tag push and a missing remote oid"
+
+# Nothing left to push: git still runs the hook, with an empty stdin (every
+# ref is up to date), and that pushes no commit.
+git -C "$r" push origin main 2>"$work/err" \
+  || fail "pre-push: an up-to-date push (empty stdin) must pass: $(err)"
+grep -q 'Everything up-to-date' "$work/err" \
+  || fail "fixture: the push should have had nothing to send: $(err)"
+ok "pre-push passes a push with nothing to send"
+
+# A full object name as the source reaches the hook unchecked: git looks it
+# up only later, to pack it. A tip the guard cannot read is "cannot tell".
+ghost=1111111111111111111111111111111111111111
+if git -C "$r" push -q origin "$ghost:refs/heads/ghost" 2>"$work/err"; then
+  fail "fixture: a push of a missing object should fail"
+fi
+grep -qxF "commit-identity: pre-push: the pushed object $ghost is not in this repository" \
+  "$work/err" || fail "pre-push must exit 2 on a pushed object it lacks: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/ghost >/dev/null; then
+  fail "a push of an object the guard could not read must not create the remote branch"
+fi
+ok "pre-push refuses a pushed object this repository does not hold"
+
+# A commit built by hand with two author headers: %ae reads the last (the
+# effective identity here), `git show` the first (a foreign one), so the
+# guard cannot tell who made it, and refuses.
+dup="$(printf 'tree %s\nparent %s\nauthor E <e@x> 1 +0000\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\n\ndup\n' \
+  "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" \
+  | git -C "$r" hash-object -t commit -w --literally --stdin)"
+[ "$(git -C "$r" log -1 --format=%ae "$dup")" = g@x ] \
+  || fail "fixture: %ae should read the last author header of $dup"
+if git -C "$r" push -q origin "$dup:refs/heads/dup" 2>"$work/err"; then
+  fail "pre-push must refuse a commit with two author headers"
+fi
+grep -qxF "commit-identity: pre-push: commit $dup has 2 author headers, so who made it is unclear" \
+  "$work/err" || fail "pre-push must exit 2 on two author headers: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/dup >/dev/null; then
+  fail "a refused push must not create the remote branch"
+fi
+ok "pre-push refuses a pushed commit with two author headers"
+
+# A NUL inside the headers hides a second author or committer from
+# `git rev-list --header`, which stops there, while %ae and %ce read past
+# it: the guard reads the raw object and refuses a NUL among the headers.
+for role in committer author; do
+  nul="$(printf 'tree %s\nparent %s\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\nx\0y\n%s E <e@x> 1 +0000\n\nnul\n' \
+    "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" "$role" \
+    | git -C "$r" hash-object -t commit -w --literally --stdin)"
+  case "$role" in author) f=%ae ;; *) f=%ce ;; esac
+  [ "$(git -C "$r" log -1 --format="$f" "$nul")" = e@x ] \
+    || fail "fixture: $f should read the $role header after the NUL in $nul"
+  if git -C "$r" push -q origin "$nul:refs/heads/nul" 2>"$work/err"; then
+    fail "pre-push must refuse a commit with a NUL before a second $role"
+  fi
+  grep -qxF "commit-identity: pre-push: commit $nul has a NUL in its headers, so who made it is unclear" \
+    "$work/err" || fail "pre-push must exit 2 on a NUL among the headers: $(err)"
+  if git -C "$remote" rev-parse -q --verify refs/heads/nul >/dev/null; then
+    fail "a refused push must not create the remote branch"
+  fi
+done
+ok "pre-push refuses a second author or committer hidden behind a NUL"
+
+# The headers are read raw: an output encoding that writes NULs of its own
+# (UTF-16) changes nothing, and an empty message still passes.
+git -C "$r" checkout -q -b enc main
+git -C "$r" commit -q --allow-empty --allow-empty-message -m '' 2>"$work/err" \
+  || fail "fixture: empty-message commit refused: $(err)"
+git -C "$r" -c i18n.logOutputEncoding=UTF-16 push -q origin enc 2>"$work/err" \
+  || fail "pre-push under i18n.logOutputEncoding=UTF-16 must pass a clean commit: $(err)"
+git -C "$r" checkout -q main
+ok "pre-push passes an empty message and a UTF-16 log output encoding"
+
+# git always writes the ref lines on a pipe. A dispatcher that closes stdin
+# hides what is pushed, so the guard cannot answer, and refuses: a foreign
+# commit must not pass for want of its ref line. Through the wrapper's
+# `#!/usr/bin/env bash` the closed stdin arrives as /dev/null, which would
+# read as "nothing to push".
+git -C "$r" checkout -q -b closed main
+GIT_AUTHOR_EMAIL=au@x try_commit "$r" || fail "fixture: author commit refused: $(err)"
+sed 's|"\$@"; fi|"$@" <\&-; fi|' "$work/dispatch/pre-commit" > "$work/dispatch/pre-push"
+grep -qF '<&-' "$work/dispatch/pre-push" || fail "fixture: the dispatcher still passes stdin"
+set +e
+git -C "$r" push -q origin closed 2>"$work/err"
+rc=$?
+set -e
+cat "$work/dispatch/pre-commit" > "$work/dispatch/pre-push"
+[ "$rc" -ne 0 ] && grep -qxF "commit-identity: pre-push: stdin is not git's pipe, so what is pushed is unknown" \
+  "$work/err" || fail "pre-push with a closed stdin must exit 2, got $rc: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/closed >/dev/null; then
+  fail "a push the guard could not read must not create the remote branch"
+fi
+git -C "$r" checkout -q main
+for redir in '<&-' '</dev/null'; do
+  set +e
+  (cd "$r" && eval ".githooks/pre-push origin '$remote' $redir") 2>"$work/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] && grep -qxF "commit-identity: pre-push: stdin is not git's pipe, so what is pushed is unknown" \
+    "$work/err" || fail "pre-push run with $redir must exit 2, got $rc: $(err)"
+done
+ok "pre-push refuses when its stdin is closed or not a pipe"
 
 # git writes the source of a refspec as LOCAL_REF verbatim, so it can hold
 # spaces: only the last three fields of a ref line are fixed.
@@ -624,7 +724,7 @@ mkdir -p "$r/sub/dir"
 for d in "$r/sub/dir" "$r/.git" "$r/.git/refs"; do
   check "$d"
   [ "$rc" -eq 1 ] \
-    && grep -qF "fix: git config --file $r/.git/config " "$work/err" \
+    && grep -qF "fix: git config --file '$r/.git/config' " "$work/err" \
     || fail "a run from $d must refuse and name $r/.git/config, got $rc: $(err)"
 done
 ok "a run from a subdirectory or from inside .git names the same config file"
@@ -632,7 +732,7 @@ ok "a run from a subdirectory or from inside .git names the same config file"
 b="$work/bare.git"; git init -q --bare "$b"
 git -C "$b" config user.email a@b
 check "$b"
-[ "$rc" -eq 1 ] && grep -qF "fix: git config --file $b/config " "$work/err" \
+[ "$rc" -eq 1 ] && grep -qF "fix: git config --file '$b/config' " "$work/err" \
   || fail "a bare repository must refuse and name $b/config, got $rc: $(err)"
 ok "a bare repository is checked and names its config file"
 
