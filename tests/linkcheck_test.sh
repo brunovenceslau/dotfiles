@@ -817,8 +817,15 @@ shapes = {
     "h50.md": "<a =x" * (n // 5),
     "h51.md": "<a x<y" * (n // 6),
     "h52.md": "<a x<a " * (n // 7),
-    "h53.md": "<a x =y " * (n // 8),
+    # One tag with a long run of `name =value` pairs: without the lookahead
+    # in _hattr each pair parses two ways and the scan is exponential.
+    "h53.md": "<a " + "x =y " * (n // 5),
     "h54.md": "<a x</ =" * (n // 8),
+    "h55.md": "<a href=x=" * (n // 10),
+    "h56.md": "<a href=`x " * (n // 11),
+    "h57.md": "`<a t=\"`" * (n // 8) + "\\`" * (n // 4),
+    "h58.md": "[a](u`) `" * (n // 9),
+    "h59.md": "# [a](u`) `b` ![i](v`) `" * (n // 25),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -1021,7 +1028,8 @@ expect_broken README.md '## `![i](u)` Foo
 # Tags HTML5 reads as live links although CommonMark's inline grammar does
 # not (checked against parse5 7.1.2, a WHATWG tokenizer: each yields an href
 # attribute): `/` between attributes, a name opening with `=`, a `<` in a
-# name. One miss is kept on purpose, a `<` that opens another `<a` in a name.
+# name. One divergence is kept on purpose, pinned below: a `<` that opens
+# another `<a` or `<img` in a name ends the tag.
 expect_broken README.md '<a/href="docs/gone-slash.md">x</a>' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-slash\.md$' \
   "an href after a solidus instead of a space is checked"
@@ -1054,5 +1062,98 @@ ok "an href padded with whitespace or a newline resolves to its target"
 expect_broken README.md "$(printf '<a href="\n docs/gone-ws.md\n">x</a>')" \
   '^README\.md:[0-9]+: no such tracked file or directory: ' \
   "an href padded with whitespace is still reported when its target is gone"
+
+# CommonMark parses a link's destination and title before a backtick there can
+# open a span, and a backslash-escaped backtick opens nothing (checked against
+# markdown-it 14.1.0 and github-slugger 2.0.0: `a`, `a-b`, `a-c`, `a-c`).
+# A one-space pad on both sides of a span is not part of the code, and a
+# longer fence holds a shorter run. Each heading below links to its id.
+new_tree
+cat >"$work/r/docs/spans2.md" <<'MD'
+# Spans two
+
+## \`[a](https://e.com/b)\`
+
+## [a](https://e.com/u`) `b`
+
+## [a](<https://e.com/u`>) `c`
+
+## [a](https://e.com/b "`") `c`
+
+## ` pad ` x
+
+## ``a`b`` Foo
+
+## unclosed ` tick
+
+## \` escaped
+
+[1](#a) [2](#a-b) [3](#a-c) [4](#a-c-1) [5](#pad-x) [6](#ab-foo)
+[7](#unclosed--tick) [8](#-escaped)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "headings with backticks in destinations, escaped, padded, fenced or unclosed must slug as CommonMark reads them (exit $rc): $out"
+ok "a backtick in a link destination or title, an escaped, padded, multi-backtick or unclosed span slugs as CommonMark reads it"
+
+# An anchor kept by a tag or an escape: backticks inside an <a> tag's value,
+# or escaped, are not a span, so the ids around them count.
+new_tree
+cat >"$work/r/docs/ids2.md" <<'MD'
+\`<a id="x">\` text
+
+<a id="y" title="`"></a> and `code`
+
+[1](#x) [2](#y)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an id after an escaped backtick or beside a backtick in a tag value is an anchor (exit $rc): $out"
+ok "an <a id> after an escaped backtick, or a tag holding a backtick in a value, is an anchor"
+# Pinned divergences: a backtick in another tag's value can still pair with
+# a later one, and an id after an inner <img opener is the inner tag's.
+expect_broken README.md '<b title="`">x</b> <a id="p"></a> `y`
+
+[l](#p)' 'no such anchor in README\.md: #p' \
+  "a backtick in another tag's value pairs with a later one (known miss)"
+expect_broken README.md '<a x<img id="q">
+
+[l](#q)' 'no such anchor in README\.md: #q' \
+  "an id after an inner <img opener belongs to the inner tag (kept divergence)"
+expect_broken README.md '<a x<a href="docs/gone-inner.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-inner\.md$' \
+  "an href after an inner <a opener in a name is still checked"
+expect_broken README.md '<a x<img src="docs/gone-inner2.png">' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-inner2\.png$' \
+  "a src after an inner <img opener in a name is still checked"
+expect_broken README.md '<a x =y href="docs/gone-eq2.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-eq2\.md$' \
+  "a valueless name, then =y as its value, then an href is checked"
+expect_broken README.md '<a href=docs/gone.md?x=1>x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md\?x=1$' \
+  "a bare href holding = is checked"
+expect_broken README.md '<a href=docs/gone`b.md>x</a>' \
+  'no such tracked file or directory: docs/gone`b\.md$' \
+  "a bare href holding a backtick is checked"
+expect_broken README.md '<a title="x"/href="docs/gone-q.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-q\.md$' \
+  "an href after a solidus that follows a closing quote is checked"
+expect_broken README.md '<a href="docs/gone-sc.md"/>x' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-sc\.md$' \
+  "a self-closed tag is checked"
+
+# The URL standard strips leading and trailing C0 controls and spaces only
+# (U+0001 is one, U+00A0 is not), then deletes tabs and newlines anywhere;
+# an href empty after the strip is the page itself.
+new_tree
+printf '%s\n' '<a href="&#x1;guide.md&#x1f;">1</a> <a href="gu&#9;ide.&#10;md">2</a> <a href=" ">3</a>' \
+  >"$work/r/docs/ws2.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "controls around an href, tabs and newlines inside it, and an empty href must pass (exit $rc): $out"
+ok "an href with C0 references around it, tabs and newlines inside it, or nothing but spaces passes"
+expect_broken README.md '<a href="&#xA0;docs/guide.md">x</a>' \
+  'no such tracked file or directory: ' \
+  "a no-break space is not stripped from an href, so the target is reported"
 
 echo "linkcheck_test: $pass passed"

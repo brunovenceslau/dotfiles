@@ -204,9 +204,12 @@ REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*
 # attributes is a separator (`<a/href="t.md">`), a name may open with `=`
 # (`<a =x href="t.md">`) and hold a `<` (`<a x<y href="t.md">`), and a
 # name followed by `=` always takes a value, so a name has one parse only.
-# The one known miss left is a `<` that opens another `<a` or `<img` inside
-# a name (`<a x<a href="t.md">`): that `<` ends the scan, which keeps the
-# scans of openers from overlapping, so unclosed tags stay linear.
+# One divergence is kept: a `<` that opens another `<a` or `<img` inside a
+# name ends the scan (`<a x<a href="t.md">`). The outer tag is then no tag
+# and the inner one is read on its own, so its href is still checked, but an
+# id or name after the inner opener is credited to the inner tag, where
+# HTML5 gives it to the outer one. That keeps the scans of openers from
+# overlapping, so unclosed tags stay linear.
 # html_attrs walks the attributes of a matched tag with HTML_ATTR.
 # Linear: a name, a bare value and a quoted value start on different
 # characters, and a name follows whitespace and `/` or a closing quote only,
@@ -221,7 +224,7 @@ def _hattr(group):
     the copy inside HTML_OPEN. A name followed by `=` takes a value (the
     lookahead), else `a =b` would parse as `a=b` and as `a`, `=b`."""
     value = (r"(?:\"" + group + r"(?:[^\"\n]|" + _PARA + r")*)\"|'" + group
-             + r"(?:[^'\n]|" + _PARA + r")*)'|" + group + r"[^ \t\n\r\f\v\"'=<>`]+))")
+             + r"(?:[^'\n]|" + _PARA + r")*)'|" + group + r"[^ \t\n\r\f\v\"'<>]+))")
     plain = r"[^ \t\n\r\f\v\"'=<>/]"
     name = (r"(?:=|" + plain + r")(?:" + plain + r"|<(?!(?i:a|img)[ \t\n\r\f\v/>]))*")
     return (r"(?:(?:" + _WS + r"|/)+|(?<=[\"']))" + group + name + r")(?:"
@@ -346,6 +349,11 @@ def strip_code(text, spans=True):
     HTML comments, and (with spans) inline code spans. Every blanked character
     becomes a space, so offsets and line numbers still point into the file.
     Headings are read with spans=False: GitHub's id includes a span's text."""
+    return blank_spans(strip_blocks(text), spans)
+
+
+def strip_blocks(text):
+    """The block-level half of strip_code: front matter and code blocks."""
     lines = text.split("\n")
     out = []
     i = 0
@@ -389,7 +397,7 @@ def strip_code(text, spans=True):
             in_list = False
         out.append(ln)
         prev_blank, in_icode = False, False
-    return blank_spans(("\n".join(out)), spans)
+    return "\n".join(out)
 
 
 def blank_spans(text, spans):
@@ -403,8 +411,15 @@ def blank_spans(text, spans):
     run is listed once with the next run of its own length (nxt), so finding
     a partner is a lookup, not a scan per opener (a line of runs of every
     length 1..k cost one scan per length); a paragraph's end is found once
-    per paragraph; and the next `<!--` is searched again only once the scan
-    has passed it (a file with none answers -1 once, not once per run)."""
+    per paragraph; and the next `<!--` (and, with spans, the next `<a` or
+    `<img` tag) is searched again only once the scan has passed it (a file
+    with none answers -1 once, not once per run).
+    Two things bind as tightly as a span and win when they come first: a
+    backslash (an odd run of them) before a backtick, which then opens
+    nothing (it can still close a span, since backslashes are literal in
+    code), and an `<a>` or `<img>` open tag, whose quoted values may hold
+    backticks. Other tags are not tracked (a known miss: a backtick in
+    another tag's attribute can pair with a later one)."""
     n = len(text)
     ends = [m.start() for m in BLANK_LINE.finditer(text)] + [n]
     runs = [(m.start(), m.end() - m.start()) for m in re.finditer("`+", text)]
@@ -415,14 +430,23 @@ def blank_spans(text, spans):
         last[runs[k][1]] = k
     pieces, i, e, r = [], 0, 0, 0
     c = text.find("<!--")
+    tag = HTML_OPEN.search(text) if spans else None
+    t = tag.start() if tag else -1
     while i < n:
         if 0 <= c < i:
             c = text.find("<!--", i)
+        if 0 <= t < i:
+            tag = HTML_OPEN.search(text, i)
+            t = tag.start() if tag else -1
         while r < len(runs) and runs[r][0] < i:
             r += 1
         a = runs[r][0] if r < len(runs) else -1
-        if a < 0 and c < 0:
+        if a < 0 and c < 0 and t < 0:
             break
+        if t >= 0 and (a < 0 or t < a) and (c < 0 or t < c):
+            pieces.append(text[i:tag.end()])
+            i = tag.end()
+            continue
         if c >= 0 and (a < 0 or c < a):
             close = text.find("-->", c + 4)
             end = n if close < 0 else close + 3
@@ -434,6 +458,13 @@ def blank_spans(text, spans):
         # a comment's `>`, or at 0, never inside a run.
         k = run_at[a]
         run = runs[k][1]
+        b = a
+        while b > 0 and text[b - 1] == "\\":
+            b -= 1
+        if (a - b) % 2:
+            pieces.append(text[i:a + run])   # escaped: literal backticks
+            i = a + run
+            continue
         while ends[e] < a:
             e += 1
         partner = nxt[k]
@@ -486,22 +517,56 @@ _TAIL = (r"\(" + _WS + r"*(?:(?:" + _DEST_ANGLE + "|" + _DEST_BARE + r")"
 # An image shares the link's tail, else the `[alt](...)` part of an image with
 # a title would match as a link and leak its alt text; an escaped `!` makes it
 # a plain link.
-HEADING_IMAGE = re.compile(r"(?<!\\)!\[[^\[\]]*\]" + _TAIL)
+HEADING_IMAGE = re.compile(r"(?<!\\)!\[([^\[\]]*)\]" + _TAIL)
 HEADING_LINK = re.compile(r"\[([^\[\]]*)\]" + _TAIL)
 
 
-_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)")
+# A code span in one line: N backticks up to the next run of exactly N. A
+# backslash escape is consumed first (alternative 1), so an escaped backtick
+# opens nothing; inside a span backslashes are literal, and the span's
+# content is consumed whole, so they are never seen as escapes.
+_SPAN = re.compile(r"\\[!-/:-@\[-`{-~]|(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)")
+
+
+def _code_spans(text):
+    """[(start, end, content)] of the code spans of one line. A span binds
+    tighter than link syntax (CommonMark 6.1) except where a link's
+    destination or title holds the backtick: `[a](u`) `b`` is a link and a
+    span, not a span over `) `. So the spans are found once, a link or
+    image that opens outside them marks its destination and title as a zone
+    where no backtick opens or closes anything, and they are found again
+    with the zones hidden."""
+    spans = [m for m in _SPAN.finditer(text) if m.group(1)]
+    if not spans:
+        return []
+    # Linear: the spans are sorted and disjoint, so one bisect places a
+    # match, and the text is cut once, not once per link.
+    starts = [m.start() for m in spans]
+    zones = []
+    for rx in (HEADING_IMAGE, HEADING_LINK):
+        for m in rx.finditer(text):
+            k = bisect.bisect_right(starts, m.start()) - 1
+            if k < 0 or m.start() >= spans[k].end():
+                zones.append((m.end(1) + 1, m.end()))
+    pieces, pos = [], 0
+    for a, b in sorted(zones):
+        if a >= pos:
+            pieces.append(text[pos:a])
+            pieces.append(text[a:b].replace("`", "\x01"))
+            pos = b
+    hidden = "".join(pieces) + text[pos:]
+    return [(m.start(), m.end(), m.group(2))
+            for m in _SPAN.finditer(hidden) if m.group(1)]
 
 
 def _sub_outside_spans(rx, repl, text):
-    """rx.sub over text, never matching into a code span: a span binds
-    tighter than link syntax (CommonMark 6.1), so `` `![i](u)` `` is code,
-    not an image. Each span is masked with a same-length filler for the
-    search; repl(m, text) builds the replacement from the original text."""
+    """rx.sub over text, never matching into a code span (see _code_spans).
+    Each span is masked with a same-length filler for the search;
+    repl(m, text) builds the replacement from the original text."""
     masked, pos = [], 0
-    for m in _SPAN.finditer(text):
-        masked.append(text[pos:m.start()] + "x" * (m.end() - m.start()))
-        pos = m.end()
+    for a, b, _ in _code_spans(text):
+        masked.append(text[pos:a] + "x" * (b - a))
+        pos = b
     masked.append(text[pos:])
     out, pos = [], 0
     for m in rx.finditer("".join(masked)):
@@ -533,10 +598,14 @@ def slugify(text):
     # unbounded, a heading of backtick runs of every length 1..2000 (2 MB)
     # took 26 s, against 0.3 s bounded, since each unpartnered run scans
     # the rest of the line. A heading's code span never comes near 2048.
-    for m in _SPAN.finditer(text):
-        rendered.append(_render_inline(text[pos:m.start()]))
-        rendered.append(m.group(2))
-        pos = m.end()
+    for a, b, content in _code_spans(text):
+        rendered.append(_render_inline(text[pos:a]))
+        # One space of padding on both sides is not part of the code, unless
+        # the span is all spaces (CommonMark 6.1).
+        if len(content) > 2 and content[0] == content[-1] == " " and content.strip(" "):
+            content = content[1:-1]
+        rendered.append(content)
+        pos = b
     rendered.append(_render_inline(text[pos:]))
     text = "".join(rendered).strip().lower()
     out = []
@@ -584,11 +653,15 @@ def html_value(s):
     return ENTITY.sub(lambda m: html.unescape(m.group()), s)
 
 
+URL_CTL = re.compile("[\t\n\r]")
+
+
 def html_url(s):
     """An href or src as a URL parser takes it: the URL standard strips the
-    leading and trailing C0 controls and spaces (U+0000 to U+0020) first, so
-    `href="` + LF + `docs/x.md"` names docs/x.md."""
-    return html_value(s).strip("".join(map(chr, range(0x21))))
+    leading and trailing C0 controls and spaces (U+0000 to U+0020) first,
+    then deletes every tab and newline inside, so `href="` + LF + `docs/x.md"`
+    names docs/x.md and so does `docs/x.` + LF + `md`."""
+    return URL_CTL.sub("", html_value(s).strip("".join(map(chr, range(0x21)))))
 
 
 def html_attrs(text):
@@ -633,8 +706,8 @@ class Tree:
 
     def anchors(self, rel):
         if rel not in self._anchors:
-            raw = read_text(self.root, rel)
-            text = strip_code(raw, spans=False)
+            blocks = strip_blocks(read_text(self.root, rel))
+            text = blank_spans(blocks, False)
             lines = text.split("\n")
             slugger, res = Slugger(), set()
             # An explicit anchor: an `<a>`'s id or name, the set the gate
@@ -642,7 +715,7 @@ class Tree:
             # unverified, and counting one it drops would hide a broken link.
             # Read with spans blanked: inside a code span a tag is text, so
             # only a heading keeps a span (its text is part of the id).
-            for tag, name, _, value in html_attrs(strip_code(raw)):
+            for tag, name, _, value in html_attrs(blank_spans(blocks, True)):
                 if tag == "a" and name in ("id", "name"):
                     res.add(html_value(value))
             for i, ln in enumerate(lines):
