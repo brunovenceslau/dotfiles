@@ -200,26 +200,32 @@ REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*
 # live link is the costly mistake. It keeps two rules both readings share:
 # a `>` inside a quoted value does not end the tag, and no tag crosses a
 # blank line. Anything else is text, so a tag inside it is still found.
-# The reading is lenient only in part, so the one-parse rule below holds:
-# HTML5 also reads `<a/href="t.md">`, `<a =x href="t.md">` and
-# `<a x<y href="t.md">` as live links, and the gate finds no attribute in
-# any of them (known misses).
+# It follows the HTML5 tokenizer where that is cheap: a `/` between
+# attributes is a separator (`<a/href="t.md">`), a name may open with `=`
+# (`<a =x href="t.md">`) and hold a `<` (`<a x<y href="t.md">`), and a
+# name followed by `=` always takes a value, so a name has one parse only.
+# The one known miss left is a `<` that opens another `<a` or `<img` inside
+# a name (`<a x<a href="t.md">`): that `<` ends the scan, which keeps the
+# scans of openers from overlapping, so unclosed tags stay linear.
 # html_attrs walks the attributes of a matched tag with HTML_ATTR.
 # Linear: a name, a bare value and a quoted value start on different
-# characters, and a name follows whitespace or a closing quote only, so a
-# tag parses one way only; a `<` outside a quoted value ends an opener's
-# scan, and an opener inside another's quoted value runs on only through
-# a value of the other quote kind, so scans overlap at most two deep.
+# characters, and a name follows whitespace and `/` or a closing quote only,
+# so a tag parses one way only; a `<` outside a quoted value or a name ends
+# an opener's scan, and an opener inside another's quoted value runs on only
+# through a value of the other quote kind, so scans overlap at most two deep.
 
 
 def _hattr(group):
     """One attribute after its separator; group is "(" to capture the name
     and the value (2 double-quoted, 3 single-quoted, 4 bare), "(?:" for
-    the copy inside HTML_OPEN."""
+    the copy inside HTML_OPEN. A name followed by `=` takes a value (the
+    lookahead), else `a =b` would parse as `a=b` and as `a`, `=b`."""
     value = (r"(?:\"" + group + r"(?:[^\"\n]|" + _PARA + r")*)\"|'" + group
              + r"(?:[^'\n]|" + _PARA + r")*)'|" + group + r"[^ \t\n\r\f\v\"'=<>`]+))")
-    return (r"(?:" + _WS + r"+|(?<=[\"']))" + group + r"[^ \t\n\r\f\v\"'=<>/]+)(?:"
-            + _WS + r"*=" + _WS + r"*" + value + r")?")
+    plain = r"[^ \t\n\r\f\v\"'=<>/]"
+    name = (r"(?:=|" + plain + r")(?:" + plain + r"|<(?!(?i:a|img)[ \t\n\r\f\v/>]))*")
+    return (r"(?:(?:" + _WS + r"|/)+|(?<=[\"']))" + group + name + r")(?:"
+            + _WS + r"*=" + _WS + r"*" + value + r"|(?!" + _WS + r"*=))")
 
 
 HTML_ATTR = re.compile(_hattr("("))
@@ -484,6 +490,28 @@ HEADING_IMAGE = re.compile(r"(?<!\\)!\[[^\[\]]*\]" + _TAIL)
 HEADING_LINK = re.compile(r"\[([^\[\]]*)\]" + _TAIL)
 
 
+_SPAN = re.compile(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)")
+
+
+def _sub_outside_spans(rx, repl, text):
+    """rx.sub over text, never matching into a code span: a span binds
+    tighter than link syntax (CommonMark 6.1), so `` `![i](u)` `` is code,
+    not an image. Each span is masked with a same-length filler for the
+    search; repl(m, text) builds the replacement from the original text."""
+    masked, pos = [], 0
+    for m in _SPAN.finditer(text):
+        masked.append(text[pos:m.start()] + "x" * (m.end() - m.start()))
+        pos = m.end()
+    masked.append(text[pos:])
+    out, pos = [], 0
+    for m in rx.finditer("".join(masked)):
+        out.append(text[pos:m.start()])
+        out.append(repl(m, text))
+        pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def slugify(text):
     """GitHub's heading id: the rendered text, lowercased, with every character
     that is not a letter, mark, number, connector (`_`), hyphen or space
@@ -497,14 +525,15 @@ def slugify(text):
     # none, so `![i](u) Foo` keeps its leading space and gets a leading hyphen.
     # A NUL stands in for the image: it is not whitespace, so the strip below
     # leaves the space beside it, and the character loop drops it.
-    text = HEADING_IMAGE.sub("\0", text.strip())
-    text = HEADING_LINK.sub(r"\1", text)   # a link renders as its text
+    text = _sub_outside_spans(HEADING_IMAGE, lambda m, t: "\0", text.strip())
+    # a link renders as its text
+    text = _sub_outside_spans(HEADING_LINK, lambda m, t: t[m.start(1):m.end(1)], text)
     rendered, pos = [], 0
     # The code span's 2048 bound is the one kept for speed, by measurement:
     # unbounded, a heading of backtick runs of every length 1..2000 (2 MB)
     # took 26 s, against 0.3 s bounded, since each unpartnered run scans
     # the rest of the line. A heading's code span never comes near 2048.
-    for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
+    for m in _SPAN.finditer(text):
         rendered.append(_render_inline(text[pos:m.start()]))
         rendered.append(m.group(2))
         pos = m.end()
@@ -555,6 +584,13 @@ def html_value(s):
     return ENTITY.sub(lambda m: html.unescape(m.group()), s)
 
 
+def html_url(s):
+    """An href or src as a URL parser takes it: the URL standard strips the
+    leading and trailing C0 controls and spaces (U+0000 to U+0020) first, so
+    `href="` + LF + `docs/x.md"` names docs/x.md."""
+    return html_value(s).strip("".join(map(chr, range(0x21))))
+
+
 def html_attrs(text):
     """(tag, name, offset, value) of every attribute given a value in an
     `<a>` or `<img>` open tag, tag and name lowercased. The attributes tile
@@ -597,13 +633,16 @@ class Tree:
 
     def anchors(self, rel):
         if rel not in self._anchors:
-            text = strip_code(read_text(self.root, rel), spans=False)
+            raw = read_text(self.root, rel)
+            text = strip_code(raw, spans=False)
             lines = text.split("\n")
             slugger, res = Slugger(), set()
             # An explicit anchor: an `<a>`'s id or name, the set the gate
             # has always read. Whether GitHub keeps an id on other tags is
             # unverified, and counting one it drops would hide a broken link.
-            for tag, name, _, value in html_attrs(text):
+            # Read with spans blanked: inside a code span a tag is text, so
+            # only a heading keeps a span (its text is part of the id).
+            for tag, name, _, value in html_attrs(strip_code(raw)):
                 if tag == "a" and name in ("id", "name"):
                     res.add(html_value(value))
             for i, ln in enumerate(lines):
@@ -685,7 +724,7 @@ def check_file(tree, rel):
         targets.append((m.start(g), m.group(g), md_dest(m.group(g))))
     for _, name, off, value in html_attrs(code_free):
         if name in ("href", "src"):
-            targets.append((off, value, html_value(value)))
+            targets.append((off, value, html_url(value)))
     for m in REFLINK.finditer(code_free):
         label = m.group(2) if m.group(2).strip() else m.group(1)
         if ref_label(label) not in labels:

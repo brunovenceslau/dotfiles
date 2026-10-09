@@ -478,8 +478,10 @@ link-convention change.
   turned into `-`. Text inside a code span is kept as written, so
   `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
   `-1`, `-2` in order, the way github-slugger numbers it. An explicit
-  anchor counts too: the `id` or `name` of an `<a>` tag. An anchor into any
-  other file, such as a `#L10` line anchor, is not checked.
+  anchor counts too: the `id` or `name` of an `<a>` tag, unless the tag sits
+  in a code span, where it is text. Link and image markup inside a heading's
+  code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. An anchor
+  into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
 - Front matter, fenced code blocks and HTML comments (both running to the end
@@ -490,9 +492,14 @@ link-convention change.
   tag is read much the way GitHub's HTML5 parser reads an HTML block, since
   a link it renders is live: an attribute may follow a quoted value with no
   space, a name may open with a digit, a `>` inside a quoted attribute value
-  does not end the tag, and one that crosses a blank line is text. Three
-  shapes HTML5 reads as live links are known misses: `<a/href="t.md">`,
-  `<a =x href="t.md">` and `<a x<y href="t.md">`. A link whose text wraps
+  does not end the tag, and one that crosses a blank line is text. A `/`
+  between attributes (`<a/href="t.md">`), a name opening with `=`
+  (`<a =x href="t.md">`) and a `<` in a name (`<a x<y href="t.md">`) are
+  read as HTML5 reads them. One shape HTML5 reads as a live link is a known
+  miss: a `<` that opens another `<a` or `<img` inside a name
+  (`<a x<a href="t.md">`). An `href` or `src` loses its leading and
+  trailing controls and spaces before it is resolved, as the URL standard
+  strips them. A link whose text wraps
   across lines is still found, and a CRLF file reads exactly like its LF
   twin. A link destination ends at ASCII whitespace only, may hold
   balanced parentheses (up to 3 levels deep), backslash escapes and

@@ -812,6 +812,13 @@ shapes = {
     "h46.md": '<a x="y"' * (n // 8),
     "h47.md": "<a 1" * (n // 4),
     "h48.md": "[a](" + "&amp;" * (n // 5),
+    # Tags read past a `/`, a leading `=` and a `<` in a name, none closed.
+    "h49.md": "<a/" * (n // 3),
+    "h50.md": "<a =x" * (n // 5),
+    "h51.md": "<a x<y" * (n // 6),
+    "h52.md": "<a x<a " * (n // 7),
+    "h53.md": "<a x =y " * (n // 8),
+    "h54.md": "<a x</ =" * (n // 8),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -978,5 +985,74 @@ run
 [ "$rc" = 2 ] && grep -q 'reached through a symlink' <<<"$out" \
   || fail "a tracked file reached through a swapped-in directory symlink must exit 2, got $rc: $out"
 ok "a directory swapped for a symlink in the working tree: exit 2"
+
+# Code spans: a tag inside one is text, so it defines no anchor; only a
+# heading keeps a span, because its text is part of the id. Likewise link
+# and image markup inside a heading's code span is code, not a link: GitHub's
+# id reads the rendered text, `![i](u)` verbatim, then drops the punctuation
+# (checked against markdown-it 14.1.0 and github-slugger 2.0.0, which
+# agree on `iu-foo`, `a-foo` and `ab-x` for the headings below).
+expect_broken README.md '`<a id="x">` and [l](#x).' \
+  'no such anchor in README\.md: #x' \
+  "an <a id> inside an inline code span is text, not an anchor"
+new_tree
+cat >"$work/r/docs/spans.md" <<'MD'
+# Spans
+
+## `![i](u)` Foo
+
+## [`a`](https://e.com/u) Foo
+
+## `[a](b)` x
+
+`<a id="real">` <a id="y"></a>
+
+[1](#iu-foo) [2](#a-foo) [3](#ab-x) [4](#y)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "link markup in a heading's code span is verbatim, a link around a span is its text (exit $rc): $out"
+ok "a heading's code span keeps link and image markup as text; a link around a span slugs to the span's text"
+expect_broken README.md '## `![i](u)` Foo
+
+[l](#-foo)' 'no such anchor in README\.md: #-foo' \
+  "a heading's image markup in a code span adds text, so the id has no leading hyphen"
+
+# Tags HTML5 reads as live links although CommonMark's inline grammar does
+# not (checked against parse5 7.1.2, a WHATWG tokenizer: each yields an href
+# attribute): `/` between attributes, a name opening with `=`, a `<` in a
+# name. One miss is kept on purpose, a `<` that opens another `<a` in a name.
+expect_broken README.md '<a/href="docs/gone-slash.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-slash\.md$' \
+  "an href after a solidus instead of a space is checked"
+expect_broken README.md '<a =x href="docs/gone-eq.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-eq\.md$' \
+  "an href after a name opening with = is checked"
+expect_broken README.md '<a x<y href="docs/gone-lt.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-lt\.md$' \
+  "an href after a name holding < is checked"
+expect_broken README.md '<img src="docs/guide.md"/ x<y src=docs/gone-img.md>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-img\.md$' \
+  "a second attribute after a solidus and a < in a name is checked"
+new_tree
+printf '%s\n' '<a/href="guide.md#tail">1</a> <a =x href=guide.md>2</a> <a x<y href="guide.md">3</a>' \
+  '<a href =guide.md>4</a> <a/>5</a> <a href="guide.md"/>6</a>' >"$work/r/docs/shapes.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "good targets in the solidus, = and < shapes must pass (exit $rc): $out"
+ok "good targets in the solidus, = and < shapes, a spaced = and self-closed tags pass"
+
+# The URL standard strips leading and trailing C0 controls and spaces from
+# an href before parsing it (parse5 keeps the LF in the value, a URL parser
+# drops it), so a good target behind whitespace passes and a bad one fails.
+new_tree
+printf '<a href="\nguide.md">1</a> <a href=" \t\r\nguide.md#tail\n ">2</a>\n' >"$work/r/docs/ws.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an href with leading/trailing whitespace on a good target must pass (exit $rc): $out"
+ok "an href padded with whitespace or a newline resolves to its target"
+expect_broken README.md "$(printf '<a href="\n docs/gone-ws.md\n">x</a>')" \
+  '^README\.md:[0-9]+: no such tracked file or directory: ' \
+  "an href padded with whitespace is still reported when its target is gone"
 
 echo "linkcheck_test: $pass passed"
