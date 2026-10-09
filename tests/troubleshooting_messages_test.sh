@@ -14,8 +14,10 @@
 #
 # What counts as a quoted message:
 #   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
-#     (install.sh prints the `install: ` prefix inline in its `printf`
-#     calls, so it is dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
+#     (the `install: ` prefix is added by a helper - install.sh's log/warn and
+#     lib/host_identity.py's PREFIX - so the code's literal lacks it and it is
+#     dropped; the few lines install.sh prints with it inline still match as
+#     substrings; a `doctor: <check>: ` head is checked as a CHECKS entry);
 #   * a backtick span that starts with one of the framework's message prefixes
 #     (`install: `, dropped like the fenced form, `upgrade: `, `link: `,
 #     `packages: `, `uninstall: `, `one or more links`, `updates are
@@ -60,10 +62,14 @@ awk '/^```/ { inblock = !inblock; next }
 # green; it is kept for the next span that stands alone.
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
   | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
-  | sed 's/^install: //' >> "$work/msgs" || true
+  | sed 's/^install: //' > "$work/spans" || true
+cat "$work/spans" >> "$work/msgs"
 
-# The page yields 191 messages today; 150 leaves room to trim the page while a
-# broken extraction (a few messages left) still trips.
+# Two floors, because the span scan is a small share of the total: a broken
+# fenced scan trips the first (about 190 messages today, 150 leaves room to trim
+# the page), a broken span scan only trips the second (about 22 today).
+nspans="$(grep -c . "$work/spans" || true)"
+[ "$nspans" -ge 15 ] || fail "extracted only $nspans backtick-span messages (span scan rot?)"
 count="$(grep -c . "$work/msgs" || true)"
 [ "$count" -ge 150 ] || fail "extracted only $count messages from the page (extraction rot?)"
 
