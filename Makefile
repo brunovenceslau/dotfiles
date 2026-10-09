@@ -452,12 +452,12 @@ linkcheck:
 #   place a stray `git config user.email` inside a linked worktree lands, from
 #   where every worktree commits under it. The rule lives in
 #   .githooks/commit_identity.py, shared with the pre-commit and pre-push
-#   hooks there, so the gate and the hooks cannot disagree. A CI checkout sets no identity in its repository, so
-#   the gate passes there; it bites on a developer's checkout, before a push.
-#   git's local env vars are unset first ($(GIT_ENV_SCRUB)): a GIT_DIR leaked
-#   from a hook would point the check at another repository. stdin is
-#   /dev/null because the `check` mode never reads it. STRICT semantics match
-#   the linkcheck block.
+#   hooks there, so the gate and the hooks cannot disagree. A CI checkout
+#   sets no identity in its repository, so the gate passes there; it bites on
+#   a developer's checkout, before a push. git's local env vars are unset
+#   first ($(GIT_ENV_SCRUB)): a GIT_DIR leaked from a hook would point the
+#   check at another repository. stdin is /dev/null because the `check` mode
+#   never reads it. STRICT semantics match the linkcheck block.
 commit-identity:
 	@$(GIT_ENV_SCRUB) \
 	if command -v python3 >/dev/null 2>&1; then \
