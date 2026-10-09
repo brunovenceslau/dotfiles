@@ -217,7 +217,7 @@ if command -v tmux >/dev/null 2>&1; then
   sockdir="$(mktemp -d /tmp/tsock.XXXXXX)"
   # One server serves both sessions on this socket; kill it on EVERY exit path
   # (a failing new-session leaves it alive) before its directory is deleted.
-  trap 'tmux -S "$sockdir/s" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT INT TERM
+  trap 'tmux -S "$sockdir/s" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT
   sock="$sockdir/s"
   # (a) self-fetch renders the correct branch
   prepo="$work/pane repo"; mkdir -p "$prepo"
@@ -256,7 +256,9 @@ if command -v tmux >/dev/null 2>&1; then
 else
   if [ -n "${STRICT:-}" ]; then fail "tmux unavailable and STRICT=1 - status-right self-fetch not exercised"; fi
   echo "SKIP: tmux unavailable - dynamic self-fetch / injection regression not run"
-  expected=$((expected - 2))
+  # One subtraction per tmux-gated assertion group, so the tally cannot drift:
+  expected=$((expected - 2))   # self-fetch + injection (pass += 2 above)
+  expected=$((expected - 1))   # the long-TMPDIR re-run (pass += 1 above)
 fi
 
 # --- _bar UNIT coverage: driven DIRECTLY, not through the platform load source ---
