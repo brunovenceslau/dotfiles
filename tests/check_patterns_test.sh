@@ -3465,8 +3465,9 @@ SHAPES
 # in 15 s on a one-line file, 0.1 s with the branch). Each shape is one link
 # over the limit, exempt only as ONE whole link, so the verdict is checked
 # beside the bound: a bound alone would pass a gate that exits early and wrong.
-# What each shape pins: run, several and eol fail under that two-character
-# skip (hang); run-literal catches a mutant where the escaped run still opens
+# What each shape pins: every shape but backslash-pair and unclosed trips
+# that two-character skip (a hang before skipcode's guard, a fast exit 2
+# since; the guard case below pins that); run-literal catches a mutant where the escaped run still opens
 # its own span; run-rest catches a mutant where the REST of the run opens a
 # span (the CommonMark reading, length L-1, which pairs with the next run of
 # that length); after-run pins that the walk resumes AT the character after
