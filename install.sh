@@ -599,8 +599,9 @@ EOF
     warn "  no credentials to fetch."
     warn "  Credentials needed (a private fork, or an SSH remote)? The upgrade"
     warn "  fetch scrubs ~/.gitconfig and reads only the XDG config, so put a"
-    warn "  credential helper there:"
-    warn "    git config -f ~/.config/git/config.local 'credential.https://github.com.helper' '!gh auth git-credential'"
+    warn "  credential helper there (gh writes an empty helper first, which"
+    warn "  keeps a system helper such as osxkeychain from being asked first):"
+    warn "    GIT_CONFIG_GLOBAL=\"\$HOME/.config/git/config.local\" gh auth setup-git"
     return 1
   fi
   if [ "$(vgit rev-parse FETCH_HEAD)" = "$(vgit rev-parse HEAD)" ]; then

@@ -1839,15 +1839,22 @@ def doctor_deps_units(mod, scratch):
                       ("github.com:8443", False), ("gitlab.com", False), ("github%2ecom", True)):
         check(mod._partial_match(sub, "github.com") is want, "the pattern %r matches github.com: %s" % (sub, want))
 
-    # gh's environment drops every caller setting the module lists and
-    # git's repository-local ones, and points gh's directories at STATE.
-    dropped = sorted(mod.GH_DROPPED_ENV | mod.GIT_LOCAL_ENV) + ["GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+    # gh's environment drops each caller setting that would change what gh
+    # prints or where it asks (gh help environment, gh 2.102) and git's
+    # repository-local ones, and points gh's directories at STATE. The
+    # names are written out here, not read from the module, so a name the
+    # module stops dropping fails this check.
+    dropped = ["CLICOLOR_FORCE", "DEBUG", "GH_DEBUG", "GH_FORCE_TTY", "GH_HOST", "GH_PAGER", "GH_REPO", "PAGER",
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_CONFIG_COUNT",
+               "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_GRAFT_FILE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE",
+               "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX", "GIT_REPLACE_REF_BASE",
+               "GIT_SHALLOW_FILE", "GIT_WORK_TREE", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
     saved = dict(os.environ)
     try:
         os.environ.update(dict.fromkeys(dropped + ["XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"], "caller"))
         env = mod.gh_env("/state")
         kept = [k for k in dropped if k in env]
-        check(not kept and len(dropped) > 20, "gh runs without the caller's %s (of %d)" % (kept, len(dropped)))
+        check(not kept, "gh runs without the caller's %s (of %d)" % (kept, len(dropped)))
         dirs = [env.get(k) for k in ("XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")]
         check(dirs == ["/state"] * 3, "gh's state, cache and data directories are its temporary one (%r)" % dirs)
     finally:
@@ -1876,11 +1883,31 @@ def doctor_deps_units(mod, scratch):
         use_tmpdir(mod, tmpdir)
         mod.GH_TIMEOUT = 1
         stub(ghdir, "gh-slow", 'sleep 30 &\necho $! > "%s"\nwait\n' % pidfile)
+        began = time.monotonic()
         got = mod.gh_token(os.path.join(ghdir, "gh-slow"))
+        took = time.monotonic() - began
         with open(pidfile) as fh:
             child = int(fh.read())
-        check(got == ("unknown", "no answer within 1 seconds") and not alive(child) and os.listdir(tmpdir) == [],
-              "a gh that does not answer in time is no answer, and its child goes with it (%r)" % (got,))
+        # Bounded: a gh left in this process's group is not killed with
+        # the group, and the wait for it then lasts the child's 30 s.
+        check(got == ("unknown", "no answer within 1 seconds") and took < 10 and not alive(child)
+              and os.listdir(tmpdir) == [],
+              "a gh that does not answer in time is no answer, at once, and its child goes with it (%r, %.1f s)"
+              % (got, took))
+        # A gh that answers and exits, leaving a child that let go of the
+        # pipes: where Python can wait without reaping, the child goes too.
+        stub(ghdir, "gh-quick", 'sleep 30 >/dev/null 2>&1 &\necho $! > "%s"\n'
+             'printf "HTTP/2.0 200 OK\\r\\n\\r\\n"\n' % pidfile)
+        got = mod.gh_token(os.path.join(ghdir, "gh-quick"))
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        if mod._CAN_WAIT_UNREAPED:
+            check(got == ("in", None) and not alive(child) and os.listdir(tmpdir) == [],
+                  "a gh that answers leaves no child behind (%r)" % (got,))
+        else:
+            os.kill(child, signal.SIGKILL)
+            check(got == ("in", None) and os.listdir(tmpdir) == [],
+                  "a gh that answers is read (no os.waitid: its child is not killed) (%r)" % (got,))
         mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = 20, 100
         stub(ghdir, "gh-loud", 'sleep 30 &\necho $! > "%s"\nprintf "%%0200d" 0\nwait\n' % pidfile)
         got = mod.gh_token(os.path.join(ghdir, "gh-loud"))
@@ -1893,6 +1920,17 @@ def doctor_deps_units(mod, scratch):
               "a gh that is not executable is no answer (%r)" % (got,))
     finally:
         mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = real_timeout, real_cap
+
+def ls_tree_missing_units(mod):
+    """LS_TREE_MISSING reads both ways git 2.53's ls-tree says an object is
+    missing, and nothing else: an unborn HEAD stays a problem."""
+    for err, want in (("fatal: not a tree object", True),
+                      ("error: Could not read 5fdc090f32f353f10f252d87a7c59fae399ec698", True),
+                      ("warning: x\nerror: Could not read " + "a" * 64, True),
+                      ("fatal: Not a valid object name HEAD", False),
+                      ("error: Could not read HEAD", False), ("fatal: not a tree object here", False)):
+        check(bool(mod.LS_TREE_MISSING.search(err)) is want, "ls-tree's %r names a missing object: %s" % (err, want))
+
 
 def static_units(source):
     found = unescaped_values(source)
@@ -2483,6 +2521,7 @@ def main(argv):
     submodule_units(mod, scratch)
     doctor_parse_units(mod)
     doctor_deps_units(mod, scratch)
+    ls_tree_missing_units(mod)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0

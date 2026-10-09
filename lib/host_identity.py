@@ -2644,20 +2644,48 @@ def _end_group(p):
     """Kill the process group of P, which gh_token() starts in a session of
     its own, so the group is gh and every process it started that stayed
     in it (a wrapper's children); then reap P. The signals held: one that
-    lands here waits until P is reaped, so no gh is left running."""
+    lands here waits until P is reaped, so no gh is left running. Only an
+    unreaped P is signalled: until it is reaped, alive or a zombie, its pid
+    and so its group id cannot be reused by another process."""
     with _Held():
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass  # the whole group is gone already
+        if p.returncode is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass  # the whole group is gone already
         p.wait()
+
+
+# os.waitid() with WNOWAIT waits for a process to exit without reaping it.
+# Python has it on Linux, and on macOS from 3.13 only (the os module docs).
+_CAN_WAIT_UNREAPED = hasattr(os, "waitid") and hasattr(os, "WNOWAIT") and hasattr(os, "WNOHANG")
+
+
+def _exited_unreaped(p, deadline):
+    """Wait until P exits, leaving it a zombie, whose process group id stays
+    taken; raises subprocess.TimeoutExpired at DEADLINE (time.monotonic())
+    with P still running. Polls, as Popen.wait() with a timeout does."""
+    delay = 0.0005
+    while os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise subprocess.TimeoutExpired(p.args, 0)
+        time.sleep(min(delay, left))
+        delay = min(delay * 2, 0.05)
 
 
 def _bounded_output(p, timeout, cap):
     """P's standard output and error, read until both close and P exits.
     Raises subprocess.TimeoutExpired once TIMEOUT seconds have passed, and
     OverflowError once either stream passes CAP bytes; P is then still
-    running, and the caller ends it (_end_group())."""
+    running, and the caller ends it (_end_group()).
+
+    On a normal exit, whatever P left running in its group (a wrapper's
+    child that let go of the pipes) is killed too, between P's exit and its
+    reaping, while the zombie keeps the group id from being reused. Where
+    this Python cannot wait without reaping (_CAN_WAIT_UNREAPED), P is
+    reaped and such a child is left alone: a group id may be reused once
+    P is reaped, so no group is signalled then."""
     deadline = time.monotonic() + timeout
     got = {p.stdout.fileno(): bytearray(), p.stderr.fileno(): bytearray()}
     with selectors.DefaultSelector() as sel:
@@ -2675,6 +2703,12 @@ def _bounded_output(p, timeout, cap):
                 got[key.fd] += chunk
                 if len(got[key.fd]) > cap:
                     raise OverflowError(cap)
+    if _CAN_WAIT_UNREAPED:
+        _exited_unreaped(p, deadline)
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass  # P was alone in its group
     p.wait(max(deadline - time.monotonic(), 0))
     return bytes(got[p.stdout.fileno()]), bytes(got[p.stderr.fileno()])
 

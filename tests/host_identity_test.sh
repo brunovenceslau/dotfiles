@@ -2215,6 +2215,18 @@ if [ "$honours" = yes ]; then
   expect_rc 1 "doctor, an unborn HEAD in a partial clone"; one "doctor, an unborn HEAD in a partial clone"
   has "doctor: plugins: cannot list the plugin pins of $work/pc-unborn (fatal: " "doctor names an unborn HEAD in a partial clone"
 fi
+# A partial clone missing a tree under the root one: ls-tree's other
+# missing-object line ("Could not read <oid>") is the note too. The tree
+# is removed from a local clone's loose objects, which stand in for one
+# the clone never fetched.
+fx clone -q "$co" "$work/pc-sub"
+fx -C "$work/pc-sub" config remote.origin.promisor true
+subtree="$(fx -C "$work/pc-sub" rev-parse HEAD:zsh)"
+rm "$work/pc-sub/.git/objects/${subtree%"${subtree#??}"}/${subtree#??}" || fail "the zsh tree is not a loose object"
+pdoc "$work/pc-sub" --verbose
+if [ "$honours" = yes ]; then
+  has "doctor: plugins: note: $work/pc-sub is a partial clone without the trees the plugin pins are in (error: Could not read $subtree)" "doctor notes a partial clone missing a subtree"
+fi
 # A promisor set through the repository's include chain counts too.
 fx clone -q "$co" "$work/inc"
 printf '[remote "origin"]\n\tpromisor = true\n' > "$work/inc.gitconfig"
@@ -2381,6 +2393,47 @@ git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper
 helper_cfg "$local_cfg" "!$work/fakebin/gh auth git-credential"
 rc=0; out="$(PATH="$(without gh)" "$installer" doctor 2>&1)" || rc=$?
 expect_rc 0 "doctor, gh's helper by path, gh off PATH"; [ -z "$out" ] || fail "doctor, gh's helper by path, gh off PATH: $out"
+# A system helper (osxkeychain: Apple's and Homebrew's git set it in their
+# system config) is asked before a gh helper added by hand, with no empty
+# helper before it; `gh auth setup-git` writes that empty one first
+# (cli/cli v2.102.0, pkg/cmd/auth/shared/gitcredentials/helper_config.go
+# ConfigureOurs), so what the framework advises is healthy. The real gh
+# writes it when one is installed; else its output is reproduced.
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+git config --file "$work/system.gitconfig" credential.helper osxkeychain
+helper_cfg "$local_cfg"
+GIT_CONFIG_SYSTEM="$work/system.gitconfig" doc; expect_rc 1 "doctor, a hand-written gh helper after a system one"
+has "doctor: credential helper: git asks osxkeychain, set in $work/system.gitconfig, before gh for github.com" "doctor names a system helper asked before gh"
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+real_gh="$(PATH="${PATH#"$work/fakebin:"}" command -v gh || true)"
+if [ -z "$real_gh" ] || ! GH_TOKEN=unused GH_CONFIG_DIR="$work/ghcfg" GH_TELEMETRY=0 XDG_STATE_HOME="$work/ghcfg" \
+    XDG_CACHE_HOME="$work/ghcfg" XDG_DATA_HOME="$work/ghcfg" GIT_CONFIG_GLOBAL="$local_cfg" \
+    "$real_gh" auth setup-git -h github.com >/dev/null 2>&1; then
+  git config --file "$local_cfg" --replace-all 'credential.https://github.com.helper' ""
+  git config --file "$local_cfg" --add 'credential.https://github.com.helper' "!$work/fakebin/gh auth git-credential"
+fi
+[ -z "$(git config --file "$local_cfg" --get-all 'credential.https://github.com.helper' | sed -n 1p)" ] \
+  || fail "setup-git wrote no empty helper first: $(cat "$local_cfg")"
+GIT_CONFIG_SYSTEM="$work/system.gitconfig" doc; expect_rc 0 "doctor, gh by setup-git after a system helper"
+[ -z "$out" ] || fail "doctor, gh by setup-git after a system helper: $out"
+# Patterns that do not match https://github.com (another host, a user
+# github.com lacks, one whose quoting a probe could break) do not apply,
+# not even an empty helper under them, which would clear gh.
+for pattern in 'https://gitlab.com' 'https://u@github.com' 'https://ex"a\mple.com'; do
+  git config --file "$HOME/.gitconfig" "credential.$pattern.helper" ""
+  git config --file "$HOME/.gitconfig" --add "credential.$pattern.helper" store
+done
+GIT_CONFIG_SYSTEM="$work/system.gitconfig" doc; expect_rc 0 "doctor, patterns that do not match"
+[ -z "$out" ] || fail "doctor, patterns that do not match: $out"
+rm -f "$HOME/.gitconfig"
+# Two matching patterns apply in the order git reads them, however
+# specific: a host-only one read first is asked first.
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+git config --file "$local_cfg" 'credential.github.com.helper' store
+helper_cfg "$local_cfg"
+doc; expect_rc 1 "doctor, a host-only pattern before gh"; one "doctor, a host-only pattern before gh"
+has "doctor: credential helper: git asks store, set in $local_cfg, before gh for github.com" "doctor reads a host-only pattern in order"
+git config --file "$local_cfg" --unset-all 'credential.github.com.helper'
 # Another helper alone is fine: gh is not the only way to push.
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
 helper_cfg "$local_cfg" osxkeychain

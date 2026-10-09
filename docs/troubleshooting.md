@@ -958,9 +958,14 @@ private fork or an SSH URL; the upstream HTTPS remote fetches without them.
 helper where the upgrade reads it:
 
 ```sh
-git config -f ~/.config/git/config.local \
-  'credential.https://github.com.helper' '!gh auth git-credential'
+mkdir -p ~/.config/git
+GIT_CONFIG_GLOBAL="$HOME/.config/git/config.local" gh auth setup-git
 ```
+
+`gh auth setup-git` writes an empty helper before gh's, which clears a
+helper set earlier, such as the `osxkeychain` of the system config that
+Apple's and Homebrew's git ship; a helper line added by hand without that
+empty one leaves the earlier helper asked first.
 
 Or switch the remote to SSH. See also
 [Git prompts for a username](#git-prompts-for-a-username).
