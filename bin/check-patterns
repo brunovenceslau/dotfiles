@@ -1834,10 +1834,27 @@ function runs(n,   i, j, k, nr) {
 # at i when no run of its length follows (literal backticks). Every caller
 # lands on the FIRST backtick of a run: a walk reaches a backtick only from a
 # character that is not one, or from the end of a run or a link.
-function skipcode(i,   k) {
+#
+# The guard: a result at or before i would make the calling walk loop
+# forever (the hang an escaped-backtick walk that lands inside a run used
+# to cause). A walk that cannot advance is a bug in the walk, so it FAILS
+# CLOSED (exit 2) with a message, never advances by a guess: a guessed
+# step would let the gate report a verdict on a line it did not read.
+# The guard names the line check() is reading (cur_file, cur_nr), never
+# FILENAME:FNR: flush() checks held front-matter lines of an EARLIER file
+# when the next file starts, or in END.
+# The offset counts characters (bytes on a byte-oriented awk) of the line
+# AFTER tokens() cut its indent, `>` markers and list marker, so it is not
+# its own column in the file.
+function skipcode(i,   k, r) {
   k = ri[i]
-  if (k in rn) return rs[rn[k]] + rl[k]
-  return i + rl[k]
+  if (k in rn) r = rs[rn[k]] + rl[k]
+  else r = i + rl[k]
+  if (r <= i) {
+    print "awk: the code-span walk stopped advancing at offset " i " of the line after its indent and block markers are cut (" cur_file ":" cur_nr ", an internal invariant broke)"
+    exit 2
+  }
+  return r
 }
 # pairs: ONE pass over the line, pairing each `[` with its `]` (pb) and each
 # `(` with its `)` (pp) on two stacks, outside code spans and past a
@@ -1899,6 +1916,7 @@ function tokens(s,   i, n, c, a, intok, j) {
 }
 # check: one line of one file, after front matter is settled.
 function check(line, file, nr,   f) {
+  cur_file = file; cur_nr = nr
   if (fence != "") {
     if (match(line, /^[ \t]*(```+|~~~+)[ \t]*$/)) {
       f = line; gsub(/[ \t]/, "", f)
@@ -1948,9 +1966,8 @@ if out=$(find "${prose[@]}" -type f -name '*.md' \
     bad=1
   fi
 else
-  rc=$?
   _err "$out" \
-    "check-patterns: Markdown line-width scan errored (exit $rc) - failing closed"
+    "check-patterns: Markdown line-width scan errored - failing closed"
   bad=1; fatal=1
 fi
 
