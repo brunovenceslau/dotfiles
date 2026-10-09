@@ -994,9 +994,9 @@ def repo_git(checkout, args):
     not a repository is said to be one, and a repository around it (a $HOME
     that is one) is never read in its place, whatever its path holds (a ':'
     no ceiling could express, an APFS spelling). GIT_NO_LAZY_FETCH keeps a
-    partial clone from fetching a missing object from its promisor remote
-    (git 2.45 and later honour it; plugin_pins() never reaches ls-tree in a
-    partial clone, so an older git cannot fetch either). The checkout's own
+    partial clone from fetching a missing object from its promisor remote,
+    where git honours it (lazy_fetch_off()); on a git that does not, doctor
+    reads no object in a partial clone. The checkout's own
     .git/config still applies: whoever can write it owns the working tree,
     the same scope as vgit. Only config and object reads go through here
     (config, ls-tree), never a command that runs a filter, a hook or an
@@ -2296,15 +2296,15 @@ def advisory(host):
 # `ssh-keygen`, the checkout's plugin pins through repo_git() and each
 # submodule's HEAD as a file) and records findings. It opens no network
 # connection of its own, though a forwarded agent answers over its SSH
-# session; in a partial clone, where a tree read could fetch, the plugin
-# check reads nothing (partial_clone()). A check that reads the git config is an identity check (the third
-# field of its CHECKS entry): a config.local that is not a regular file, or a
-# git that cannot be kept outside every repository, is reported once and
-# skips those checks only. Each tool runs
-# under a timeout; each file is opened without blocking and read up to a
-# size cap (read_small_file()). A finding is ok, info or a problem; a
-# problem is one line naming what is wrong, where it comes from and the fix,
-# written as ONE literal so docs/troubleshooting.md can quote it
+# session; in a partial clone, on a git that cannot be told not to fetch
+# (lazy_fetch_off()), the plugin check reads no object. A check that reads
+# the git config is an identity check (the third field of its CHECKS entry):
+# a config.local that is not a regular file, or a git that cannot be kept
+# outside every repository, is reported once and skips those checks only.
+# Each tool runs under a timeout; each file is opened without blocking and
+# read up to a size cap (read_small_file()). A finding is ok, info or a
+# problem; a problem is one line naming what is wrong, where it comes from
+# and the fix, written as ONE literal so docs/troubleshooting.md can quote it
 # (tests/troubleshooting_messages_test.sh). By default only the problems
 # print; --verbose prints every finding and a verdict. On a host that opted
 # out of signing (opted_out()), a problem marked signing-only is recorded as
@@ -2376,7 +2376,7 @@ UNRESOLVED = "unresolved"  # HEAD names a ref these files do not resolve
 UNREADABLE = "unreadable"  # .git, its gitdir or HEAD cannot be read
 
 
-def submodule_commit(path):
+def submodule_commit(path, modules):
     """(state, commit, why, gitdir) for the submodule checked out at PATH,
     read from files alone: its .git (a gitfile naming its gitdir, or the
     gitdir itself), that gitdir's HEAD, and the ref HEAD names, loose or
@@ -2385,8 +2385,10 @@ def submodule_commit(path):
     runs a clean filter the submodule's config names. STATE is ABSENT, AT
     (COMMIT is set), UNRESOLVED (a reftable, or another worktree's ref store)
     or UNREADABLE; WHY says why for the last two. GITDIR is set only for
-    UNREADABLE, when .git is a gitfile naming a gitdir that exists: git
-    reuses that gitdir when the submodule is initialized again."""
+    UNREADABLE, when .git is a gitfile naming a gitdir that exists under
+    MODULES (the superproject's modules directory, resolved, or None): git
+    reuses that gitdir when the submodule is initialized again. One outside
+    it is never named, so a gitfile cannot steer the fix at another path."""
     dotgit = os.path.join(path, ".git")
     try:
         st = os.lstat(dotgit)
@@ -2406,7 +2408,9 @@ def submodule_commit(path):
         # A relative gitdir is relative to the submodule's directory. Joined,
         # never normalized: the kernel then resolves each `..` the way git does.
         gitdir = os.path.join(path, line[len("gitdir: "):])
-        separate = gitdir if os.path.isdir(gitdir) else None
+        real = os.path.realpath(gitdir)
+        separate = gitdir if (modules and os.path.isdir(gitdir)
+                              and real.startswith(modules + os.sep)) else None
     head_path = os.path.join(gitdir, "HEAD")
     head, why = _first_line(head_path, True)
     if head is None:
@@ -2436,18 +2440,77 @@ PLUGIN_DIR = "zsh/plugins/"
 # The config keys that make a repository a partial clone: the remote.<name>
 # form git writes today, and the extensions.partialClone older git wrote.
 PARTIAL_CLONE = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+# The first release of each line that honours GIT_NO_LAZY_FETCH: the 2024-04
+# security releases taught promisor-remote.c to refuse a lazy fetch under it
+# (v2.39.4, v2.40.2, v2.41.1, v2.42.2, v2.43.4, v2.44.1; v2.39.3 lacks it),
+# and every release from v2.45.0 on has it. Read from git/git at those tags.
+NO_LAZY_FETCH_FROM = {(2, 39): 4, (2, 40): 2, (2, 41): 1, (2, 42): 2, (2, 43): 4, (2, 44): 1}
+
+
+def repo_dirs(checkout):
+    """(gitdir, commondir) of the checkout's repository, read from files as
+    git reads them: CHECKOUT/.git itself, or the gitdir a gitfile names (a
+    linked worktree), whose `commondir` file names the shared one. (None,
+    None) when there is none to read; git then names why."""
+    dotgit = os.path.join(checkout, ".git")
+    if os.path.isdir(dotgit):
+        gitdir = dotgit
+    else:
+        line, _ = _first_line(dotgit)
+        if line is None or not line.startswith("gitdir: "):
+            return None, None
+        gitdir = os.path.join(checkout, line[len("gitdir: "):])
+    common, _ = _first_line(os.path.join(gitdir, "commondir"), True)
+    return gitdir, (os.path.join(gitdir, common) if common else gitdir)
+
+
+def lazy_fetch_off(checkout):
+    """True when the git that repo_git() runs honours GIT_NO_LAZY_FETCH
+    (NO_LAZY_FETCH_FROM), so a missing object fails a read instead of being
+    fetched. Asked once per run, from `git --version`."""
+    rc, out, _ = repo_git(checkout, ["--version"])
+    m = re.match(r"git version (\d+)\.(\d+)(?:\.(\d+))?", out) if rc == 0 else None
+    if m is None:
+        return False
+    major, minor, patch = int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
+    if (major, minor) >= (2, 45):
+        return True
+    first = NO_LAZY_FETCH_FROM.get((major, minor))
+    return first is not None and patch >= first
+
+
+def _git_bool(value):
+    """VALUE as git's boolean parser reads it (git_parse_maybe_bool()): None
+    for a key with no `=` (true), "" for an empty value (false). A value git
+    would refuse counts as true here, the side that reads nothing."""
+    if value is None:
+        return True
+    v = value.strip().lower()
+    if v in ("true", "yes", "on"):
+        return True
+    if v in ("", "false", "no", "off"):
+        return False
+    try:
+        return int(v, 0) != 0
+    except ValueError:
+        return True
 
 
 def partial_clone(checkout):
     """True when the checkout's repository is a partial clone, where reading
-    a tree it does not hold would fetch it, unless the git is new enough to
-    honour GIT_NO_LAZY_FETCH. Read from its config, which fetches nothing."""
-    rc, out, _ = repo_git(checkout, ["config", "--local", "--get-regexp", PARTIAL_CLONE])
+    an object it does not hold would fetch it. Read from its config, which
+    fetches nothing. With --includes: the include chain of the repository's
+    own config is what every other git command there reads too (ls-tree
+    included), so a promisor set through include.path counts. It only reads
+    the files that chain names, under repo_git()'s timeout."""
+    rc, out, _ = repo_git(checkout, ["config", "--local", "--includes", "-z", "--get-regexp", PARTIAL_CLONE])
     if rc != 0:
         return False
-    for line in out.splitlines():
-        key, _, value = line.partition(" ")
-        if key.startswith("extensions.") or value.lower() not in ("false", "no", "off", "0"):
+    for record in out.split("\0"):
+        if not record:
+            continue
+        key, newline, value = record.partition("\n")
+        if key.startswith("extensions.") or _git_bool(value if newline else None):
             return True
     return False
 
@@ -2455,7 +2518,8 @@ def partial_clone(checkout):
 def plugin_pins(checkout):
     """(pins, None) or (None, git's error, unescaped). PINS lists (path,
     commit) for each submodule under PLUGIN_DIR that the checkout's HEAD
-    records, read by one `git ls-tree` through repo_git()."""
+    records, read by one `git ls-tree` through repo_git(); the pathspec
+    keeps every other entry out."""
     rc, out, err = repo_git(checkout, ["ls-tree", "-z", "--full-tree", "HEAD", "--", PLUGIN_DIR])
     if rc != 0:
         return None, (err or "exit %d" % rc)
@@ -2463,8 +2527,7 @@ def plugin_pins(checkout):
     for record in out.split("\0"):
         meta, _, name = record.partition("\t")
         fields = meta.split(" ")
-        if (len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit"
-                and name.startswith(PLUGIN_DIR)):
+        if len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit":
             pins.append((name, fields[2]))
     return pins, None
 
@@ -2737,19 +2800,37 @@ class Doctor(object):
         # files are read in a submodule (submodule_commit()).
         inst = shell_word(self.host.installer)
         checkout = os.path.dirname(os.path.abspath(self.host.installer))
-        if partial_clone(checkout):
-            # An older git ignores GIT_NO_LAZY_FETCH, so even ls-tree could
-            # fetch a missing tree: doctor reads nothing there.
-            self.info("%s is a partial clone, where reading the plugin pins could fetch from its remote - not checked"
+        repo_gitdir, common = repo_dirs(checkout)
+        config = os.path.join(common, "config") if common else None
+        try:
+            mode = os.stat(config).st_mode if config else None
+        except OSError:
+            mode = None  # absent: git names that itself
+        if mode is not None and not stat.S_ISREG(mode):
+            # git opens it for every command: a FIFO would hold each one.
+            self.problem("%s is not a regular file, so git cannot read this checkout - remove it or make it a file"
+                         % _shown(config))
+            return
+        partial = partial_clone(checkout)
+        if partial and not lazy_fetch_off(checkout):
+            # This git would fetch a missing tree even for ls-tree.
+            self.info("%s is a partial clone, and this git cannot read it without fetching what it lacks - not checked"
                       % _shown(checkout))
             return
         pins, err = plugin_pins(checkout)
+        if pins is None and partial:
+            # GIT_NO_LAZY_FETCH stopped a fetch: the trees are not here.
+            self.info("%s is a partial clone without the trees the plugin pins are in (%s) - not checked"
+                      % (_shown(checkout), _shown(err)))
+            return
         if pins is None:
             self.problem("cannot list the plugin pins of %s (%s) - fix what git names, then run doctor again"
                          % (_shown(checkout), _shown(err)))
             return
+        # The only place a fix may name a plugin's gitdir (submodule_commit()).
+        modules = os.path.realpath(os.path.join(repo_gitdir, "modules")) if repo_gitdir else None
         for path, pin in pins:
-            state, commit, why, gitdir = submodule_commit(os.path.join(checkout, path))
+            state, commit, why, gitdir = submodule_commit(os.path.join(checkout, path), modules)
             if state == UNREADABLE and gitdir is not None:
                 # Moved aside, never removed: either may hold the plugin's
                 # own commits. git reuses the gitdir on the next init, so it

@@ -39,7 +39,11 @@ real_ssh_add="$(command -v ssh-add)"
 # No trailing slash: macOS's TMPDIR ends in one, and a "T//" in $work would
 # not match the origins git prints, which may spell the path with one slash.
 tmp="${TMPDIR:-/tmp}"
-work="$(mktemp -d "${tmp%/}/host_identity_test.XXXXXX")"
+# Resolved once (pwd -P), as install.sh resolves its own directory: every
+# path a case expects to read back (the installer, a fixture checkout) is
+# then spelled the way the step prints it, also where TMPDIR sits behind a
+# symlink (macOS: /var -> /private/var).
+work="$(cd "$(mktemp -d "${tmp%/}/host_identity_test.XXXXXX")" && pwd -P)"
 # Every run of the step makes an empty directory for git under TMPDIR: pinned
 # here so a case that leaves one behind fails the suite (checked at the end)
 # instead of littering the caller's /tmp. Cases that test TMPDIR set their own.
@@ -1470,12 +1474,9 @@ ln -s "$repo_root/install.sh" "$escdir/install.sh"
 ln -s "$repo_root/lib" "$escdir/lib"
 rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable, quoted checkout path"
-# The path install.sh prints is its own resolution of the checkout, cd + pwd
-# -P (DOTFILES at its top), mirrored here: on macOS TMPDIR sits under /var,
-# a symlink to /private/var, so the unresolved $work never matches.
-real_escdir="$(cd "$(dirname "$escdir/install.sh")" && pwd -P)"
-real_work="$(cd "$work" && pwd -P)"
-has "then run \$'$real_work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
+# $work is resolved (see its creation), so $escdir is spelled the way
+# install.sh resolves its own directory (cd + pwd -P, DOTFILES at its top).
+has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
 raw_free() {
   local LC_ALL=C b
   for b in "$(printf '\033')" "$(printf '\303')" "$(printf '\251')"; do
@@ -1486,7 +1487,7 @@ raw_free() {
 }
 raw_free "python3 unusable"
 word="${out#*then run }"; word="${word% identity)}"
-[ "$(eval "printf '%s' $word")" = "$real_escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
+[ "$(eval "printf '%s' $word")" = "$escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
 ok
 
 # --- install.sh _shell_word: the shapes, and LC_ALL kept ----------------------
@@ -2122,29 +2123,73 @@ has "doctor: plugins: cannot list the plugin pins of $outer/co3 (fatal: not a gi
 fx init -q -b main "$work/unborn"; mkcheckout "$work/unborn"
 pdoc "$work/unborn"; expect_rc 1 "doctor, unborn HEAD"; one "doctor, unborn HEAD"
 has "doctor: plugins: cannot list the plugin pins of $work/unborn (fatal: " "doctor names an unborn HEAD"
-# A partial clone missing its trees: nothing is read, so nothing is fetched
-# (git before 2.45 ignores GIT_NO_LAZY_FETCH), and the note says so.
+# A partial clone fetches nothing. Where git honours GIT_NO_LAZY_FETCH (the
+# module's own table, lazy_fetch_off()), ls-tree fails on the missing trees
+# and says so; a git that would fetch (one reporting 2.44.0, a stub around
+# the real one) reads no object at all.
 fx clone -q --bare "$co" "$work/super.git"; fx -C "$work/super.git" config uploadpack.allowFilter true
 fx clone -q --no-checkout --filter=tree:0 "file://$work/super.git" "$work/pc"; mkcheckout "$work/pc"
-objects() { find "$work/pc/.git/objects" -type f | LC_ALL=C sort; }
-before="$(objects)"
-pdoc "$work/pc" --verbose; expect_rc 0 "doctor, partial clone"
-has "doctor: plugins: note: $work/pc is a partial clone, where reading the plugin pins could fetch from its remote - not checked" "doctor notes a partial clone"
-[ "$(objects)" = "$before" ] || fail "doctor fetched into a partial clone"
-# Where git honours GIT_NO_LAZY_FETCH (2.45 and later), the runner itself
-# fetches nothing either: ls-tree fails instead of reaching the remote.
-if python3 -c 'import re,sys; m=re.match(r"git version (\d+)\.(\d+)", sys.argv[1]); sys.exit(0 if m and (int(m.group(1)), int(m.group(2))) >= (2, 45) else 1)' "$(git --version)"; then
-  rc=0; out="$(python3 -I -B -c '
+objects() { find "$1/.git/objects" -type f | LC_ALL=C sort; }
+mkdir -p "$work/oldgit"
+printf '#!/bin/sh
+[ "$1" = --version ] && { echo "git version 2.44.0"; exit 0; }
+exec %s "$@"
+' "$(command -v git)" > "$work/oldgit/git"
+chmod u+x "$work/oldgit/git"
+honours="$(python3 -I -B -c '
 import importlib.util, sys
 spec = importlib.util.spec_from_file_location("host_identity", sys.argv[1])
 mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-pins, err = mod.plugin_pins(sys.argv[2])
-print("pins=%r" % (pins,))' "$module" "$work/pc" 2>&1)" || rc=$?
-  has "pins=None" "ls-tree in a partial clone fails rather than fetching"
-  [ "$(objects)" = "$before" ] || fail "repo_git fetched into a partial clone"
+print("yes" if mod.lazy_fetch_off(sys.argv[2]) else "no")' "$module" "$work/pc")"
+before="$(objects "$work/pc")"
+pdoc "$work/pc" --verbose; expect_rc 0 "doctor, partial clone without its trees"
+if [ "$honours" = yes ]; then
+  has "doctor: plugins: note: $work/pc is a partial clone without the trees the plugin pins are in (" "doctor notes a partial clone it could not list without fetching"
 else
-  echo "SKIP: GIT_NO_LAZY_FETCH (git older than 2.45 ignores it)"
+  has "doctor: plugins: note: $work/pc is a partial clone, and this git cannot read it without fetching what it lacks - not checked" "doctor notes a partial clone this git would fetch into"
 fi
+[ "$(objects "$work/pc")" = "$before" ] || fail "doctor fetched into a partial clone"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/pc/install.sh" doctor --verbose 2>&1)" || rc=$?
+expect_rc 0 "doctor, partial clone, a git that would fetch"
+has "doctor: plugins: note: $work/pc is a partial clone, and this git cannot read it without fetching what it lacks - not checked" "a git that would fetch reads nothing in a partial clone"
+[ "$(objects "$work/pc")" = "$before" ] || fail "doctor fetched into a partial clone (a git that would fetch)"
+# A partial clone that holds its trees is checked where git honours
+# GIT_NO_LAZY_FETCH: it is not skipped for being partial.
+fx clone -q --filter=blob:none "file://$work/super.git" "$work/pc2"
+before="$(objects "$work/pc2")"
+pdoc "$work/pc2"
+if [ "$honours" = yes ]; then
+  expect_rc 1 "doctor, a blob:none clone"
+  has "doctor: plugins: zsh/plugins/demo is not initialized" "a partial clone holding its trees is checked"
+fi
+[ "$(objects "$work/pc2")" = "$before" ] || fail "doctor fetched into a blob:none clone"
+# A promisor set through the repository's include chain counts too.
+fx clone -q "$co" "$work/inc"
+printf '[remote "origin"]\n\tpromisor = true\n' > "$work/inc.gitconfig"
+fx -C "$work/inc" config include.path "$work/inc.gitconfig"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/inc/install.sh" doctor --verbose 2>&1)" || rc=$?
+has "doctor: plugins: note: $work/inc is a partial clone, and this git cannot read it" "a promisor set through include.path counts"
+# An empty promisor value is false, as git reads it: not a partial clone.
+printf '[remote "origin"]\n\tpromisor =\n' > "$work/inc.gitconfig"
+rc=0; out="$(PATH="$work/oldgit:$PATH" "$work/inc/install.sh" doctor --verbose 2>&1)" || rc=$?
+lacks "partial clone" "an empty promisor value is false"
+has "doctor: plugins: zsh/plugins/demo is not initialized" "a repository with promisor = (empty) is checked"
+# A .git/config that is not a regular file: said at once, nothing run in it.
+mv "$work/inc/.git/config" "$work/inc.config"; mkfifo "$work/inc/.git/config"
+bounded_run 20 "$work/doctor.out" "$work/inc/install.sh" doctor || fail "bounded_run could not start (no job control)"
+[ "$br_hung" -eq 0 ] && [ "$br_stuck" -eq 0 ] || fail "doctor hung on a FIFO .git/config"
+rc="$br_rc"; out="$(cat "$work/doctor.out")"
+expect_rc 1 "doctor, FIFO .git/config"; one "doctor, FIFO .git/config"
+has "doctor: plugins: $work/inc/.git/config is not a regular file, so git cannot read this checkout - remove it or make it a file" "doctor names a FIFO .git/config"
+rm -f "$work/inc/.git/config"; mv "$work/inc.config" "$work/inc/.git/config"
+# A gitfile that names a directory outside the superproject's modules: the
+# fix never names it.
+fx -C "$work/inc" submodule update -q --init
+mkdir -p "$work/elsewhere"; printf 'nonsense\n' > "$work/elsewhere/HEAD"
+printf 'gitdir: %s\n' "$work/elsewhere" > "$work/inc/zsh/plugins/demo/.git"
+pdoc "$work/inc"; expect_rc 1 "doctor, a gitfile naming a path outside the modules"
+has " - move that directory aside, then run: $work/inc/install.sh install" "a gitdir outside the modules is not named in the fix"
+lacks "its git directory" "a gitdir outside the modules is not named in the fix"
 ok
 
 # --- --rotate and identity on an opted-out host -------------------------------

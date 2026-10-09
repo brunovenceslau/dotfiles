@@ -1621,40 +1621,40 @@ def submodule_units(mod, scratch):
     p = sub("dotgit-dir")
     os.mkdir(os.path.join(p, ".git"))
     write(os.path.join(p, ".git", "HEAD"), sha + "\n")
-    check(mod.submodule_commit(p) == (mod.AT, sha, None, None), "a .git directory's detached HEAD is read")
+    check(mod.submodule_commit(p, None) == (mod.AT, sha, None, None), "a .git directory's detached HEAD is read")
     # A SHA-256 commit id is one too.
     write(os.path.join(p, ".git", "HEAD"), "b" * 64 + "\n")
-    check(mod.submodule_commit(p) == (mod.AT, "b" * 64, None, None), "a SHA-256 HEAD is read")
+    check(mod.submodule_commit(p, None) == (mod.AT, "b" * 64, None, None), "a SHA-256 HEAD is read")
     # A ref outside refs/, or climbing out of the gitdir, is never followed.
     for ref in ("ref: ../../../etc/passwd", "ref: refs/../../x", "ref: HEAD"):
         write(os.path.join(p, ".git", "HEAD"), ref + "\n")
-        check(mod.submodule_commit(p)[0] == mod.UNREADABLE, "a HEAD naming %r is unreadable, not followed" % ref)
+        check(mod.submodule_commit(p, None)[0] == mod.UNREADABLE, "a HEAD naming %r is unreadable, not followed" % ref)
     # A gitfile that names no gitdir.
     p = sub("bad-gitfile")
     write(os.path.join(p, ".git"), "not a gitfile\n")
-    state, _, why, gitdir = mod.submodule_commit(p)
+    state, _, why, gitdir = mod.submodule_commit(p, None)
     check(state == mod.UNREADABLE and "does not name a gitdir" in why and gitdir is None, "a gitfile without gitdir: is unreadable")
     # A FIFO where .git or HEAD should be answers at once (read_small_file()).
     p = sub("fifo")
     os.mkfifo(os.path.join(p, ".git"))
     started = time.time()
-    state, _, why, _ = mod.submodule_commit(p)
+    state, _, why, _ = mod.submodule_commit(p, None)
     check(state == mod.UNREADABLE and "not a regular file" in why and time.time() - started < 5,
           "a FIFO .git is unreadable at once, never waited on")
     # An empty directory is an uninitialized submodule; so is one deleted.
-    check(mod.submodule_commit(sub("empty")) == (mod.ABSENT, None, None, None), "an empty directory is not initialized")
-    check(mod.submodule_commit(os.path.join(base, "gone"))[0] == mod.ABSENT, "a missing directory is not initialized")
+    check(mod.submodule_commit(sub("empty"), None) == (mod.ABSENT, None, None, None), "an empty directory is not initialized")
+    check(mod.submodule_commit(os.path.join(base, "gone"), None)[0] == mod.ABSENT, "a missing directory is not initialized")
     # A packed ref that names another ref's commit is not taken for HEAD's.
     p = sub("packed")
     os.mkdir(os.path.join(p, ".git"))
     write(os.path.join(p, ".git", "HEAD"), "ref: refs/heads/main\n")
     write(os.path.join(p, ".git", "packed-refs"), "# pack-refs with: peeled\n%s refs/heads/mainline\n" % sha)
-    check(mod.submodule_commit(p)[0] == mod.UNRESOLVED, "a packed ref is matched by its whole name")
+    check(mod.submodule_commit(p, None)[0] == mod.UNRESOLVED, "a packed ref is matched by its whole name")
     # A loose ref that is not a commit id falls through to packed-refs.
     os.makedirs(os.path.join(p, ".git", "refs", "heads"))
     write(os.path.join(p, ".git", "refs", "heads", "main"), "garbage\n")
     write(os.path.join(p, ".git", "packed-refs"), "%s refs/heads/main\n" % sha)
-    check(mod.submodule_commit(p) == (mod.AT, sha, None, None), "a loose ref that is no commit id falls through to packed-refs")
+    check(mod.submodule_commit(p, None) == (mod.AT, sha, None, None), "a loose ref that is no commit id falls through to packed-refs")
     # HEAD and the ref are opened without following a final symlink: one
     # pointing at a commit-shaped file elsewhere is not read.
     elsewhere = os.path.join(base, "elsewhere")
@@ -1662,10 +1662,10 @@ def submodule_units(mod, scratch):
     os.remove(os.path.join(p, ".git", "packed-refs"))
     os.remove(os.path.join(p, ".git", "refs", "heads", "main"))
     os.symlink(elsewhere, os.path.join(p, ".git", "refs", "heads", "main"))
-    check(mod.submodule_commit(p)[0] == mod.UNRESOLVED, "a symlinked loose ref is not followed")
+    check(mod.submodule_commit(p, None)[0] == mod.UNRESOLVED, "a symlinked loose ref is not followed")
     os.remove(os.path.join(p, ".git", "HEAD"))
     os.symlink(elsewhere, os.path.join(p, ".git", "HEAD"))
-    check(mod.submodule_commit(p)[0] == mod.UNREADABLE, "a symlinked HEAD is not followed")
+    check(mod.submodule_commit(p, None)[0] == mod.UNREADABLE, "a symlinked HEAD is not followed")
     # A gitfile naming a gitdir that exists hands that gitdir back with an
     # unreadable HEAD (git would reuse it); one naming no gitdir does not.
     p = sub("separate")
@@ -1673,12 +1673,34 @@ def submodule_units(mod, scratch):
     os.makedirs(gd)
     write(os.path.join(gd, "HEAD"), "nonsense\n")
     write(os.path.join(p, ".git"), "gitdir: ../modules-demo\n")
-    state, _, _, gitdir = mod.submodule_commit(p)
+    state, _, _, gitdir = mod.submodule_commit(p, os.path.realpath(base))
     check(state == mod.UNREADABLE and gitdir == os.path.join(p, "../modules-demo"),
           "an unreadable HEAD in an existing separate gitdir names that gitdir")
+    state, _, _, gitdir = mod.submodule_commit(p, os.path.realpath(os.path.join(base, "modules")))
+    check(state == mod.UNREADABLE and gitdir is None, "a gitdir outside the modules directory is never named")
+    state, _, _, gitdir = mod.submodule_commit(p, None)
+    check(gitdir is None, "no modules directory, no gitdir named")
     write(os.path.join(p, ".git"), "gitdir: ../modules-gone\n")
-    state, _, _, gitdir = mod.submodule_commit(p)
+    state, _, _, gitdir = mod.submodule_commit(p, os.path.realpath(base))
     check(state == mod.UNREADABLE and gitdir is None, "a gitdir that is gone is not named")
+
+
+def doctor_parse_units(mod):
+    """_git_bool() and lazy_fetch_off()'s version table, as git reads them."""
+    for value, want in ((None, True), ("", False), ("true", True), ("Yes", True), ("on", True), ("false", False),
+                        ("off", False), ("0", False), ("2", True), ("0x0", False), ("maybe", True)):
+        check(mod._git_bool(value) is want, "git reads promisor = %r as %s" % (value, want))
+    real = mod.repo_git
+    try:
+        for version, want in (("git version 2.53.0", True), ("git version 2.45.0", True),
+                              ("git version 2.44.0", False), ("git version 2.44.1", True),
+                              ("git version 2.39.5 (Apple Git-154)", True), ("git version 2.39.3 (Apple Git-145)", False),
+                              ("git version 2.43.3", False), ("git version 2.43.4", True), ("git version 2.38.5", False),
+                              ("git version 2.31.1", False), ("not git", False)):
+            mod.repo_git = lambda checkout, args, v=version: (0, v, "")
+            check(mod.lazy_fetch_off("/x") is want, "%s honours GIT_NO_LAZY_FETCH: %s" % (version, want))
+    finally:
+        mod.repo_git = real
 
 
 def static_units(source):
@@ -2268,6 +2290,7 @@ def main(argv):
         os.environ.update(saved)
 
     submodule_units(mod, scratch)
+    doctor_parse_units(mod)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0
