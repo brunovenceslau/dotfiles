@@ -262,12 +262,17 @@ def time_cases(mod, pub, scratch):
 # The leg also checks itself, so that it cannot pass by checking nothing: the
 # corpus and the spellings must reach their floors, the oracle and the module
 # must meet in each bucket named in BUCKETS (agreement, and a strict refusal
-# on both sides of the oracle), and the two classifiers must flag the cases
-# self_check() hands them.
+# on both sides of the oracle), `ssh-keygen -l` and the module must meet in
+# each bucket named in KEY_BUCKETS (a spelling both read as the key, and one
+# both refuse), and the two classifiers must flag the cases self_check()
+# hands them.
 SEED = 20261006
 MIN_LINES = 1500
 MIN_SPELLINGS = 40
 BUCKETS = (("OK", "OK"), ("OK", "UNCLEAR"), ("REJECT", "UNCLEAR"))
+# Per key spelling: OK reads as the key, REJECT reads as no key, OTHER as
+# another key; the first side is ssh-keygen -l, the second the module.
+KEY_BUCKETS = (("OK", "OK"), ("REJECT", "REJECT"))
 V61 = 'valid-before="20991231235961"'
 POOL = ["\0", "\r", "\f", "\v", "\t", " ", '"', ",", "=", "\\", "\x1c", "#", "!", "*", "a"]
 
@@ -404,6 +409,8 @@ def self_check():
         (key_failure("fp", None, "fp", False), "KEY BYPASS"),
         (key_failure("fp", None, "fp", True), None), (key_failure("fp", "fp", "fp", False), None),
         (key_failure(None, None, "fp", False), None),
+        (key_bucket(None, None, "fp"), ("REJECT", "REJECT")), (key_bucket("fp", "fp", "fp"), ("OK", "OK")),
+        (key_bucket("fp", "other", "fp"), ("OK", "OTHER")),
     ]
     out = ["self-check: case %d gives %s, want %s" % (n, got, want)
            for n, (got, want) in enumerate(cases) if got != want]
@@ -414,6 +421,13 @@ def self_check():
     if [" ".join(x.split(" ")[:2]) for x in keys] != ["KEY OVERACCEPT", "KEY BYPASS"]:
         out.append("self-check: judge_keys flags %r" % keys)
     return out
+
+
+def key_bucket(ssh, got, want):
+    """The KEY_BUCKETS cell of a judge_keys() row."""
+    def side(fp):
+        return "REJECT" if fp is None else "OK" if fp == want else "OTHER"
+    return side(ssh), side(got)
 
 
 def key_reads(mod, key, scratch):
@@ -473,11 +487,19 @@ def differential(mod, ed_key, sig, msg, scratch):
     for bucket in BUCKETS:
         if not counts.get(bucket):
             failures.append("no line where ssh-keygen says %s and the module %s" % bucket)
+    key_counts = {}
+    for _, ssh, got, want, _ in key_rows:
+        cell = key_bucket(ssh, got, want)
+        key_counts[cell] = key_counts.get(cell, 0) + 1
+    for bucket in KEY_BUCKETS:
+        if not key_counts.get(bucket):
+            failures.append("no key spelling where ssh-keygen -l reads %s and the module %s" % bucket)
     for f in failures:
         print(f)
-    print("differential: %d lines, %d key spellings, %d failure(s), %.1f s; %s"
+    print("differential: %d lines, %d key spellings, %d failure(s), %.1f s; %s; keys %s"
           % (lines, spelled, len(failures), time.time() - start,
-             ", ".join("%s/%s %d" % (k[0], k[1], v) for k, v in sorted(counts.items()))))
+             ", ".join("%s/%s %d" % (k[0], k[1], v) for k, v in sorted(counts.items())),
+             ", ".join("%s/%s %d" % (k[0], k[1], v) for k, v in sorted(key_counts.items()))))
     return len(failures)
 
 

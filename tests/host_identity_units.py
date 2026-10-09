@@ -23,6 +23,7 @@ import stat
 import struct
 import subprocess
 import sys
+import time
 
 failures = []
 
@@ -693,6 +694,67 @@ def command_word_units(mod, scratch):
           "auto's SSH line names the installer once, as one shell word (%r)" % text)
 
 
+def killed_units(mod, scratch):
+    """A run killed while `ssh-keygen -Q` checks a key against a KRL removes
+    the key file it wrote for that, and git's empty directory, and then
+    dies of the signal it got. In a child, since that is the point; the
+    ssh-keygen it runs is a stub that says it started and then waits."""
+    bindir = os.path.join(scratch, "killed-bin")
+    os.mkdir(bindir)
+    started = os.path.join(scratch, "killed-started")
+    stub(bindir, "ssh-keygen", 'touch "%s"\nexec sleep 30\n' % started)
+    child = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    m.git(['config', '--get', 'user.email'])\n"
+        "    m.krl_revokes(sys.argv[3], m.parse_key(sys.argv[4]))\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        tmpdir = os.path.join(scratch, "killed-tmp-%d" % sig)
+        os.mkdir(tmpdir, 0o700)
+        if os.path.exists(started):
+            os.remove(started)
+        env = dict(os.environ, HOME=scratch, TMPDIR=tmpdir, PATH=bindir + os.pathsep + os.environ["PATH"])
+        p = subprocess.Popen([sys.executable, "-I", "-B", "-c", child, mod.__file__,
+                              os.path.join(scratch, "c.local"), os.devnull, K1],
+                             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Bounded: 20 s for the stub to start, then 20 s for the child to go.
+        for _ in range(200):
+            if os.path.exists(started) or p.poll() is not None:
+                break
+            time.sleep(0.1)
+        left_mid = sorted(os.listdir(tmpdir))
+        p.send_signal(sig)
+        try:
+            _, err = p.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            _, err = p.communicate()
+        left = os.listdir(tmpdir)
+        check(any(n.endswith(".pub") for n in left_mid) and p.returncode == -sig and b"Traceback" not in err
+              and left == [],
+              "killed by %s mid ssh-keygen -Q, a run removes its KRL key and git's directory and dies of it "
+              "(rc %s, held %r, left %r, %r)" % (signal.Signals(sig).name, p.returncode, left_mid, left, err))
+    # A SIGTERM the caller ignores (nohup does that for SIGHUP) stays ignored.
+    ignored = (
+        "import importlib.util, signal, sys\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "m.run = lambda *a, **k: (0 if signal.getsignal(signal.SIGTERM) == signal.SIG_IGN else 1, None)\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    p = subprocess.run([sys.executable, "-I", "-B", "-c", ignored, mod.__file__, os.path.join(scratch, "c.local")],
+                       env=dict(os.environ, HOME=scratch), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, timeout=60)
+    check(p.returncode == 0, "a SIGTERM the caller ignores stays ignored (rc %d, %r)" % (p.returncode, p.stderr))
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -1080,6 +1142,12 @@ def main(argv):
         command_word_units(mod, scratch)
     finally:
         mod.git_release()
+        os.environ.clear()
+        os.environ.update(saved)
+
+    try:
+        killed_units(mod, scratch)
+    finally:
         os.environ.clear()
         os.environ.update(saved)
 

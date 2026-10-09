@@ -1043,12 +1043,32 @@ def load_revocation(path):
     return frozenset(keys), None
 
 
+class _Held(object):
+    """A block during which the signals entry() unwinds on (SIGINT, SIGTERM,
+    SIGHUP) wait: one that arrives is delivered when the block ends. Wraps
+    the creation of a temporary file AND the assignment that records it, so
+    no signal can unwind between the two and leave a file nobody removes."""
+
+    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+    def __enter__(self):
+        self.old = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+
+    def __exit__(self, *exc):
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
+        return False
+
+
 def krl_revokes(path, key):
     """`ssh-keygen -Q` against a KRL: True revoked, False not, None unknown
-    (an unwritable TMPDIR included: that is a refusal, never a traceback)."""
+    (an unwritable TMPDIR included: that is a refusal, never a traceback).
+    The key goes to ssh-keygen in a temporary file, removed by the finally
+    below on every way out: a return, an error, ^C, and a SIGTERM or SIGHUP
+    (entry() turns those into an exception, Terminated)."""
     pub = None
     try:
-        fd, pub = tempfile.mkstemp(prefix="host_identity.", suffix=".pub")
+        with _Held():
+            fd, pub = tempfile.mkstemp(prefix="host_identity.", suffix=".pub")
         with os.fdopen(fd, "w") as fh:
             fh.write("%s %s\n" % key)
         p = subprocess.run(
@@ -2579,17 +2599,44 @@ def main(argv):
     return rc
 
 
+class Terminated(BaseException):
+    """A SIGTERM or SIGHUP, raised where the process is, as ^C raises
+    KeyboardInterrupt, so every finally on the way out runs (the KRL key
+    file, git's empty directory). A BaseException, so no `except
+    Exception` swallows it."""
+
+    def __init__(self, signum):
+        BaseException.__init__(self, signum)
+        self.signum = signum
+
+
+def _terminated(signum, frame):
+    raise Terminated(signum)
+
+
+def _die_of(signum):
+    """End this process by SIGNUM itself, not a plain exit: a shell waiting
+    on it then sees the signal, as it would for any command killed by it."""
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+    return 128 + signum  # only if SIGNUM is blocked
+
+
 def entry(argv):
-    """main(), with an interrupt reported without a traceback. main()'s
-    finally has already removed git's empty directory by then. The process
-    then dies of SIGINT itself, not a plain exit 130: a shell waiting on it
-    stops too, as it would for any command killed by ^C."""
+    """main(), with an interrupt or a termination reported without a
+    traceback. main()'s finally has already removed git's empty directory
+    by then, and krl_revokes() its key file. A SIGTERM or SIGHUP the caller
+    left at its default unwinds like ^C (Terminated); one it ignores (nohup)
+    stays ignored."""
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        if signal.getsignal(signum) == signal.SIG_DFL:
+            signal.signal(signum, _terminated)
     try:
         return main(argv)
     except KeyboardInterrupt:
-        signal.signal(signal.SIGINT, signal.SIG_DFL)
-        os.kill(os.getpid(), signal.SIGINT)
-        return 130  # only if SIGINT is blocked
+        return _die_of(signal.SIGINT)
+    except Terminated as e:
+        return _die_of(e.signum)
 
 
 if __name__ == "__main__":
