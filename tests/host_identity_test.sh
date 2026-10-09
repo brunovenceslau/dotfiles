@@ -1426,23 +1426,24 @@ rc=0; out="$(PATH="$work/nopy" "$installer" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable"
 has "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $installer identity)" "python3 unusable names the full installer path"
 # A checkout path is untrusted text and the line names it in a command: a
-# path holding a quote, an ESC, a newline, a Latin-1 byte and UTF-8 prints as
-# one $'...' word, every byte outside printable ASCII as \xNN, and that word
-# pasted into a shell names the real path. The \351 byte exercises
-# _shell_word's 255 mask only on the macOS legs, where install.sh runs under
-# /bin/bash 3.2 (a negative "'c" there); bash 4 and later read it as 233 with
-# or without the mask. The directory is made, not symlinked: install.sh
-# resolves its own with pwd -P.
-escdir="$work/co'$(printf '\033')[2J\\x$(printf '\n\351\303\251')"
+# path holding a quote, an ESC, a newline and UTF-8 prints as one $'...'
+# word, every byte outside printable ASCII as \xNN, and that word pasted into
+# a shell names the real path. The high bytes come from valid UTF-8 (e-acute,
+# 0xc3 0xa9), never a lone byte: APFS refuses a name that is not valid UTF-8.
+# They exercise _shell_word's 255 mask only on the macOS legs, where
+# install.sh runs under /bin/bash 3.2 (a negative "'c" there); bash 4 and
+# later read them as positive with or without the mask. The directory is
+# made, not symlinked: install.sh resolves its own with pwd -P.
+escdir="$work/co'$(printf '\033')[2J\\x$(printf '\n\303\251')"
 mkdir -p "$escdir"
 ln -s "$repo_root/install.sh" "$escdir/install.sh"
 ln -s "$repo_root/lib" "$escdir/lib"
 rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable, quoted checkout path"
-has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xe9\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
+has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
 raw_free() {
   local LC_ALL=C b
-  for b in "$(printf '\033')" "$(printf '\351')" "$(printf '\303')"; do
+  for b in "$(printf '\033')" "$(printf '\303')" "$(printf '\251')"; do
     case $out in *"$b"*) fail "$1: output holds a raw byte (output: $out)" ;; esac
   done
   case $out in *"
