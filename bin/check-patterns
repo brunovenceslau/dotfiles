@@ -1834,10 +1834,21 @@ function runs(n,   i, j, k, nr) {
 # at i when no run of its length follows (literal backticks). Every caller
 # lands on the FIRST backtick of a run: a walk reaches a backtick only from a
 # character that is not one, or from the end of a run or a link.
-function skipcode(i,   k) {
+#
+# The guard: a result at or before i would make the calling walk loop
+# forever (the hang an escaped-backtick walk that lands inside a run used
+# to cause). A walk that cannot advance is a bug in the walk, so it FAILS
+# CLOSED (exit 2) with a message, never advances by a guess: a guessed
+# step would let the gate report a verdict on a line it did not read.
+function skipcode(i,   k, r) {
   k = ri[i]
-  if (k in rn) return rs[rn[k]] + rl[k]
-  return i + rl[k]
+  if (k in rn) r = rs[rn[k]] + rl[k]
+  else r = i + rl[k]
+  if (r <= i) {
+    print "awk: the code-span walk stopped advancing at column " i " of " FILENAME ":" FNR " (an internal invariant broke)"
+    exit 2
+  }
+  return r
 }
 # pairs: ONE pass over the line, pairing each `[` with its `]` (pb) and each
 # `(` with its `)` (pp) on two stacks, outside code spans and past a

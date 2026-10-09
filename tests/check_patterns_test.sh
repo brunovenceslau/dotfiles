@@ -3515,6 +3515,43 @@ fail|run-rest
 fail|eol
 SHAPES
 
+# skipcode's guard (bin/check-patterns): a result at or before the index it
+# was given would loop the caller's walk forever, so it exits 2 with a
+# message instead. The mutant is the two-character skip the comment above
+# describes (the escaped run's `while` loop cut to one step), made on a
+# scratch copy of the gate; the copy must differ from the original or the
+# case would prove nothing. Every shape that hung under it must now fail
+# closed, inside the bound, with the guard's message beside arm 15's
+# scan-error line.
+mut="$work/check-patterns-mutant"
+sed 's/^      while (i <= n \&\& ch\[i\] == "`") i++$/      i++/' "$cp" > "$mut"
+chmod u+x "$mut"
+if cmp -s "$cp" "$mut"; then
+  fail "arm 15 skipcode guard: the two-character-skip mutant did not apply"
+fi
+for shape in run several run-literal run-rest after-run eol; do
+  r="$work/mdw-guard-$shape"; seed "$r"; mkdir -p "$r/docs"
+  f="$r/docs/x.md"
+  case "$shape" in
+    run) printf '[%s \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    several) printf '[%s \\` \\``` \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    run-literal) printf '[%s \\`` ] `` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    run-rest) printf '[%s \\`` ] ` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    after-run) printf '[%s \\``](%s)\n' "$md81" "$_md_long_token" > "$f" ;;
+    eol) printf '[%s](%s) \\``\n' "$md81" "$_md_long_token" > "$f" ;;
+  esac
+  bounded_run 20 "$work/mdw-guard-$shape.out" env STRICT= "$mut" "$r" \
+    || fail "arm 15 skipcode guard $shape: bounded_run could not turn job control on"
+  [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+    || fail "arm 15 skipcode guard: $shape still outlived 20 s (hung $br_hung, stuck $br_stuck)"
+  [ "$br_rc" = 2 ] && ok || fail "arm 15 skipcode guard: $shape must fail closed with 2, got $br_rc"
+  guard_out="$(cat "$work/mdw-guard-$shape.out")"
+  case "$guard_out" in
+    *"the code-span walk stopped advancing"*"$md_err_msg"*) ok ;;
+    *) fail "arm 15 skipcode guard: $shape lacks the guard message and the scan-error line: $guard_out" ;;
+  esac
+done
+
 # front matter that never closes is not front matter: GitHub renders the
 # `---` as a rule and the rest as prose, so its lines are held to the limit
 # at their own line numbers.
