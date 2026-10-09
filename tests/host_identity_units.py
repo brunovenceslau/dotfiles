@@ -859,13 +859,15 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
         "    elif sys.argv[3] == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif sys.argv[3] == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    else:\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
         "    return 0, None\n"
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."), ("gh", "host_identity.gh."),
                          ("write", ".config.local."), ("backup", ".config.local.bak.")):
         tmpdir = os.path.join(scratch, "created-tmp-" + what)
         confdir = os.path.join(scratch, "created-conf-" + what)
@@ -946,6 +948,8 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
         "    elif sys.argv[3] == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif sys.argv[3] == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    elif sys.argv[3] == 'write':\n"
         "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
@@ -955,7 +959,7 @@ def killed_units(mod, scratch):
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."), ("gh", "host_identity.gh."),
                          ("write", ".config.local."), ("backup", ".config.local.bak.")):
         tmpdir = os.path.join(scratch, "cleaning-tmp-" + what)
         confdir = os.path.join(scratch, "cleaning-conf-" + what)
@@ -989,6 +993,8 @@ def killed_units(mod, scratch):
         "        return n.endswith('.pub')\n"
         "    if what == 'git':\n"
         "        return n.startswith('host_identity.git.')\n"
+        "    if what == 'gh':\n"
+        "        return n.startswith('host_identity.gh.')\n"
         "    if what == 'write':\n"
         "        return n.startswith('.config.local.') and not n.startswith('.config.local.bak.')\n"
         "    return n.startswith('.config.local.bak.')\n"
@@ -1008,6 +1014,8 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[4]))\n"
         "    elif what == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif what == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    elif what == 'write':\n"
         "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
@@ -1017,7 +1025,7 @@ def killed_units(mod, scratch):
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what in ("krl", "git", "write", "backup"):
+    for what in ("krl", "git", "gh", "write", "backup"):
         tmpdir = os.path.join(scratch, "before-tmp-" + what)
         confdir = os.path.join(scratch, "before-conf-" + what)
         os.mkdir(tmpdir, 0o700)
@@ -1703,6 +1711,72 @@ def doctor_parse_units(mod):
         mod.repo_git = real
 
 
+
+def doctor_deps_units(mod, scratch):
+    """The Homebrew check's outcomes on a Mac, with the prefixes pointed at
+    scratch directories (no test can stage /opt/homebrew), and the parsers
+    of the gh check: gh's answer, and the helper `gh auth setup-git`
+    writes."""
+    bindir = os.path.join(scratch, "brew-path")
+    os.mkdir(bindir)
+    prefixes = [os.path.join(scratch, "brew-arm"), os.path.join(scratch, "brew-intel")]
+    real_platform, real_prefixes, real_path = sys.platform, mod.HOMEBREW_PREFIXES, os.environ["PATH"]
+
+    def found():
+        d = mod.Doctor(None, None)
+        d.homebrew()
+        return d.found
+
+    try:
+        mod.HOMEBREW_PREFIXES = prefixes
+        sys.platform = "darwin"
+        os.environ["PATH"] = bindir
+        brews = " or ".join(os.path.join(p, "bin", "brew") for p in prefixes)
+        check(found() == [("problem", "Homebrew is not installed: brew is not on PATH, and there is no %s - install it as docs/new-mac-host.md shows" % brews)],
+              "a Mac with no brew anywhere has a Homebrew problem (%r)" % found())
+        os.makedirs(os.path.join(prefixes[1], "bin"))
+        stub(os.path.join(prefixes[1], "bin"), "brew", "exit 0\n")
+        want = os.path.join(prefixes[1], "bin", "brew")
+        check(found() == [("problem", "%s is installed, but brew is not on PATH - start a new zsh (exec zsh): its zshrc puts it there" % want)],
+              "a Mac whose Intel prefix holds brew, off PATH, names it (%r)" % found())
+        os.makedirs(os.path.join(prefixes[0], "bin"))
+        with open(os.path.join(prefixes[0], "bin", "brew"), "w") as fh:
+            fh.write("not executable")
+        check(found()[0][1].startswith(want + " is installed"),
+              "a bin/brew that is not executable is not Homebrew, as zshrc's -x reads it (%r)" % found())
+        stub(bindir, "brew", "exit 0\n")
+        check(found() == [("ok", "brew is %s" % os.path.join(bindir, "brew"))], "brew on PATH is Homebrew (%r)" % found())
+        sys.platform = "linux"
+        check(found() == [("ok", "not macOS: Homebrew is checked only on macOS")], "Homebrew is not checked off macOS")
+    finally:
+        sys.platform, mod.HOMEBREW_PREFIXES = real_platform, real_prefixes
+        os.environ["PATH"] = real_path
+    check(mod.HOMEBREW_PREFIXES == ["/opt/homebrew", "/usr/local"],
+          "the Homebrew prefixes are zshrc's, Apple Silicon first (%r)" % mod.HOMEBREW_PREFIXES)
+
+    ok_head = "HTTP/2.0 200 OK\r\nX-Oauth-Scopes: repo, admin:ssh_signing_key\r\n\r\n"
+    for args, want in (
+            ((0, ok_head, ""), ("in", ["repo", "admin:ssh_signing_key"])),
+            ((0, "HTTP/1.1 200 OK\r\nx-oauth-scopes: \r\n\r\n", ""), ("in", None)),
+            ((0, "HTTP/2.0 200 OK\r\n\r\n", ""), ("in", None)),
+            ((4, "", "To get started with GitHub CLI, please run:  gh auth login\n"), ("out", None)),
+            ((1, "HTTP/2.0 401 Unauthorized\r\n\r\n", "gh: Bad credentials (HTTP 401)\n"), ("refused", 401)),
+            ((1, "HTTP/2.0 403 Forbidden\r\n\r\n", "gh: Forbidden (HTTP 403)\n"), ("refused", 403)),
+            ((4, "HTTP/2.0 401 Unauthorized\r\n\r\n", ""), ("refused", 401)),
+            ((1, "HTTP/2.0 502 Bad Gateway\r\n\r\n", "gh: HTTP 502\n"), ("unknown", "HTTP 502")),
+            ((1, "", "\nGet \"https://api.github.com/user\": no such host\n"),
+             ("unknown", 'Get "https://api.github.com/user": no such host')),
+            ((1, "", ""), ("unknown", "gh exited 1")),
+            ((1, "", "x" * 300), ("unknown", "x" * 200)),
+            ((0, "HTTP/2.0 2000 OK\r\n", ""), ("unknown", "gh exited 0"))):
+        got = mod._gh_answer(*args)
+        check(got == want, "gh's answer %r reads as %r (got %r)" % (args, want, got))
+    for value, want in (("!gh auth git-credential", True), ("!/opt/homebrew/bin/gh auth git-credential", True),
+                        ("!'/Users/a b/bin/gh' auth git-credential", True), ("gh auth git-credential", False),
+                        ("!gh auth git-credential --extra", False), ("!/bin/ghx auth git-credential", False),
+                        ("osxkeychain", False), ("", False), ("!'unclosed auth git-credential", False)):
+        check(mod.gh_helper(value) is want, "the helper %r is gh's: %s" % (value, want))
+
 def static_units(source):
     found = unescaped_values(source)
     check(not found, "every value lib/host_identity.py puts into a string is escaped (unescaped: %r)" % found)
@@ -2291,6 +2365,7 @@ def main(argv):
 
     submodule_units(mod, scratch)
     doctor_parse_units(mod)
+    doctor_deps_units(mod, scratch)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0

@@ -909,10 +909,14 @@ The identity step and `install.sh doctor` live in `lib/host_identity.py`;
 2. Keep each printed message one string literal. `docs/troubleshooting.md`
    and `docs/signing-key.md` quote them, and
    `tests/troubleshooting_messages_test.sh` fails when a quote no longer
-   matches the code. Update both pages in the same commit.
+   matches the code, or when a `doctor` problem or note is not quoted on
+   troubleshooting.md. Update both pages in the same commit.
 3. A new `doctor` check is one `Doctor` method and one `CHECKS` entry. It
    only reads: a tool under a timeout, a file through `read_small_file()`
-   (non-blocking, size-capped). It states each problem as one line with its
+   (non-blocking, size-capped). The `gh` check's one `gh api` call is
+   doctor's only network access; a tool that would write state runs with
+   that state in a temporary directory recorded in `_left`, the way
+   `gh_token()` runs gh. It states each problem as one line with its
    fix, and passes `signing=True` only for a problem that matters to signing
    alone, which an opted-out host sees as a note. Its `CHECKS` entry says
    whether it reads the git config (through `git()` or a `Host` read): such
@@ -936,7 +940,6 @@ is until its trigger fires. The ones about the framework's behaviour are in
 
 | Decision | Kept for now | Reopen when |
 | --- | --- | --- |
-| Extend `install.sh doctor` to gh (its login, token and scopes) and Homebrew | `doctor` checks the identity and signing path, the tools it uses (git, python3, ssh-keygen, the ssh-agent) and the plugin submodules | A pull request opens that adds a gh or Homebrew check to `CHECKS` in `lib/host_identity.py`, or a host breaks on gh or Homebrew without a `doctor` line naming it |
 | Test two identity runs writing `config.local` at once | One writer per run: a temporary file and a rename, and the first `.bak` is never replaced; no concurrency test | A host reports a corrupt `config.local` or a second `.bak` |
 | Test the identity step's macOS-only paths on Linux: a case-insensitive APFS spelling of `TMPDIR`, `/var` as a link to `/private/var`, and an execute-only or deleted working directory | The macOS CI legs run `tests/host_identity_test.sh`: every case there runs under the macOS `TMPDIR` in `/var/folders`, a case-insensitive spelling of `TMPDIR` is run there and skipped elsewhere, and an execute-only working directory must either work or give the one refusal for it. A deleted working directory is not tested | The first macOS run of the identity step that reports a refusal, or a macOS CI leg that fails one of these cases |
 | Hold the test `.py` files to the Python 3.9 floor, in `tests/host_identity_units.py` and the Makefile `py-syntax` leg | The floor is checked for `lib/host_identity.py` only | A test `.py` file uses syntax newer than 3.9, or CI gains a 3.9 leg |
@@ -977,8 +980,9 @@ A guard that must parse the language it guards pins a literal or executes the
 code under a stub. `tests/troubleshooting_messages_test.sh` checks that the
 framework messages [troubleshooting.md](troubleshooting.md) and
 [signing-key.md](signing-key.md) quote, in the shapes its header lists, still
-appear as literal fragments in the code that prints them; the `identity:` and
-`doctor:` spans are not checked yet. The "A tar that only WARNS must still fail
+appear as literal fragments in the code that prints them, and that every
+finding `install.sh doctor` prints as a problem or a note is quoted on
+troubleshooting.md. The "A tar that only WARNS must still fail
 the staging" case of `tests/smoke_stage_test.sh` puts a stub `tar` first on
 `PATH` instead of reasoning about what tar would do. Never strip comments
 before a security grep unless the stripper tokenizes the language (quotes,

@@ -45,7 +45,7 @@ given.
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink (which runs the automatic [identity step](#installsh-identity)), recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
 | `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent; `commit.gpgsign` comes from the tracked config. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
-| `doctor` | `[--verbose]` | Checks the identity, the signing key, the tools they need and the plugin submodules, and writes nothing. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
+| `doctor` | `[--verbose]` | Checks the identity, the signing key, the tools they need, the plugin submodules, Homebrew, gh and git's credential helper, and writes nothing that stays; it asks GitHub whether gh's token is valid. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
 
@@ -336,18 +336,24 @@ reported a stale key; and `2` on a usage error.
 ### `install.sh doctor`
 
 Checks this host's git identity, its signing key, the tools they depend on,
-and the checkout's plugin submodules, and changes nothing. It reads git
-config, the allowed-signers and revocation files, `ssh-add -L`,
-`ssh-keygen`, the checkout's plugin pins and each plugin's checked-out
-commit, and opens no network connection of its own. Each tool runs under a
-time limit; each file is opened without blocking and read up to 1 MiB.
+the checkout's plugin submodules, Homebrew, gh and git's credential helper
+for github.com, and changes nothing. It reads git config, the
+allowed-signers and revocation files, `ssh-add -L`, `ssh-keygen`, the
+checkout's plugin pins and each plugin's checked-out commit, and where
+`brew` and `gh` are. Its one network access is the `gh` check: one
+`gh api --hostname github.com --include --silent user`, which asks GitHub
+whether it accepts the token gh holds, run with `GH_TELEMETRY=0`, the update
+notifiers and prompts off, and gh's state, cache and data directories in a
+temporary directory (without `GH_TELEMETRY=0`, gh writes a device id under
+its state directory on every call). Each tool runs under a time limit, 30
+seconds for gh; each file is opened without blocking and read up to 1 MiB.
 `ssh-add -L` asks the agent that `SSH_AUTH_SOCK` names for its public keys
-only; a forwarded agent answers over the SSH session that forwards it. What
-it creates is temporary: the empty directory git runs in and, when
-`gpg.ssh.revocationFile` is a KRL, the public key `ssh-keygen -Q` reads.
-Both are removed before it exits, including when ^C, `SIGTERM` or `SIGHUP`
-ends it (a `SIGKILL` cannot be caught). The checks are a registry, `CHECKS`
-in `lib/host_identity.py`, run in this order:
+only; a forwarded agent answers over the SSH session that forwards it.
+What it creates is temporary: the empty directory git runs in, gh's
+directory and, when `gpg.ssh.revocationFile` is a KRL, the public key
+`ssh-keygen -Q` reads. Each is removed before it exits, including when ^C,
+`SIGTERM` or `SIGHUP` ends it (a `SIGKILL` cannot be caught). The checks are
+a registry, `CHECKS` in `lib/host_identity.py`, run in this order:
 
 | Check | What it reads | A problem when |
 | --- | --- | --- |
@@ -361,17 +367,20 @@ in `lib/host_identity.py`, run in this order:
 | `ssh session` | `SSH_CONNECTION` | never; with `--verbose` it notes that the automatic step writes nothing in the session |
 | `~/.gitconfig` | `~/.gitconfig` | it is a dangling symlink, not a regular file, or sets `user.*`, `gpg.*`, `commit.gpgsign` or `tag.gpgsign` |
 | `plugins` | the submodule pins under `zsh/plugins/` in the checkout's `HEAD` (one `git ls-tree` on the checkout's own `.git`, with the global and system git config left out and lazy fetching off), and for each plugin the commit its directory has checked out, read from its `.git` file, its gitdir's `HEAD` and the ref that names, never by running git in the plugin | the checkout's `.git/config` is not a regular file, the pins cannot be listed (the checkout is not a git repository), a plugin is not initialized (a clone without `--recurse-submodules`; `./install.sh` initializes it, `link` does not), or which commit a plugin is at cannot be read; a plugin at another commit than its pin is a note naming the command back to the pin, since the installer leaves such a local change alone on purpose; a partial clone is never fetched into: one missing those trees is a note, and with a git that ignores `GIT_NO_LAZY_FETCH` (before 2.45.0, and before 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 or 2.44.1 in those lines) a partial clone is a note and is not read |
+| `homebrew` | on macOS only: `brew` on `PATH`, and an executable `bin/brew` under `/opt/homebrew` (Apple Silicon), then `/usr/local` (Intel), the places the zshrc tries; brew itself is never run | Homebrew is not installed (neither), or it is installed but not on `PATH` |
+| `gh` | `gh` on `PATH`, and GitHub's answer to `gh api user` with the token gh holds for github.com: the HTTP status and the token's scopes | GitHub refuses the token (HTTP 401 or 403), or the token still holds `admin:ssh_signing_key`, the scope only registering a signing key needs; no scope is required, since `gh auth login` grants all a push uses. gh missing or logged out, no network, and any other answer are notes |
+| `credential helper` | `credential.helper` for `https://github.com`, effective and in `config.local` (`git config --get-urlmatch`, as `dotfiles-upgrade` reads it) | git cannot read it; gh is the helper while gh is missing or logged out; config.local sets gh but a later file sets another helper; gh is the helper but `config.local` does not set it, so `dotfiles-upgrade` does not use it; or gh is logged in and git has no helper for github.com. Another helper is fine |
 
 By default it prints one line per problem, `install: doctor: <check>: <what
 is wrong> - <the fix>`, and nothing else, so a host in good shape prints
 nothing. Before any check, a `config.local` that is not a regular file is
 reported in one line, `doctor: git: <path> is not a regular file`, and the
 checks that read the git config (`git`, `values`, `trust root`, `ssh-agent`,
-`signing key` and `~/.gitconfig`) are skipped: git would block on it. A git
-that cannot be kept outside every repository, which the identity step
-refuses, skips them the same way, in one line: `doctor: git: not reading the
-git config: <reason>`. The other checks still run, and the line counts as
-one problem.
+`signing key`, `~/.gitconfig` and `credential helper`) are skipped: git
+would block on it. A git that cannot be kept outside every repository, which
+the identity step refuses, skips them the same way, in one line: `doctor:
+git: not reading the git config: <reason>`. The other checks still run,
+and the line counts as one problem.
 
 `--verbose` prints every finding: a problem or a passing check as is, and
 `note:` before one that is neither. Its last line, the verdict on the whole
@@ -392,7 +401,8 @@ counts, since it shapes every commit, signed or not: `user.name`,
 `user.email` (the fix then names `git config --file`, since
 `install.sh identity` needs a signing key), a `commit.gpgsign` or
 `tag.gpgsign` git cannot read, the `[include]` chain, `GIT_CONFIG_GLOBAL`,
-`python3`, `~/.gitconfig` and the plugins. `--verbose` names the opt-out:
+`python3`, `~/.gitconfig`, the plugins, Homebrew, gh and the credential
+helper. `--verbose` names the opt-out:
 `commit.gpgsign = false from <origin>: respected as this host's opt-out;
 the automatic step stays quiet and writes nothing`.
 

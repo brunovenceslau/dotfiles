@@ -646,6 +646,10 @@ install: doctor: values: user.name is not set, so git refuses every commit - run
 install: doctor: values: user.name is not set, so git refuses every commit - run: git config --file <path> user.name "Full Name"
 install: doctor: values: user.email is not set, so git refuses every commit - run: <path to install.sh> identity
 install: doctor: values: user.email is not set, so git refuses every commit - run: git config --file <path> user.email <your email>
+install: doctor: values: user.name is not set - run: <path to install.sh> identity --name "Full Name"
+install: doctor: values: user.name is not set - run: git config --file <path> user.name "Full Name"
+install: doctor: values: user.email is not set - run: <path to install.sh> identity
+install: doctor: values: user.email is not set - run: git config --file <path> user.email <your email>
 install: doctor: values: <key> is not set - run: <path to install.sh> identity
 install: doctor: values: <key> is not a boolean git reads (<error>) - git refuses to <commit, tag, or run most commands> until it is; fix it in the file git -C ~ config --show-origin --get <key> names
 install: doctor: values: user.signingkey is not set, so git refuses every commit - run: <path to install.sh> identity, or opt this host out of signing (see docs/signing-key.md)
@@ -665,6 +669,16 @@ install: doctor: plugins: cannot list the plugin pins of <path> (<error>) - fix 
 install: doctor: plugins: <plugin> is not initialized, so zsh starts without it - run: <path to install.sh> install
 install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory aside, then run: <path to install.sh> install
 install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory and its git directory <path> aside, then run: <path to install.sh> install
+install: doctor: homebrew: Homebrew is not installed: brew is not on PATH, and there is no <path> or <path> - install it as docs/new-mac-host.md shows
+install: doctor: homebrew: <path> is installed, but brew is not on PATH - start a new zsh (exec zsh): its zshrc puts it there
+install: doctor: gh: GitHub refuses gh's token for github.com (HTTP <status>) - run: gh auth login -h github.com
+install: doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key
+install: doctor: credential helper: cannot read credential.helper (<error>) - check the file git -C ~ config --show-origin --get-regexp credential names
+install: doctor: credential helper: git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh
+install: doctor: credential helper: git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login
+install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but a later file sets <helper>, which git uses - remove that one
+install: doctor: credential helper: gh is the credential helper git uses for github.com, but <path> does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md
+install: doctor: credential helper: gh is logged in, but git has no credential helper for github.com, so a push over HTTPS asks for a username - run: GIT_CONFIG_GLOBAL=<path> gh auth setup-git
 ```
 
 The `git config --file` lines for `user.name` and `user.email` are the ones
@@ -705,8 +719,52 @@ partial clone missing the trees the pins are in is then a `note:` under
 `--verbose`. With an older git a partial clone is not read at all, and the
 `note:` says so.
 
+Homebrew is checked on macOS only, where `./install.sh packages` and the
+zshrc's `PATH` need it. doctor never runs brew: it looks for `brew` on
+`PATH` and for an executable `bin/brew` under `/opt/homebrew` (Apple
+Silicon), then `/usr/local` (Intel), the two places the zshrc tries. The
+two `<path>`s of the first line are those two. A `bin/brew` that is
+installed but not on `PATH` means the shell did not start through the
+zshrc; a new zsh puts it there.
+
+The `gh` check is doctor's one network access. It asks GitHub, through
+`gh api`, whether it accepts the token gh holds for github.com, with gh's
+telemetry, update notices and prompts off and gh's state directories in a
+temporary directory, so nothing it writes stays. Only GitHub refusing the
+token (HTTP 401 or 403) is a problem. No answer, offline included, is a
+`note:` and the run still exits `0`. The framework needs no token scope:
+`gh auth login` grants all a push uses. The one scope that is a problem is
+`admin:ssh_signing_key` kept after
+[registering a signing key](new-mac-host.md#5-set-identity-and-signing),
+since a token holding it can add signing keys to the account.
+
+The credential helper lines are about pushing, or fetching a private fork,
+over HTTPS: see [git prompts for a username](#git-prompts-for-a-username).
+`dotfiles-upgrade` reads only the XDG config, so the helper belongs in
+`config.local`. A helper other than gh is fine, and so is no helper while
+gh is not logged in: fetching the public upstream needs none.
+
+With `--verbose`, doctor also prints these `note:` lines. None is a
+problem, and none changes the exit status:
+
+```text
+install: doctor: values: note: user.useConfigOnly = false from <origin>: git invents a name and an email from this account and host when none is set
+install: doctor: values: note: commit.gpgsign = false from <origin>, but tag.gpgsign is true: tags are signed, so the signing checks apply
+install: doctor: trust root: note: skipped malformed line(s) <n> in <path>
+install: doctor: ssh session: note: SSH_CONNECTION is set: the automatic step writes nothing in this session; <path to install.sh> identity, run on purpose, still works
+install: doctor: plugins: note: <path> is a partial clone, and this git cannot read it without fetching what it lacks - not checked
+install: doctor: plugins: note: <path> is a partial clone without the trees the plugin pins are in (<error>) - not checked
+install: doctor: plugins: note: cannot tell which commit <plugin> is at: <reason>
+install: doctor: plugins: note: <plugin> is at <commit>, not its pin <commit>: a local change, left as it is - to return to the pin, run: git -C <path> -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update -- <plugin>
+install: doctor: gh: note: gh is not on PATH - GitHub access is not checked; gh is needed only to push and to register a signing key
+install: doctor: gh: note: gh is not logged in to github.com - to push or to register a signing key, run: gh auth login
+install: doctor: gh: note: cannot ask GitHub whether gh's token is valid (<reason>) - not checked; this check needs the network
+```
+
 **Cause.** The identity or signing setup is incomplete, a tool it needs is
-missing, or a plugin submodule is not in place. On a host that opted out of
+missing, a plugin submodule is not in place, or Homebrew, gh or git's
+credential helper for github.com is not set up the way the framework uses
+them. On a host that opted out of
 signing, a problem that matters only to signing prints as a `note:` line
 under `--verbose` instead; which ones are listed in
 [`install.sh doctor`](shell-reference.md#installsh-doctor).
@@ -784,6 +842,9 @@ upstream repository never reaches this.
 mkdir -p ~/.config/git
 GIT_CONFIG_GLOBAL="$HOME/.config/git/config.local" gh auth setup-git
 ```
+
+`./install.sh doctor` names each of these cases under `credential helper`
+(see [doctor reports a problem](#doctor-reports-a-problem)).
 
 Or add the block by hand. `config/git/config.local.example` shows it, commented,
 as the `[credential "https://github.com"]` stanza. This applies to HTTPS remotes

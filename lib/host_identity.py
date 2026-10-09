@@ -27,7 +27,9 @@
 #   doctor    `install.sh doctor [--verbose]`: read only; print each problem
 #             in one line (every check with --verbose), exit 1 on a problem;
 #             besides the identity and signing path it checks the plugin
-#             submodules of the checkout that holds --installer
+#             submodules of the checkout that holds --installer, Homebrew
+#             on macOS, and gh, which it asks over the network whether
+#             GitHub accepts its token, and git's credential helper
 # `-I` keeps the current directory and PYTHON* variables out of sys.path, so a
 # planted module beside the cwd cannot run. It is never linked onto PATH: lib/
 # is not a tree the link engine walks. The behaviour (lookup order, matching
@@ -2293,14 +2295,17 @@ def advisory(host):
 #
 # `install.sh doctor` runs every check in CHECKS, in order. A check is one
 # method of Doctor: it only reads (git config, files, `ssh-add -L`,
-# `ssh-keygen`, the checkout's plugin pins through repo_git() and each
-# submodule's HEAD as a file) and records findings. It opens no network
-# connection of its own, though a forwarded agent answers over its SSH
-# session; in a partial clone, on a git that cannot be told not to fetch
-# (lazy_fetch_off()), the plugin check reads no object. A check that reads
-# the git config is an identity check (the third field of its CHECKS entry):
-# a config.local that is not a regular file, or a git that cannot be kept
-# outside every repository, is reported once and skips those checks only.
+# `ssh-keygen`, the checkout's plugin pins through repo_git(), each
+# submodule's HEAD as a file, where brew is, and what GitHub says about
+# gh's token) and records findings. Its one network call is the gh check's
+# (gh_token()): `gh api` with telemetry, notifiers and prompts off, and
+# gh's state in a temporary directory, so it writes nothing that stays; a
+# forwarded agent also answers over its SSH session. In a partial clone, on
+# a git that cannot be told not to fetch (lazy_fetch_off()), the plugin
+# check reads no object. A check that reads the git config is an identity
+# check (the third field of its CHECKS entry): a config.local that is not a
+# regular file, or a git that cannot be kept outside every repository, is
+# reported once and skips those checks only.
 # Each tool runs under a timeout; each file is opened without blocking and
 # read up to a size cap (read_small_file()). A finding is ok, info or a
 # problem; a problem is one line naming what is wrong, where it comes from
@@ -2532,6 +2537,125 @@ def plugin_pins(checkout):
     return pins, None
 
 
+# Where Homebrew lives: the Apple Silicon prefix, then the Intel one, the
+# order zsh/zshrc tries them in, each judged by an executable bin/brew in it
+# (directory existence, never a `brew shellenv` fork). One string split in
+# two, so the pair stays adjacent words for `make check-patterns`.
+HOMEBREW_PREFIXES = "/opt/homebrew /usr/local".split()
+
+# The host the gh check asks about: the framework's remote is on github.com.
+GH_HOST = "github.com"
+# One network round trip, bounded: gh itself sets no overall time limit.
+GH_TIMEOUT = 30
+# The scope docs/new-mac-host.md adds only to register a signing key, and
+# drops again right after: a token that keeps it can add signing keys to
+# the account.
+GH_SIGNING_SCOPE = "admin:ssh_signing_key"
+# The caller's settings that would change what gh prints or where it sends
+# the request (gh help environment, gh 2.102): debug output on stderr, a
+# forced terminal with colours, another default host or repository, a pager.
+GH_DROPPED_ENV = frozenset(("GH_DEBUG", "DEBUG", "GH_FORCE_TTY", "CLICOLOR_FORCE", "GH_HOST", "GH_REPO",
+                            "GH_PAGER", "PAGER"))
+
+
+def gh_env(state):
+    """The environment of the one gh call: the caller's (its token and its
+    config directory are what gh would use), without GH_DROPPED_ENV and
+    git's repository-local variables, and with every setting gh documents
+    for a run that asks nothing and records nothing: telemetry off
+    (GH_TELEMETRY=0: without it gh 2.102 writes $XDG_STATE_HOME/gh/device-id
+    on every call), no update notifiers, no prompts, no spinner, no colour.
+    gh's state, cache and data directories point at STATE, a temporary
+    directory removed after the call, so a gh that writes there anyway
+    writes nothing that stays."""
+    env = dict(os.environ)
+    for k in list(env):
+        if (k in GH_DROPPED_ENV or k in GIT_LOCAL_ENV or k.startswith("GIT_CONFIG_KEY_")
+                or k.startswith("GIT_CONFIG_VALUE_")):
+            del env[k]
+    env.update({
+        "GH_TELEMETRY": "0", "GH_NO_UPDATE_NOTIFIER": "1", "GH_NO_EXTENSION_UPDATE_NOTIFIER": "1",
+        "GH_PROMPT_DISABLED": "1", "GH_SPINNER_DISABLED": "1", "NO_COLOR": "1", "CLICOLOR": "0",
+        "XDG_STATE_HOME": state, "XDG_CACHE_HOME": state, "XDG_DATA_HOME": state,
+    })
+    return env
+
+
+def _gh_answer(rc, out, err):
+    """What one `gh api --include --silent user` said: ("in", the token's
+    scopes or None when GitHub lists none), ("out", None) for gh's exit 4
+    (no token: `gh help exit-codes`), ("refused", the HTTP status) for a 401
+    or a 403, or ("unknown", why, unescaped) for anything else (no network,
+    another status, a gh that failed). --include prints the status line
+    (`HTTP/2.0 401 Unauthorized`) and the headers first, also for an error
+    status, which gh then exits 1 on (cli/cli v2.102.0,
+    pkg/cmd/api/api.go processResponse)."""
+    rows = out.splitlines()
+    m = re.match(r"HTTP/[^ ]+ ([0-9]{3})(?: |$)", rows[0]) if rows else None
+    status = int(m.group(1)) if m else None
+    if status is None and rc == 4:
+        return "out", None
+    if status in (401, 403):
+        return "refused", status
+    if rc == 0 and status is not None and 200 <= status < 300:
+        scopes = None
+        for line in rows[1:]:
+            name, colon, value = line.partition(":")
+            if colon and name.strip().lower() == "x-oauth-scopes":
+                scopes = [s.strip() for s in value.split(",") if s.strip()] or None
+        return "in", scopes
+    if status is not None:
+        return "unknown", "HTTP %d" % status
+    errs = [line for line in err.splitlines() if line.strip()]
+    return "unknown", (errs[0][:200] if errs else "gh exited %d" % rc)
+
+
+def gh_token(path):
+    """_gh_answer() for the gh at PATH, asked once over the network whether
+    GitHub accepts the token it holds for GH_HOST. gh runs non-interactively
+    in a temporary directory that is its working directory and its state
+    (gh_env()), made and removed like krl_revokes()'s key file: recorded in
+    _left, removed by the finally on every way out, a signal included."""
+    state = None
+    try:
+        with _Held():
+            state = tempfile.mkdtemp(prefix="host_identity.gh.")
+            _left.add(state)
+        p = subprocess.run(
+            [path, "api", "--hostname", GH_HOST, "--include", "--silent", "user"],
+            cwd=state,
+            env=gh_env(state),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=GH_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        return "unknown", "no answer within %d seconds" % GH_TIMEOUT
+    except OSError as e:
+        return "unknown", e.strerror or str(e)
+    finally:
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if state is not None:
+                shutil.rmtree(state, ignore_errors=True)
+                _left.discard(state)
+    return _gh_answer(p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace"))
+
+
+def gh_helper(value):
+    """True when the credential helper VALUE runs `gh auth git-credential`,
+    as `gh auth setup-git` writes it: `!<path to gh> auth git-credential`,
+    the path shell-quoted when it needs it."""
+    if not value.startswith("!"):
+        return False
+    try:
+        words = shlex.split(value[1:])
+    except ValueError:
+        return False
+    return len(words) == 3 and os.path.basename(words[0]) == "gh" and words[1:] == ["auth", "git-credential"]
+
+
 class Doctor(object):
     """The checks of `install.sh doctor`. A check method records what it
     found in self.found; doctor() runs CHECKS and labels each finding with
@@ -2542,6 +2666,9 @@ class Doctor(object):
         self.host = host
         self.found = []  # (level, text)
         self.opted_out_origin = opted_out_origin
+        # What the gh check found, for the credential helper check after
+        # it: None (not asked), "absent", or _gh_answer()'s first field.
+        self.gh_state = None
 
     def ok(self, text):
         self.found.append(("ok", text))
@@ -2857,6 +2984,90 @@ class Doctor(object):
                           % (_shown(path), _shown(commit[:12]), _shown(pin[:12]), shell_word(checkout),
                              shell_word(path)))
 
+    def homebrew(self):
+        # macOS only: `./install.sh packages` and the zshrc PATH need it.
+        # `which brew` and the prefixes zshrc tries, by directory existence;
+        # brew itself is never run (`brew bundle check` is deferred).
+        if sys.platform != "darwin":
+            self.ok("not macOS: Homebrew is checked only on macOS")
+            return
+        on_path = shutil.which("brew")
+        installed = [b for b in (os.path.join(p, "bin", "brew") for p in HOMEBREW_PREFIXES)
+                     if os.path.isfile(b) and os.access(b, os.X_OK)]
+        if on_path is None and not installed:
+            self.problem("Homebrew is not installed: brew is not on PATH, and there is no %s - install it as docs/new-mac-host.md shows"
+                         % " or ".join(_shown(os.path.join(p, "bin", "brew")) for p in HOMEBREW_PREFIXES))
+        elif on_path is None:
+            self.problem("%s is installed, but brew is not on PATH - start a new zsh (exec zsh): its zshrc puts it there"
+                         % _shown(installed[0]))
+        else:
+            self.ok("brew is %s" % _shown(on_path))
+
+    def gh(self):
+        # The doctor's one network call: GitHub is asked whether it accepts
+        # gh's token (gh_token()). Offline or an answer it cannot read is a
+        # note; only GitHub refusing the token (HTTP 401 or 403) is a
+        # problem. No scope is required: the framework fetches a public
+        # repository, and a push needs only what `gh auth login` grants.
+        path = shutil.which("gh")
+        if path is None:
+            self.gh_state = "absent"
+            self.info("gh is not on PATH - GitHub access is not checked; gh is needed only to push and to register a signing key")
+            return
+        state, detail = gh_token(path)
+        self.gh_state = state
+        if state == "out":
+            self.info("gh is not logged in to github.com - to push or to register a signing key, run: gh auth login")
+        elif state == "refused":
+            self.problem("GitHub refuses gh's token for github.com (HTTP %d) - run: gh auth login -h github.com" % detail)
+        elif state == "unknown":
+            self.info("cannot ask GitHub whether gh's token is valid (%s) - not checked; this check needs the network"
+                      % _shown(detail))
+        else:
+            if detail and GH_SIGNING_SCOPE in detail:
+                self.problem("gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key")
+            self.ok("%s is logged in to github.com, and GitHub accepts its token (scopes: %s)"
+                    % (_shown(path), _shown(", ".join(detail)) if detail else "none listed"))
+
+    def credential_helper(self):
+        # The helper git uses for https://github.com, as dotfiles-upgrade
+        # resolves it (install.sh: --get-urlmatch), and whether config.local
+        # sets it: the upgrade reads only the XDG config, so a helper in
+        # ~/.gitconfig never reaches it.
+        host = self.host
+        url = "https://" + GH_HOST
+        rc, value, err = git(["config", "--includes", "--get-urlmatch", "credential.helper", url])
+        if rc not in (0, 1):
+            self.problem("cannot read credential.helper (%s) - check the file git -C ~ config --show-origin --get-regexp credential names"
+                         % _shown(err or "exit %d" % rc))
+            return
+        local = ""
+        if os.path.lexists(host.config_local):
+            lrc, lvalue, _ = git(["config", "--file", host.config_local, "--get-urlmatch", "credential.helper", url])
+            local = lvalue if lrc == 0 else ""
+        uses_gh = rc == 0 and gh_helper(value)
+        if uses_gh and self.gh_state == "absent":
+            self.problem("git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh")
+        elif uses_gh and self.gh_state == "out":
+            self.problem("git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login")
+        # A config.local helper git does not read at all (no include) is
+        # the git check's line; here it reads as no helper.
+        if gh_helper(local) and rc == 0 and not uses_gh:
+            self.problem("%s sets gh as the credential helper for github.com, but a later file sets %s, which git uses - remove that one"
+                         % (_shown(host.config_local), _shown(value)))
+        elif uses_gh and not gh_helper(local):
+            self.problem('gh is the credential helper git uses for github.com, but %s does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md'
+                         % _shown(host.config_local))
+        elif uses_gh:
+            self.ok("gh is the credential helper git uses for github.com, from %s" % _shown(host.config_local))
+        elif rc == 0 and value:
+            self.ok("git's credential helper for github.com is %s" % _shown(value))
+        elif self.gh_state == "in":
+            self.problem("gh is logged in, but git has no credential helper for github.com, so a push over HTTPS asks for a username - run: GIT_CONFIG_GLOBAL=%s gh auth setup-git"
+                         % shell_word(host.config_local))
+        else:
+            self.ok("no credential helper for github.com; fetching the public upstream needs none")
+
 
 # (name, Doctor method, reads the git config): the checks, in the order they
 # print. A check that reads the git config (through git() or a Host read) is
@@ -2874,6 +3085,9 @@ CHECKS = (
     ("ssh session", Doctor.ssh_session, False),
     ("~/.gitconfig", Doctor.gitconfig, True),
     ("plugins", Doctor.plugins, False),
+    ("homebrew", Doctor.homebrew, False),
+    ("gh", Doctor.gh, False),
+    ("credential helper", Doctor.credential_helper, True),
 )
 
 

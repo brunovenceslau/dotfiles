@@ -196,8 +196,9 @@ skip to item 5.
    fixes are in
    [the installer did not set the git identity](troubleshooting.md#the-installer-did-not-set-the-git-identity).
 
-6. Check the result. `doctor` prints nothing when the identity, the signing
-   and the plugin submodules are in place:
+6. Check the result. `doctor` prints nothing when the identity, the signing,
+   the plugin submodules, Homebrew and, if you set it up in step 2, gh and
+   its credential helper are in place:
 
    ```sh
    ./install.sh doctor; echo "exit=$?"
