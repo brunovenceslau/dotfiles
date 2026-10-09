@@ -47,10 +47,12 @@ def fake(rc, out=b"", err=b""):
 
 def fake_git(table, calls):
     """A fake that answers each git subcommand from table, {name: (rc, out)},
-    and records (argv, stdin) in calls, for a function that runs several."""
+    and records (argv, stdin) in calls, for a function that runs several.
+    A name may carry the first option too (`cat-file --batch`), which wins
+    over the bare subcommand."""
     def run(args, **kw):
         calls.append((args, kw.get("input")))
-        rc, out = table[args[1]]
+        rc, out = table.get(" ".join(args[1:3])) or table[args[1]]
         return subprocess.CompletedProcess(args, rc, stdout=out, stderr=b"")
     return run
 
@@ -187,52 +189,94 @@ check(mod.git_env("/g").get("GIT_NO_LAZY_FETCH") == "1",
 check(mod.git_env("/g").get("GIT_NO_REPLACE_OBJECTS") == "1",
       "git_env(): rev-list reads the commits a push sends, not replacements")
 
-def pushed_one(rev_list_out):
+def obj(*headers, msg="m\n"):
+    """A raw commit object: a tree, the headers, a blank line, msg."""
+    return ("tree %s\n%s\n%s" % ("t" * 40, "".join(h + "\n" for h in headers),
+                                 msg)).encode()
+
+
+def batch(*objects):
+    """`git cat-file --batch` output for (oid, raw bytes) pairs."""
+    return b"".join(b"%s commit %d\n%s\n" % (o.encode(), len(raw), raw)
+                    for o, raw in objects)
+
+
+def pushed(objects, out=None):
     """pushed_commits() of tip A40, which cat-file finds, with rev-list
-    printing rev_list_out."""
+    listing the oids of objects and `cat-file --batch` printing them (or
+    out)."""
     return run_with(
         lambda: mod.pushed_commits("/g", {A40}, set()), 0,
-        runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
-                         "rev-list": (0, rev_list_out.encode())}, []))
-
-
-def record(oid, *headers, msg="    m\n"):
-    """One `git rev-list --header` record: OID, headers, blank, message."""
-    return "%s\ntree %s\n%s\n\n%s\0" % (oid, "t" * 40,
-                                       "".join(h + "\n" for h in headers),
-                                       msg)
+        runner=fake_git({
+            "cat-file": (0, ("%s\n" % A40).encode()),
+            "rev-list": (0, "".join("%s\n" % o for o, _ in objects).encode()),
+            "cat-file --batch": (0, batch(*objects) if out is None else out)},
+            []))
 
 
 AU, CO = "author A <a@x> 1 +0000", "committer C <c@x> 1 +0000"
-code, _, got = pushed_one(record(A40, AU, CO) + record(B40, AU, CO))
+code, _, got = pushed([(A40, obj(AU, CO)), (B40, obj(AU, CO))])
 check(code is None and got == [(A40, "a@x", "c@x"), (B40, "a@x", "c@x")],
       "pushed_commits(): each commit, its author and committer emails")
-code, _, got = pushed_one(record(A40, "author <B> x <a@x> 1 +0000", CO,
+code, _, got = pushed([(A40, obj("author <B> x <a@x> 1 +0000", CO,
                                  " author Z <z@x> 1 +0000",
-                                 msg="    author Z <z@x>\n"))
+                                 msg="author Z <z@x>\n\0author Y <y@x>\n"))])
 check(code is None and got == [(A40, "B", "c@x")],
       "pushed_commits(): the email is read from the first < to the next >, "
-      "and a continuation or message line is no header (got %r)" % got)
-for what, out in (
-        ("no final NUL", record(A40, AU, CO)[:-1]),
-        ("a record with no oid", "tree x\n" + AU + "\0")):
-    code, text, _ = pushed_one(out)
+      "and a continuation line or the message (a NUL in it included) is no "
+      "header (got %r)" % got)
+# An empty message: git writes the blank line and nothing after it.
+code, _, got = pushed([(A40, obj(AU, CO, msg=""))])
+check(code is None and got == [(A40, "a@x", "c@x")],
+      "pushed_commits(): a commit with an empty message passes")
+code, _, got = run_with(
+    lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+    runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
+                     "rev-list": (0, b"")}, []))
+check(code is None and got == [],
+      "pushed_commits(): rev-list listing nothing runs no cat-file --batch")
+for what, rev_list in (("no final LF", A40), ("a short oid", "abc\n")):
+    code, text, _ = run_with(
+        lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+        runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
+                         "rev-list": (0, rev_list.encode())}, []))
     check(code == 2 and "'git rev-list' printed an unexpected shape" in text,
-          "pushed_commits(): %s exits 2" % what)
+          "pushed_commits(): rev-list printing %s exits 2" % what)
+good = batch((A40, obj(AU, CO)))
+for what, out in (
+        ("no final LF", good[:-1]),
+        ("a short object", good[:-3] + b"\n"),
+        ("trailing bytes", good + b"x"),
+        ("another oid", good.replace(A40.encode(), B40.encode(), 1)),
+        ("a tree", good.replace(b" commit ", b" tree ", 1)),
+        ("missing", ("%s missing\n" % A40).encode())):
+    code, text, _ = pushed([(A40, obj(AU, CO))], out)
+    check(code == 2 and "'git cat-file' printed an unexpected shape" in text,
+          "pushed_commits(): cat-file --batch printing %s exits 2" % what)
+code, text, _ = run_with(
+    lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+    runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
+                     "rev-list": (0, ("%s\n" % A40).encode()),
+                     "cat-file --batch": (128, b"")}, []))
+check(code == 2 and "'git cat-file' failed (exit 128)" in text,
+      "pushed_commits(): a failing cat-file --batch exits 2")
 # git's readers disagree on a commit with two author headers (%ae reads the
-# last, `git show` the first), so anything but one of each is "cannot tell".
-for what, out, want in (
-        ("two author headers", record(A40, AU, "author G <g@x> 1 +0000", CO),
+# last, `git show` the first) or a NUL among its headers (`rev-list
+# --header` stops there, %ae and %ce read past it), so anything but one of
+# each, NUL-free, is "cannot tell".
+for what, raw, want in (
+        ("two author headers", obj(AU, "author G <g@x> 1 +0000", CO),
          "has 2 author headers"),
-        ("two committer headers", record(A40, AU, CO, CO),
-         "has 2 committer headers"),
-        ("no author header", record(A40, CO), "has 0 author headers"),
-        ("a NUL inside a message", record(A40, AU, CO, msg="    a\0" + A40
-                                          + "\n    " + AU + "\n"),
-         "has 0 author headers"),
-        ("a header with no <email>", record(A40, "author A a@x 1 +0000", CO),
+        ("two committer headers", obj(AU, CO, CO), "has 2 committer headers"),
+        ("no author header", obj(CO), "has 0 author headers"),
+        ("a NUL before a second committer",
+         obj(AU, CO, "x\0y", "committer E <e@x> 1 +0000"),
+         "has a NUL in its headers"),
+        ("a NUL inside a header line", obj(AU + "\0z", CO),
+         "has a NUL in its headers"),
+        ("a header with no <email>", obj("author A a@x 1 +0000", CO),
          "has no <email> in its author header")):
-    code, text, _ = pushed_one(out)
+    code, text, _ = pushed([(A40, raw)])
     check(code == 2 and ("pre-push: commit %s " % A40) in text
           and want in text,
           "pushed_commits(): %s exits 2 (got %r)" % (what, text))
@@ -243,11 +287,13 @@ code, _, got = run_with(
     lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
     runner=fake_git({"cat-file": (0, ("%s\n%s missing\n" % (A40, B40))
                                   .encode()),
-                     "rev-list": (0, record(A40, AU, CO).encode())},
+                     "rev-list": (0, ("%s\n" % A40).encode()),
+                     "cat-file --batch": (0, batch((A40, obj(AU, CO))))},
                     calls))
 check(code is None and got == [(A40, "a@x", "c@x")]
-      and calls[-1][1] == ("%s\n" % A40).encode()
-      and "--ignore-missing" not in calls[-1][0],
+      and calls[1][0][1] == "rev-list"
+      and calls[1][1] == ("%s\n" % A40).encode()
+      and "--ignore-missing" not in calls[1][0],
       "pushed_commits(): a missing remote oid is dropped before rev-list "
       "(calls %r)" % calls)
 code, text, _ = run_with(

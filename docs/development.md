@@ -581,10 +581,11 @@ identity exits 2. A push with nothing left to send passes: git still runs
 the hook, with an empty pipe on stdin. A stdin that is not a pipe (closed,
 or `/dev/null`), which `git push` never gives, a pushed object this
 repository lacks (a full object name as the source, which git hands the hook
-before it looks it up), and a pushed commit without exactly one `author` and
-one `committer` header (built by hand: git's own readers disagree on which
-one counts) exit 2. While a config refusal stands, the commits are not
-compared, since the effective identity is then the one being refused.
+before it looks it up), and a pushed commit whose raw headers hold a NUL or
+not exactly one `author` and one `committer` header (built by hand: git's
+own readers disagree on which one counts) exit 2. While a config refusal
+stands, the commits are not compared, since the effective identity is then
+the one being refused.
 
 A foreign author is refused on purpose: a cherry-pick that keeps someone
 else's authorship, or their merge, does not match the effective identity.

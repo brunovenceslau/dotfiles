@@ -53,10 +53,10 @@ pipe on a large push. A deletion pushes no commit and needs no identity.
 
 Exits 2 when it cannot answer (not a repository, git failing, a ref line of
 an unexpected shape, a `pre-push` stdin that is not a pipe, a pushed object
-the repository lacks, a pushed commit without exactly one author and one
-committer header, no effective identity while there are commits to
-compare), never 0. An empty pipe is git saying nothing is left to push, and
-passes.
+the repository lacks, a pushed commit whose raw headers hold a NUL or not
+exactly one author and one committer header, no effective identity while
+there are commits to compare), never 0. An empty pipe is git saying nothing
+is left to push, and passes.
 
 Self-contained on purpose: it runs from a git hook in any checkout of this
 repository, so it imports nothing from lib/ and only the standard library,
@@ -329,43 +329,75 @@ def pushed_commits(gdir, tips, known):
     # MUST stay in this order: git reads stdin where `--stdin` stands, and
     # `--not` turns every revision after it into an exclusion, so the tips
     # come before it and the remote-tracking refs after it.
-    # --header, not --format=%ae: a commit built by hand can carry two
-    # author headers, and git's own readers disagree on it (%ae reads the
-    # last, `git show --format=fuller` the first), so the headers are read
-    # here and anything but exactly one of each is "cannot tell".
     p = subprocess.run(
-        ["git", "rev-list", "--header",
-         "--stdin", "--not", "--remotes"],
+        ["git", "rev-list", "--stdin", "--not", "--remotes"],
         input=revs.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=git_env(gdir))
     if p.returncode != 0:
         git_failed("'git rev-list'", p)
-    # One record per commit, each ending in NUL: OID LF, the raw headers
-    # up to a blank line, then the message, every line of it indented by
-    # four spaces, so a message line never reads as a header. A NUL inside
-    # a hand-built message splits its record, and the piece after it
-    # carries no header of its own, so it fails the count below.
-    records = p.stdout.split(b"\0")
-    if records[-1] != b"":
+    lines = p.stdout.split(b"\n")
+    if lines[-1] != b"" or not all(is_oid(o) for o in lines[:-1]):
         fail("'git rev-list' printed an unexpected shape")
-    out = []
-    for record in records[:-1]:
-        oid, _, raw = record.partition(b"\n")
-        if not is_oid(oid):
-            fail("'git rev-list' printed an unexpected shape")
-        oid = oid.decode()
-        # A continuation line (inside gpgsig or mergetag) starts with a
-        # space, so it never matches a header name.
-        headers = raw.split(b"\n\n", 1)[0].split(b"\n")
-        emails = []
-        for name in (b"author ", b"committer "):
-            found = [h for h in headers if h.startswith(name)]
-            if len(found) != 1:
-                fail("pre-push: commit %s has %d %sheaders, so who made it "
-                     "is unclear" % (oid, len(found), name.decode()))
-            emails.append(header_email(oid, found[0]))
-        out.append((oid, emails[0], emails[1]))
+    oids = [o.decode() for o in lines[:-1]]
+    if not oids:
+        return []
+    return [(oid,) + idents(oid, body)
+            for oid, body in commit_objects(gdir, oids)]
+
+
+def commit_objects(gdir, oids):
+    """(oid, raw object bytes) of each commit, from one `git cat-file
+    --batch`. Raw bytes, not a formatted view: `git rev-list --header`
+    re-encodes the message (i18n.logOutputEncoding) and stops a header at a
+    NUL, while %ae and %ce read past it, so a second author or committer
+    after a NUL would pass unseen. GIT_NO_REPLACE_OBJECTS (git_env()) makes
+    cat-file read the object the push sends."""
+    p = subprocess.run(
+        ["git", "cat-file", "--batch"],
+        input="".join("%s\n" % o for o in oids).encode(),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=git_env(gdir))
+    if p.returncode != 0:
+        git_failed("'git cat-file'", p)
+    # Per oid, in input order: OID SP TYPE SP SIZE LF, SIZE bytes, LF.
+    data, pos, out = p.stdout, 0, []
+    for oid in oids:
+        nl = data.find(b"\n", pos)
+        head = data[pos:nl].split(b" ") if nl >= 0 else []
+        if len(head) != 3 or head[0] != oid.encode() \
+                or head[1] != b"commit" or not head[2].isdigit():
+            fail("'git cat-file' printed an unexpected shape")
+        end = nl + 1 + int(head[2])
+        if data[end:end + 1] != b"\n":
+            fail("'git cat-file' printed an unexpected shape")
+        out.append((oid, data[nl + 1:end]))
+        pos = end + 1
+    if pos != len(data):
+        fail("'git cat-file' printed an unexpected shape")
     return out
+
+
+def idents(oid, body):
+    """(author email, committer email) from a raw commit object. Its
+    headers run up to the first blank line (all of it when there is none).
+    A NUL among them, or anything but exactly one author and one committer
+    header, is "cannot tell": git's own readers disagree on such a commit
+    (%ae reads the last author header, `git show` the first, and a NUL
+    stops some readers and not others)."""
+    headers = body.split(b"\n\n", 1)[0]
+    if b"\0" in headers:
+        fail("pre-push: commit %s has a NUL in its headers, so who made it "
+             "is unclear" % oid)
+    # A continuation line (inside gpgsig or mergetag) starts with a space,
+    # so it never matches a header name.
+    lines = headers.split(b"\n")
+    emails = []
+    for name in (b"author ", b"committer "):
+        found = [h for h in lines if h.startswith(name)]
+        if len(found) != 1:
+            fail("pre-push: commit %s has %d %sheaders, so who made it "
+                 "is unclear" % (oid, len(found), name.decode()))
+        emails.append(header_email(oid, found[0]))
+    return tuple(emails)
 
 
 def header_email(oid, header):

@@ -414,6 +414,37 @@ if git -C "$remote" rev-parse -q --verify refs/heads/dup >/dev/null; then
 fi
 ok "pre-push refuses a pushed commit with two author headers"
 
+# A NUL inside the headers hides a second author or committer from
+# `git rev-list --header`, which stops there, while %ae and %ce read past
+# it: the guard reads the raw object and refuses a NUL among the headers.
+for role in committer author; do
+  nul="$(printf 'tree %s\nparent %s\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\nx\0y\n%s E <e@x> 1 +0000\n\nnul\n' \
+    "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" "$role" \
+    | git -C "$r" hash-object -t commit -w --literally --stdin)"
+  case "$role" in author) f=%ae ;; *) f=%ce ;; esac
+  [ "$(git -C "$r" log -1 --format="$f" "$nul")" = e@x ] \
+    || fail "fixture: $f should read the $role header after the NUL in $nul"
+  if git -C "$r" push -q origin "$nul:refs/heads/nul" 2>"$work/err"; then
+    fail "pre-push must refuse a commit with a NUL before a second $role"
+  fi
+  grep -qxF "commit-identity: pre-push: commit $nul has a NUL in its headers, so who made it is unclear" \
+    "$work/err" || fail "pre-push must exit 2 on a NUL among the headers: $(err)"
+  if git -C "$remote" rev-parse -q --verify refs/heads/nul >/dev/null; then
+    fail "a refused push must not create the remote branch"
+  fi
+done
+ok "pre-push refuses a second author or committer hidden behind a NUL"
+
+# The headers are read raw: an output encoding that writes NULs of its own
+# (UTF-16) changes nothing, and an empty message still passes.
+git -C "$r" checkout -q -b enc main
+git -C "$r" commit -q --allow-empty --allow-empty-message -m '' 2>"$work/err" \
+  || fail "fixture: empty-message commit refused: $(err)"
+git -C "$r" -c i18n.logOutputEncoding=UTF-16 push -q origin enc 2>"$work/err" \
+  || fail "pre-push under i18n.logOutputEncoding=UTF-16 must pass a clean commit: $(err)"
+git -C "$r" checkout -q main
+ok "pre-push passes an empty message and a UTF-16 log output encoding"
+
 # git always writes the ref lines on a pipe. A dispatcher that closes stdin
 # hides what is pushed, so the guard cannot answer, and refuses: a foreign
 # commit must not pass for want of its ref line. Through the wrapper's
