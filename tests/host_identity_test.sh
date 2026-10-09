@@ -1425,6 +1425,17 @@ printf '#!/bin/sh\nexit 1\n' > "$work/nopy/python3"; chmod u+x "$work/nopy/pytho
 rc=0; out="$(PATH="$work/nopy" "$installer" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable"
 has "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $installer identity)" "python3 unusable names the full installer path"
+# A checkout path is untrusted text: one holding an ESC byte prints it as
+# \x1b, a backslash doubled, so it cannot rewrite the terminal. The real
+# directory is pwd -P'd by install.sh, so it is made, not symlinked.
+escdir="$work/co$(printf '\033')[2J\\x"
+mkdir -p "$escdir"
+ln -s "$repo_root/install.sh" "$escdir/install.sh"
+ln -s "$repo_root/lib" "$escdir/lib"
+rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
+expect_rc 1 "python3 unusable, escaped checkout path"
+has "then run $work/co\\x1b[2J\\\\x/install.sh identity)" "python3 unusable escapes the checkout path"
+lacks "$(printf '\033')" "python3 unusable prints no raw ESC"
 ok
 
 # --- a config.local that is not a regular file: refused before any git read ---

@@ -1995,6 +1995,63 @@ def main(argv):
         mod.os.link = real_link
     check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "no temp file is left behind")
 
+    # The fallback's copy fails midway (a full disk): the half-written .bak
+    # it made is removed, or the next run would keep it as the pristine copy.
+    os.unlink(target + ".bak")
+    real_copy = mod.shutil.copyfileobj
+    calls = []
+
+    def copy_then_fill(src, dst, *rest):
+        calls.append(1)
+        if len(calls) == 1:
+            return real_copy(src, dst, *rest)
+        dst.write(src.read(3))
+        dst.flush()
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    mod.os.link = no_link
+    mod.shutil.copyfileobj = copy_then_fill
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        try:
+            mod.backup_once(target, fd, 0o600)
+            raised = False
+        except OSError as e:
+            raised = e.errno == errno.ENOSPC
+        check(raised, "a failed fallback copy raises its error")
+        check(len(calls) == 2, "the failed copy is the fallback's, not the temp file's")
+        check(not os.path.lexists(target + ".bak"), "a failed fallback copy leaves no partial .bak")
+        check(not mod._left, "a failed fallback copy leaves nothing recorded in _left")
+    finally:
+        os.close(fd)
+        mod.os.link = real_link
+        mod.shutil.copyfileobj = real_copy
+    check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "a failed fallback copy leaves no temp file")
+
+    # A .bak made by someone else between the lexists check and the fallback's
+    # O_EXCL create is refused AND kept: the cleanup removes only its own.
+    with open(target + ".bak", "w") as fh:
+        fh.write("pristine\n")
+    real_lexists = mod.os.path.lexists
+    mod.os.link = no_link
+    mod.os.path.lexists = lambda p: False if p == target + ".bak" else real_lexists(p)
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        try:
+            mod.backup_once(target, fd, 0o600)
+            raised = False
+        except OSError as e:
+            raised = e.errno == errno.EEXIST
+        check(raised, "a .bak that appears before the fallback's create is refused")
+        with open(target + ".bak") as fh:
+            check(fh.read() == "pristine\n", "a .bak that appears before the fallback's create is kept as it was")
+    finally:
+        os.close(fd)
+        mod.os.link = real_link
+        mod.os.path.lexists = real_lexists
+    os.unlink(target + ".bak")
+    check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "a refused fallback create leaves no temp file")
+
     # --- a write the effective config does not read back --------------------
     home = os.path.join(scratch, "home")
     gitdir = os.path.join(home, ".config", "git")

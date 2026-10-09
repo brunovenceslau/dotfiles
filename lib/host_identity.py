@@ -1438,14 +1438,44 @@ def _copy_fd(src_fd, dst_path):
         shutil.copyfileobj(src, out)
 
 
+def _copy_new(src_path, dst_path, mode):
+    """Copy SRC_PATH to DST_PATH, a name that must not exist yet: backup_once's
+    fallback where hard links are not supported. The stdlib has no rename
+    that refuses an existing name, so the copy goes straight into DST_PATH,
+    made with O_CREAT|O_EXCL: the name is then this run's own, and a copy
+    that fails (a full disk, a signal) removes it, recorded in _left like a
+    temp file meanwhile, rather than leave a partial file the next run would
+    keep as the pristine .bak. Removing it never touches a file someone else
+    made: an existing name fails the create, before anything is recorded."""
+    done = False
+    out = None
+    try:
+        with _Held():
+            out = os.open(dst_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            _left.add(dst_path)
+        with os.fdopen(os.dup(out), "wb") as dst, open(src_path, "rb") as src:
+            shutil.copyfileobj(src, dst)
+        done = True
+    finally:
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if out is not None:
+                os.close(out)
+            if dst_path in _left:
+                _left.discard(dst_path)
+                if not done:
+                    os.unlink(dst_path)
+
+
 def backup_once(path, src_fd, mode):
     """Copy the open config.local (SRC_FD) to PATH.bak unless a .bak exists.
 
     The first .bak is the pristine pre-framework copy and the one worth
     keeping (lib/link.sh, _link_backup), so an existing one is never
     replaced. A hard link of a finished temp file publishes it atomically
-    and refuses an existing name; where hard links are not supported, an
-    O_CREAT|O_EXCL create keeps the same no-clobber.
+    and refuses an existing name; where hard links are not supported,
+    _copy_new() keeps the same no-clobber and removes a .bak it could not
+    finish.
     """
     bak = path + ".bak"
     if os.path.lexists(bak):
@@ -1464,9 +1494,7 @@ def backup_once(path, src_fd, mode):
         except OSError as e:
             if e.errno == errno.EEXIST:
                 raise
-            out = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-            with os.fdopen(out, "wb") as dst, open(tmp, "rb") as src:
-                shutil.copyfileobj(src, dst)
+            _copy_new(tmp, bak, mode)
     finally:
         # Held: a signal that lands mid-cleanup waits for it to finish.
         with _Held():
