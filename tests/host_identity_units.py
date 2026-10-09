@@ -774,6 +774,91 @@ def killed_units(mod, scratch):
               and left == [],
               "killed by %s mid ssh-keygen -Q, a run removes its KRL key and git's directory and dies of it "
               "(rc %s, held %r, left %r, %r)" % (signal.Signals(sig).name, p.returncode, left_mid, left, err))
+    # Deterministic: a signal that arrives the instant a temporary file or
+    # directory exists, before the code that made it has recorded it (the
+    # creating call, patched, signals the process and only then returns).
+    # The record must still be made, and the file removed.
+    created = (
+        "import importlib.util, os, signal, sys, tempfile\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "real = {'mkstemp': tempfile.mkstemp, 'mkdtemp': tempfile.mkdtemp}\n"
+        "def killing(name):\n"
+        "    def make(*a, **k):\n"
+        "        made = real[name](*a, **k)\n"
+        "        if k.get('prefix') == sys.argv[4]:\n"
+        "            os.kill(os.getpid(), signal.SIGTERM)\n"
+        "            (lambda: None)()  # a Python call: a pending handler runs here\n"
+        "        return made\n"
+        "    return make\n"
+        "tempfile.mkstemp, tempfile.mkdtemp = killing('mkstemp'), killing('mkdtemp')\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    if sys.argv[3] == 'krl':\n"
+        "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
+        "    elif sys.argv[3] == 'git':\n"
+        "        m.git(['--version'])\n"
+        "    else:\n"
+        "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+                         ("write", ".config.local."), ("backup", ".config.local.bak.")):
+        tmpdir = os.path.join(scratch, "created-tmp-" + what)
+        confdir = os.path.join(scratch, "created-conf-" + what)
+        os.mkdir(tmpdir, 0o700)
+        os.mkdir(confdir, 0o700)
+        local = os.path.join(confdir, "config.local")
+        with open(local, "w") as fh:
+            fh.write("[user]\n\temail = a@x\n")
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", created, mod.__file__, local, what, prefix, K1],
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n != "config.local"]
+        check(p.returncode == -signal.SIGTERM and left == [] and b"Traceback" not in p.stderr,
+              "a SIGTERM the instant %s's temporary file exists leaves nothing behind (rc %d, left %r, %r)"
+              % (what, p.returncode, left, p.stderr))
+
+    # A second signal while the first one unwinds is ignored, so the
+    # cleanup it would interrupt still runs. The first arrives mid
+    # ssh-keygen -Q (patched to signal the process), the second as the key
+    # file is about to be removed (os.unlink, patched the same way).
+    twice = (
+        "import importlib.util, os, signal, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "first, second = int(sys.argv[3]), int(sys.argv[4])\n"
+        "def killed(*a, **k):\n"
+        "    os.kill(os.getpid(), first)\n"
+        "real_unlink = os.unlink\n"
+        "sent = []\n"
+        "def unlink(path, *a, **k):\n"
+        "    if not sent and path.endswith('.pub'):\n"
+        "        sent.append(path)\n"
+        "        os.kill(os.getpid(), second)\n"
+        "        (lambda: None)()  # a Python call: a pending handler runs here\n"
+        "    return real_unlink(path, *a, **k)\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    m.subprocess.run, os.unlink = killed, unlink\n"
+        "    m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for first in (signal.SIGTERM, signal.SIGINT):
+        for second in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            tmpdir = os.path.join(scratch, "twice-%d-%d" % (first, second))
+            os.mkdir(tmpdir, 0o700)
+            p = subprocess.run([sys.executable, "-I", "-B", "-c", twice, mod.__file__, os.path.join(scratch, "c.local"),
+                                str(int(first)), str(int(second)), K1],
+                               env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            left = os.listdir(tmpdir)
+            check(p.returncode == -first and left == [] and b"Traceback" not in p.stderr,
+                  "a %s during the cleanup after a %s is ignored: the key file is removed (rc %d, left %r, %r)"
+                  % (signal.Signals(second).name, signal.Signals(first).name, p.returncode, left, p.stderr))
+
     # A SIGTERM the caller ignores (nohup does that for SIGHUP) stays ignored.
     ignored = (
         "import importlib.util, signal, sys\n"

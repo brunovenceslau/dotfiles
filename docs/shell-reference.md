@@ -344,8 +344,9 @@ that `SSH_AUTH_SOCK` names for its public keys only; a forwarded agent
 answers over the SSH session that forwards it. What it creates is
 temporary: the empty directory git runs in and, when
 `gpg.ssh.revocationFile` is a KRL, the public key `ssh-keygen -Q` reads.
-Both are removed before it exits. The checks are a registry, `CHECKS` in
-`lib/host_identity.py`, run in this order:
+Both are removed before it exits, including when ^C, `SIGTERM` or `SIGHUP`
+ends it (a `SIGKILL` cannot be caught). The checks are a registry, `CHECKS`
+in `lib/host_identity.py`, run in this order:
 
 | Check | What it reads | A problem when |
 | --- | --- | --- |

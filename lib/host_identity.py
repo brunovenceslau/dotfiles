@@ -858,7 +858,8 @@ def _isolate(place):
         if value and not os.path.isabs(value):
             return "%s=%s is not an absolute path, so git would look for it where git runs" % (env_name, _shown(value))
     try:
-        place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+        with _Held():
+            place.made = tempfile.mkdtemp(prefix="host_identity.git.")
         cwd = _getcwd_in(place.made)
     except Refusal as e:
         return str(e)
@@ -1057,16 +1058,19 @@ def load_revocation(path):
     return frozenset(keys), None
 
 
-class _Held(object):
-    """A block during which the signals entry() unwinds on (SIGINT, SIGTERM,
-    SIGHUP) wait: one that arrives is delivered when the block ends. Wraps
-    the creation of a temporary file AND the assignment that records it, so
-    no signal can unwind between the two and leave a file nobody removes."""
+# The signals entry() unwinds on, running every finally on the way out.
+UNWINDING = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
-    SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+class _Held(object):
+    """A block during which the UNWINDING signals wait: one that arrives is
+    delivered when the block ends. Wraps the creation of a temporary file or
+    directory AND the assignment that records it, inside the try whose
+    finally removes it, so no signal can unwind between the two and leave
+    one nobody removes."""
 
     def __enter__(self):
-        self.old = signal.pthread_sigmask(signal.SIG_BLOCK, self.SIGNALS)
+        self.old = signal.pthread_sigmask(signal.SIG_BLOCK, UNWINDING)
 
     def __exit__(self, *exc):
         signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
@@ -1384,9 +1388,11 @@ def backup_once(path, src_fd, mode):
     if os.path.lexists(bak):
         log("identity: keeping the existing backup %s" % _shown(bak))
         return
-    fd, tmp = tempfile.mkstemp(prefix=".config.local.bak.", dir=os.path.dirname(path))
-    os.close(fd)
+    tmp = None
     try:
+        with _Held():
+            fd, tmp = tempfile.mkstemp(prefix=".config.local.bak.", dir=os.path.dirname(path))
+        os.close(fd)
         _copy_fd(src_fd, tmp)
         os.chmod(tmp, mode)
         try:
@@ -1398,7 +1404,8 @@ def backup_once(path, src_fd, mode):
             with os.fdopen(out, "wb") as dst, open(tmp, "rb") as src:
                 shutil.copyfileobj(src, dst)
     finally:
-        os.unlink(tmp)
+        if tmp is not None:
+            os.unlink(tmp)
     log("identity: backed up %s -> %s" % (_shown(path), _shown(bak)))
 
 
@@ -1414,6 +1421,9 @@ def write_keys(path, items):
     """
     d = os.path.dirname(path)
     src = None
+    tmp = None
+    # One finally for the whole write: the descriptor and the staged file
+    # are released on every way out, a refusal and a signal included.
     try:
         try:
             src = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1424,34 +1434,34 @@ def write_keys(path, items):
             if e.errno != errno.ENOENT:
                 warn("identity: cannot open %s: %s" % (_shown(path), e.strerror))
                 return False
-        if src is not None and not stat.S_ISREG(os.fstat(src).st_mode):
-            warn("identity: %s is not a regular file - writing nothing" % _shown(path))
-            return False
-        os.makedirs(d, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".config.local.", dir=d)
-        os.close(fd)
-    except OSError as e:
-        warn("identity: cannot stage a write next to %s: %s" % (_shown(path), e.strerror))
-        if src is not None:
-            os.close(src)
-        return False
-    try:
-        if src is not None:
-            mode = stat.S_IMODE(os.fstat(src).st_mode)
-            _copy_fd(src, tmp)
-            os.chmod(tmp, mode)
-        for key, value in items:
-            rc, _, err = git(["config", "--file", tmp, key, value])
-            if rc != 0:
-                warn("identity: git config could not set %s: %s" % (key, _shown(err)))
+        try:
+            if src is not None and not stat.S_ISREG(os.fstat(src).st_mode):
+                warn("identity: %s is not a regular file - writing nothing" % _shown(path))
                 return False
-        if src is not None:
-            backup_once(path, src, mode)
-        os.replace(tmp, path)
-        tmp = None
-    except OSError as e:
-        warn("identity: cannot write %s: %s" % (_shown(path), e.strerror))
-        return False
+            os.makedirs(d, exist_ok=True)
+            with _Held():
+                fd, tmp = tempfile.mkstemp(prefix=".config.local.", dir=d)
+            os.close(fd)
+        except OSError as e:
+            warn("identity: cannot stage a write next to %s: %s" % (_shown(path), e.strerror))
+            return False
+        try:
+            if src is not None:
+                mode = stat.S_IMODE(os.fstat(src).st_mode)
+                _copy_fd(src, tmp)
+                os.chmod(tmp, mode)
+            for key, value in items:
+                rc, _, err = git(["config", "--file", tmp, key, value])
+                if rc != 0:
+                    warn("identity: git config could not set %s: %s" % (key, _shown(err)))
+                    return False
+            if src is not None:
+                backup_once(path, src, mode)
+            os.replace(tmp, path)
+            tmp = None
+        except OSError as e:
+            warn("identity: cannot write %s: %s" % (_shown(path), e.strerror))
+            return False
     finally:
         if src is not None:
             os.close(src)
@@ -2634,7 +2644,15 @@ class Terminated(BaseException):
         self.signum = signum
 
 
-def _terminated(signum, frame):
+def _unwind(signum, frame):
+    """The handler entry() installs for the UNWINDING signals: from here on
+    each of them is ignored, so a second one cannot cut short the cleanup
+    the first one starts (_die_of() restores the one it ends the process
+    with); then unwind, as KeyboardInterrupt for ^C, else Terminated."""
+    for each in UNWINDING:
+        signal.signal(each, signal.SIG_IGN)
+    if signum == signal.SIGINT:
+        raise KeyboardInterrupt
     raise Terminated(signum)
 
 
@@ -2650,11 +2668,13 @@ def entry(argv):
     """main(), with an interrupt or a termination reported without a
     traceback. main()'s finally has already removed git's empty directory
     by then, and krl_revokes() its key file. A SIGTERM or SIGHUP the caller
-    left at its default unwinds like ^C (Terminated); one it ignores (nohup)
-    stays ignored."""
-    for signum in (signal.SIGTERM, signal.SIGHUP):
-        if signal.getsignal(signum) == signal.SIG_DFL:
-            signal.signal(signum, _terminated)
+    left at its default unwinds like ^C (Terminated), and ^C keeps its
+    KeyboardInterrupt, all three through _unwind(); one the caller ignores
+    (nohup) stays ignored."""
+    for signum in UNWINDING:
+        default = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
+        if signal.getsignal(signum) == default:
+            signal.signal(signum, _unwind)
     try:
         return main(argv)
     except KeyboardInterrupt:
