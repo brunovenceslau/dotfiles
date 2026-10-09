@@ -573,13 +573,24 @@ def quoted(s):
 
 def _shown(value):
     """VALUE (a config value, an origin, a path, a tool's message) as a
-    message prints it: bare when escape() leaves it as it is, else quoted().
-    Applied to each interpolated value at its call site, never to a whole
-    line: the line's literal text is what docs/troubleshooting.md quotes, and
-    it must print as written. A plain value stays bare, so the quoted
-    messages keep their shape."""
+    message prints it: bare when escape() leaves it as it is and it neither
+    is empty nor starts or ends with a space (which would print as nothing,
+    or blur into the words around it), else quoted(). Applied to each
+    interpolated value at its call site, never to a whole line: the line's
+    literal text is what docs/troubleshooting.md quotes, and it must print as
+    written.
+
+    Unlike .githooks/commit_identity.py, which quotes every value, a plain
+    value stays bare here: docs/troubleshooting.md, docs/signing-key.md and
+    tests/host_identity_test.sh hold the bare shapes of these lines, and the
+    property this guards is that no value can act on the terminal or pass
+    for message text, which the quotes of an unusual value already give.
+    tests/host_identity_units.py checks statically that every value put into
+    a string goes through an escaper."""
     value = str(value)
-    return value if escape(value) == value else quoted(value)
+    if value and value == value.strip() and escape(value) == value:
+        return value
+    return quoted(value)
 
 
 def shell_word(path):
@@ -663,15 +674,16 @@ def suggested_name(name):
     install.sh identity would accept it, a shell passes it through double
     quotes unchanged, and it reads on screen as what it is (a letter or a
     digit, no space but U+0020, no invisible, unassigned or private-use
-    code point), else the placeholder. Through _shown() as well, so a control character could
-    never reach the terminal even if valid_name() were loosened."""
+    code point), else the placeholder. missing_name_line() puts it in
+    through _shown() as well, so a control character could never reach the
+    terminal even if valid_name() were loosened."""
     if (name and valid_name(name)
             and not any(c in _SHELL_ACTIVE for c in name)
             and any(c.isalnum() for c in name)
             and not any(c.isspace() and c != " " for c in name)
             and not any(_invisible(c) for c in name)
             and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)):
-        return _shown(name)
+        return name
     return "Full Name"
 
 
@@ -689,7 +701,7 @@ def missing_name_line(host):
     is the operator's to choose, so the account's full name is a
     suggestion."""
     return 'identity: user.name is not set - run: %s identity --name "%s"' % (
-        shell_word(host.installer), suggested_name(account_name()))
+        shell_word(host.installer), _shown(suggested_name(account_name())))
 
 
 # --- reading files and running tools -----------------------------------------
@@ -839,10 +851,10 @@ def _getcwd_in(path):
 def _isolate(place):
     """None once git is proven to run outside any repository from PLACE,
     else the reason it cannot."""
-    for name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
-        value = os.environ.get(name)
+    for env_name in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"):
+        value = os.environ.get(env_name)
         if value and not os.path.isabs(value):
-            return "%s=%s is not an absolute path, so git would look for it where git runs" % (name, _shown(value))
+            return "%s=%s is not an absolute path, so git would look for it where git runs" % (env_name, _shown(value))
     try:
         place.made = tempfile.mkdtemp(prefix="host_identity.git.")
         cwd = _getcwd_in(place.made)
@@ -1323,12 +1335,12 @@ class Host(object):
             return None
         # Whole literals: docs/troubleshooting.md quotes them verbatim.
         rev_path, _ = self.revocation()
-        where = "in " + _shown(path) if email is None else "for %s in %s" % (_shown(email), _shown(path))
+        why = "in " + _shown(path) if email is None else "for %s in %s" % (_shown(email), _shown(path))
         if None in states:
             msg = "identity: ssh-keygen -Q could not check the ssh-agent key(s) listed %s against gpg.ssh.revocationFile %s - writing nothing"
-            return msg % (where, _shown(rev_path))
+            return msg % (why, _shown(rev_path))
         msg = "identity: every ssh-agent key listed %s is revoked by gpg.ssh.revocationFile %s - writing nothing"
-        return msg % (where, _shown(rev_path))
+        return msg % (why, _shown(rev_path))
 
     def why_invalid(self, entries, key, email):
         """Why KEY does not verify for EMAIL, or None when it does."""
@@ -1481,9 +1493,9 @@ def refuse_unclear(host, keys, path):
 
 
 def require_revocation(host):
-    path, err = host.revocation()
-    if err:
-        warn(err)
+    path, said = host.revocation()
+    if said:
+        warn(said)
         return False
     return True
 
@@ -1625,8 +1637,8 @@ def identity(host, name):
         return 1
     path, source, entries = host.signers()
     if path is None:
-        for line in entries:
-            warn(line)
+        for said in entries:
+            warn(said)
         hint_rerun(host)
         return 1
     keys, why = host.agent()
@@ -1639,9 +1651,9 @@ def identity(host, name):
         return 1
     pairs = host.candidates(entries, keys)
     if not pairs:
-        revoked = host.why_no_candidate(entries, keys, path)
-        if revoked:
-            warn(revoked)
+        said = host.why_no_candidate(entries, keys, path)
+        if said:
+            warn(said)
             warn("identity:   load a key that is not revoked, list it in the allowed-signers file,")
             hint_rerun(host)
             return 1
@@ -1657,15 +1669,15 @@ def identity(host, name):
         # Name the cause when the revocation file is what removed this
         # email's keys, rather than calling them unlisted.
         mine = [e for e in entries if match_pattern_list(email_v.text, e.principals)]
-        revoked = host.why_no_candidate(mine, keys, path, email_v.text)
-        if revoked:
-            warn(revoked)
+        said = host.why_no_candidate(mine, keys, path, email_v.text)
+        if said:
+            warn(said)
             warn("identity:   load a key for %s that is not revoked, then re-run" % _shown(email_v.text))
             return 1
     chosen, lines = select(host, pairs, email_v.text if email_v.set else "")
     if chosen is None:
-        for line in lines:
-            warn(line)
+        for said in lines:
+            warn(said)
         return 1
     email, sigkey = chosen
 
@@ -1747,8 +1759,8 @@ def identity(host, name):
     if tag_kept:
         kept.append(tag_kept)
     if _captured is None:
-        for line in kept:
-            log(line)
+        for said in kept:
+            log(said)
     if conflicts:
         # Nothing at all next to a conflict: an email, or tag.gpgsign = true,
         # written beside a signing key this step did not choose would pair
@@ -1772,8 +1784,8 @@ def identity(host, name):
             return 1
         log("identity: wrote %s to %s" % (", ".join(k for k, _, _ in to_write), _shown(host.config_local)))
         if _captured is not None:
-            for line in kept:
-                log(line)
+            for said in kept:
+                log(said)
         # Read every written key back through the effective config: a later
         # file can still override what was just written.
         for key, want, typ in to_write:
@@ -1825,17 +1837,17 @@ def rotate(host):
         return 1
     path, _, entries = host.signers()
     if path is None:
-        for line in entries:
-            warn(line)
+        for said in entries:
+            warn(said)
         return 1
     why = host.why_invalid(entries, old, email)
     if why is None:
         warn("identity: --rotate: %s is still valid for %s in %s - nothing to rotate"
              % (fingerprint(old), _shown(email), _shown(path)))
         return 1
-    keys, err = host.agent()
+    keys, said = host.agent()
     if keys is None:
-        warn(err)
+        warn(said)
         return 1
     if refuse_unclear(host, keys, path):
         return 1
@@ -1905,10 +1917,10 @@ def check_signing_key(host, agent_said=False):
     if key is None:
         warn("identity: user.signingkey (%s) names no readable SSH public key - signing will fail" % _shown(value))
         return True
-    _, rev_err = host.revocation()
-    stale = None if rev_err else stale_reason(host, key)
-    if rev_err:
-        warn(rev_err.replace(" - writing nothing", ""))
+    _, said = host.revocation()
+    stale = None if said else stale_reason(host, key)
+    if said:
+        warn(_untailed(said))
         reported = True
     elif stale is not None:
         email, path, why = stale
@@ -2061,9 +2073,9 @@ def advisory(host):
     about signing on a host that opted out (opted_out()); ~/.gitconfig is
     reported either way, since it shadows the identity of every commit,
     signed or not. Always returns 0."""
-    level, text = gitconfig_finding(host)
+    level, finding = gitconfig_finding(host)
     if level != "ok":
-        warn(text)
+        warn(finding)
     if opted_out(host):
         return 0
     inst = shell_word(host.installer)
@@ -2125,12 +2137,21 @@ GIT_SSH_SIGNING = (2, 34)
 TOOL_TIMEOUT = 15
 
 
+WRITING_NOTHING = " - writing nothing"
+
+
+def _untailed(msg):
+    """MSG without its ` - writing nothing` tail. Only a tail: the same
+    words inside a path the message names stay as they are."""
+    return msg[:-len(WRITING_NOTHING)] if msg.endswith(WRITING_NOTHING) else msg
+
+
 def _bare(msg):
     """A refusal message without its `identity: ` head and its
     ` - writing nothing` tail: the cause alone."""
     if msg.startswith("identity: "):
         msg = msg[len("identity: "):]
-    return msg.replace(" - writing nothing", "")
+    return _untailed(msg)
 
 
 def _capture(fn, *args):
@@ -2148,11 +2169,11 @@ def _grouped(lines):
     """Warning lines folded into one line per cause: each indented hint joins
     the line before it."""
     out = []
-    for line in lines:
-        if line.startswith("identity:   ") and out:
-            out[-1] += " - " + line[len("identity:   "):]
+    for said in lines:
+        if said.startswith("identity:   ") and out:
+            out[-1] += " - " + said[len("identity:   "):]
         else:
-            out.append(_bare(line))
+            out.append(_bare(said))
     return out
 
 
@@ -2333,16 +2354,17 @@ class Doctor(object):
         host = self.host
         path, source, entries = host.signers()
         if path is None:
-            self.problem("%s - see docs/signing-key.md" % _bare(entries[0]), signing=True)
+            why = entries[0]  # the first line of the refusal (signers())
+            self.problem("%s - see docs/signing-key.md" % _bare(why), signing=True)
             return
         n = len(entries)
         self.ok("%s (from %s): %d entr%s" % (_shown(path), source, n, "y" if n == 1 else "ies"))
         bad = host.malformed_lines()
         if bad:
             self.info("skipped malformed line(s) %s in %s" % (", ".join(str(k) for k in bad), _shown(path)))
-        rev_path, err = host.revocation()
-        if err:
-            self.problem("%s - see docs/signing-key.md" % _bare(err), signing=True)
+        rev_path, why = host.revocation()
+        if why:
+            self.problem("%s - see docs/signing-key.md" % _bare(why), signing=True)
         elif rev_path:
             self.ok("gpg.ssh.revocationFile %s is readable" % _shown(rev_path))
 
@@ -2378,11 +2400,11 @@ class Doctor(object):
         # line per cause, its hint joined to it. An agent that cannot be
         # read is the ssh-agent check's line, not a second one here.
         reported, lines = _capture(check_signing_key, host, True)
-        for line in _grouped(lines):
+        for finding in _grouped(lines):
             if reported:
-                self.problem(line, signing=True)
+                self.problem(finding, signing=True)
             else:
-                self.info(line)
+                self.info(finding)
         origins = host.origins("user.signingkey")
         if reported or not origins or host.effective("gpg.format").text != "ssh":
             return
@@ -2408,13 +2430,13 @@ class Doctor(object):
             self.ok("not an SSH session")
 
     def gitconfig(self):
-        level, text = gitconfig_finding(self.host)
+        level, finding = gitconfig_finding(self.host)
         if level == "problem":
-            self.problem(text)
+            self.problem(finding)
         elif level == "info":
-            self.info(text)
+            self.info(finding)
         else:
-            self.ok(text)
+            self.ok(finding)
 
 
 # (name, Doctor method): the checks, in the order they print.
@@ -2454,13 +2476,13 @@ def doctor(host, verbose):
         method(d)
         findings += [(level, name, text) for level, text in d.found]
     problems = 0
-    for level, check, text in findings:
+    for level, check, finding in findings:
         if level == "problem":
             problems += 1
         if level == "problem" or verbose:
-            # TEXT is printed as it is: each check put every value in it
+            # FINDING is printed as it is: each check put every value in it
             # through _shown(), so the literal around it stays bare.
-            log("doctor: %s: %s%s" % (check, "note: " if level == "info" else "", text))
+            log("doctor: %s: %s%s" % (check, "note: " if level == "info" else "", finding))
     if verbose:
         if problems:
             log("doctor: verdict: %d problem(s) need action" % problems)
@@ -2587,15 +2609,15 @@ def main(argv):
     # path included, so this is no place to escape it a second time.
     if lines:
         if rc == 0:
-            for line in lines:
-                warn(line)
+            for said in lines:
+                warn(said)
         else:
-            line = headline(lines)
+            said = headline(lines)
             if consequence:
-                line += consequence
-            elif "%s identity" % shell_word(host.installer) not in line:
-                line += " (details: %s identity)" % shell_word(host.installer)
-            warn(line)
+                said += consequence
+            elif "%s identity" % shell_word(host.installer) not in said:
+                said += " (details: %s identity)" % shell_word(host.installer)
+            warn(said)
     return rc
 
 

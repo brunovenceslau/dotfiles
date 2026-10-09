@@ -503,7 +503,8 @@ class HostileHost(object):
         with open(tracked, "w") as fh:
             fh.write(body)
         with open(os.path.join(self.gitdir, "config"), "w") as fh:
-            fh.write("[include]\n\tpath = %s\n[include]\n\tpath = config.local\n" % tracked)
+            # Quoted: a `;` in a hostile HOME would start a comment.
+            fh.write('[include]\n\tpath = "%s"\n[include]\n\tpath = config.local\n' % tracked)
         self.local = os.path.join(self.gitdir, "config.local")
         self.signers = os.path.join(self.gitdir, "allowed_signers")
         with open(self.signers, "w") as fh:
@@ -547,6 +548,10 @@ def escaping_units(mod, scratch):
     check(mod._shown("Jane O Doe") == "Jane O Doe" and mod._shown("a\\b") == "'a\\\\b'"
           and mod._shown(OSError(2, "x" + OSC)) == "'[Errno 2] x%s'" % OSC_SHOWN,
           "_shown() keeps a plain value bare and quotes one escape() changes, an exception's text included")
+    check([mod._shown(v) for v in ("", " lead", "trail ", "\tx")] == ["''", "' lead'", "'trail '", "'\\x09x'"],
+          "_shown() quotes an empty value and one that starts or ends with a space")
+    check(mod._bare("identity: cannot read /a - writing nothing/b: x - writing nothing")
+          == "cannot read /a - writing nothing/b: x", "_bare() strips only the trailing ' - writing nothing'")
     h = HostileHost(mod, scratch, "hostile")
 
     # identity: a config value the step leaves as it is.
@@ -632,13 +637,38 @@ def escaping_units(mod, scratch):
                    gpg__ssh__revocationFile=revocation),
               dict(user__email="me@example.com", user__signingkey="key::" + K1, user__name="Jane",
                    gpg__ssh__allowedSignersFile=os.path.join(scratch, "nowhere" + OSC))]
+    modes = (("identity", ()), ("auto", ("--report-stale",)), ("check", ()), ("rotate", ()), ("doctor", ("--verbose",)))
     for n, values in enumerate(sweeps):
         h.set(**values)
-        for mode, extra in (("identity", ()), ("auto", ("--report-stale",)), ("check", ()), ("rotate", ()),
-                            ("doctor", ("--verbose",))):
+        for mode, extra in modes:
             rc, text = h.said(mode, *extra)
             check(printable(text) and "Traceback" not in text,
                   "sweep %d, %s: nothing printed raw (%r)" % (n, mode, text))
+
+    # The paths themselves: a HOME and a TMPDIR holding one, so every line
+    # that names config.local, the allowed-signers file, an origin or git's
+    # directory names a hostile path, end to end.
+    h = HostileHost(mod, scratch, "home" + OSC)
+    tmpdir = os.path.join(scratch, "tmp" + OSC)
+    os.mkdir(tmpdir, 0o700)
+    use_tmpdir(mod, tmpdir)
+    rows = [dict(), dict(user__signingkey="key::ssh-ed25519 AAAA"), dict(commit__gpgsign="false"),
+            dict(user__email="me@example.com", user__signingkey="key::" + K1, user__name="Jane",
+                 gpg__ssh__revocationFile=os.path.join(h.home, "revoked")),
+            dict(user__email="me@example.com", user__signingkey="~/.ssh/nothing", user__name="Jane")]
+    for n, values in enumerate(rows):
+        for mode, extra in modes:
+            if os.path.exists(h.local):
+                os.remove(h.local)
+            h.set(**values)
+            rc, text = h.said(mode, *extra)
+            check(printable(text) and "Traceback" not in text and h.home not in text,
+                  "hostile HOME and TMPDIR, row %d, %s: nothing printed raw (%r)" % (n, mode, text))
+    rc, text = h.said("doctor", "--verbose")
+    check("('file:%s/.config/git/config.local')" % os.path.join(scratch, "home" + OSC_SHOWN) in text,
+          "a hostile HOME prints quoted and escaped in an origin (%r)" % text)
+    check(os.listdir(tmpdir) == [], "a hostile TMPDIR is left empty")
+    mod.tempfile.tempdir = None
 
 
 def command_word_units(mod, scratch):
@@ -755,6 +785,154 @@ def killed_units(mod, scratch):
     check(p.returncode == 0, "a SIGTERM the caller ignores stays ignored (rc %d, %r)" % (p.returncode, p.stderr))
 
 
+# --- every value a message puts in is escaped: a static check ---------------
+#
+# The escaping rule of lib/host_identity.py (_shown(), quoted(),
+# shell_word()) holds only where each call site applies it, and the end-to-end
+# checks reach only the branches a test stages. So every operand put into a
+# string by `%`, by an f-string, or by `+` next to a literal holding a space,
+# and every message handed whole to a printer (SINKS), must be one of these,
+# checked over the whole file:
+#   a constant; a call to an escaper or to a function whose result is safe
+#   (SAFE_CALLS); str(), _bare(), a slice or a join of operands that are
+#   themselves safe; a conditional whose two branches are; or a name or
+#   attribute in
+#   LITERAL_NAMES / LITERAL_ATTRS, each of which only ever holds text this
+#   module wrote or a number.
+# A new name is added here only with the reason it can hold nothing else.
+SAFE_CALLS = {
+    "_shown", "quoted", "shell_word", "escape",
+    "fingerprint",      # SHA256:<base64>, computed here
+    "missing_name_line",  # one line, its own formats checked here
+    "len", "int",
+    "python_version",   # platform.python_version(): digits and dots
+}
+LITERAL_NAMES = {
+    # Numbers.
+    "n", "rc", "problems", "MAX_FILE", "AGENT_TIMEOUT",
+    # Config key names from this module's own lists, or a key parsed by
+    # parse_key(), whose type is in KEY_TYPES and whose blob is base64.
+    "key", "k", "sigkey", "new",
+    # Words from this module's literals.
+    "source", "tail", "how", "verb", "check", "env_name", "nums",
+    # Whole message text this module built, every value in it escaped
+    # where it was put in: a reason, a refusal, a joined override list,
+    # an already-shell_word() installer, a doctor finding, a message line
+    # (`said`: a refusal line, a captured warning, a kept-exception line).
+    "why", "reason", "what", "inst", "finding", "said",
+}
+LITERAL_ATTRS = {"strerror", "lineno", "returncode", "pathsep"}
+# Not checked inside: the escapers format characters, not values, and the
+# printers print the message they are handed, checked where it is built.
+SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log"}
+# What prints a message: warn(), note(), log(), and a doctor finding.
+SINKS = {"warn", "note", "log", "ok", "info", "problem"}
+# Message templates held in a name and filled with `%` later.
+TEMPLATES = {"msg", "FAIL_CLOSED", "name_local", "name_step", "email_local", "email_step"}
+
+
+def _safe(node):
+    if isinstance(node, ast.Constant):
+        return True
+    if isinstance(node, ast.Name):
+        return node.id in LITERAL_NAMES
+    if isinstance(node, ast.Attribute):
+        return node.attr in LITERAL_ATTRS
+    if isinstance(node, ast.IfExp):
+        return _safe(node.body) and _safe(node.orelse)
+    if isinstance(node, ast.Subscript):
+        return _safe(node.value)  # a part of a safe value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        # Checked as a format of its own.
+        return isinstance(node.left, ast.Constant) or isinstance(node.left, ast.Name) and node.left.id in TEMPLATES
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _safe(node.left) and _safe(node.right)
+    if isinstance(node, ast.Call):
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+        if name in SAFE_CALLS:
+            return True
+        if name == "str" and len(node.args) == 1:
+            return _safe(node.args[0])
+        if name in ("_bare", "_untailed") and len(node.args) == 1:
+            return _safe(node.args[0])
+        if name == "join" and len(node.args) == 1:
+            arg = node.args[0]
+            if isinstance(arg, (ast.GeneratorExp, ast.ListComp)):
+                return _safe(arg.elt)
+            return _safe(arg)
+    return False
+
+
+def unescaped_values(source):
+    """[(line, operand source)] of every operand that may put an unescaped
+    value into a string, by the rule above."""
+    tree = ast.parse(source)
+    found = []
+
+    def operands(node):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+            left = node.left
+            if isinstance(left, ast.Constant) and isinstance(left.value, str):
+                pass
+            elif isinstance(left, ast.Name) and left.id in TEMPLATES:
+                pass
+            else:
+                return [left]  # a format whose template this check cannot see
+            right = node.right
+            return list(right.elts) if isinstance(right, ast.Tuple) else [right]
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            sides = (node.left, node.right)
+            if any(isinstance(x, ast.Constant) and isinstance(x.value, str) and len(x.value) > 1 and " " in x.value
+                   for x in sides):
+                return [x for x in sides if not isinstance(x, ast.Constant)]
+            return []
+        if isinstance(node, ast.Call) and node.args:
+            f = node.func
+            if (f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None) in SINKS:
+                return [node.args[0]]
+        if isinstance(node, ast.JoinedStr):
+            return [v.value for v in node.values if isinstance(v, ast.FormattedValue)]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format" \
+                and isinstance(node.func.value, ast.Constant):
+            return [node.func.value]  # str.format() is not used: say so if it ever is
+        return []
+
+    def visit(node, skip):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            skip = skip or node.name in SKIPPED
+        if not skip:
+            for op in operands(node):
+                if not _safe(op):
+                    found.append((op.lineno, ast.get_source_segment(source, op)))
+        for child in ast.iter_child_nodes(node):
+            visit(child, skip)
+
+    visit(tree, False)
+    return found
+
+
+def static_units(source):
+    found = unescaped_values(source)
+    check(not found, "every value lib/host_identity.py puts into a string is escaped (unescaped: %r)" % found)
+    # The check cannot pass by checking nothing: an escaper turned into
+    # str() at each call site, one at a time, is found.
+    lines = source.splitlines(True)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line))
+    sites = [starts[n.lineno - 1] + n.col_offset for n in ast.walk(ast.parse(source))
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_shown"]
+    missed = []
+    for i in sites:
+        # Byte and character offsets agree: the file's code is ASCII.
+        mutant = source[:i] + "str(" + source[i + len("_shown("):]
+        if not unescaped_values(mutant):
+            missed.append(source.count("\n", 0, i) + 1)
+    check(sites and not missed, "each of the %d _shown() call sites turned into str() is found (missed lines %r)"
+          % (len(sites), missed))
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -766,6 +944,7 @@ def main(argv):
         check(True, "lib/host_identity.py parses as Python 3.9")
     except SyntaxError as e:
         check(False, "lib/host_identity.py parses as Python 3.9: %s" % e)
+    static_units(source)
     mod = load(module)
 
     # --- the git environment: what is scrubbed, what survives ---------------
