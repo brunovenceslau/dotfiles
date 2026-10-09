@@ -422,16 +422,19 @@ place, and the smoke says so.
 carries every gitignored file of the working tree, secret-bearing `.local`
 files among them, so delete `.smoke/run` once you are done debugging.
 
-1. Stage the disposable copy of the checkout described above.
-2. Create a scratch `HOME` and snapshot its pristine state.
-3. Run `/bin/bash install.sh`, which on the macOS runners is the real bash 3.2.
-4. Assert the core links, one convention link, and a non-empty manifest.
-5. Pre-seed the completion stamp, then run `zsh -i -c exit` and require exit 0,
+1. Create an empty scratch `HOME` under `.smoke/run/home`, before anything is
+   staged.
+2. Stage the disposable copy of the checkout described above.
+3. Plant a pre-existing `~/.zshenv` in the scratch `HOME`, then snapshot its
+   pristine state.
+4. Run `/bin/bash install.sh`, which on the macOS runners is the real bash 3.2.
+5. Assert the core links, one convention link, and a non-empty manifest.
+6. Pre-seed the completion stamp, then run `zsh -i -c exit` and require exit 0,
    empty stderr, and a `ZDOTDIR` sentinel that proves this config loaded.
-6. Re-run the installer and assert idempotency: a byte-stable manifest, an
+7. Re-run the installer and assert idempotency: a byte-stable manifest, an
    identical set of links, and no new `.bak`.
-7. Run `dotfiles-uninstall --purge` through the real user-facing path.
-8. Diff the home directory against the pristine snapshot. Any difference fails
+8. Run `dotfiles-uninstall --purge` through the real user-facing path.
+9. Diff the home directory against the pristine snapshot. Any difference fails
    the gate and is printed.
 
 ### What `make forkgate` does
@@ -878,6 +881,14 @@ weakens a security property. Enforce a security invariant at its call site with
 an explicit flag, the way the installer passes `-c fetch.fsckObjects=true` to
 its own fetches, rather than inheriting it from a linked config file that a
 later change can drop.
+
+A guard that must parse the language it guards pins a literal or executes the
+code under a stub: `tests/troubleshooting_messages_test.sh` pins the exact
+lines `install.sh` prints, and the "tar that only WARNS" case of
+`tests/smoke_stage_test.sh` puts a stub `tar` first on `PATH` instead of
+reasoning about what tar would do. Never strip comments before a security grep
+unless the stripper tokenizes the language (quotes, heredocs, `$#`/`${#v}`, a
+`#` inside a word).
 
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack

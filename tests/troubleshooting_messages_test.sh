@@ -17,8 +17,9 @@
 #     (the `install: ` prefix is added by install.sh's log/warn, so it is
 #     dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
 #   * a backtick span that starts with one of the framework's message prefixes
-#     (`upgrade: `, `link: `, `packages: `, `uninstall: `, `one or more links`,
-#     `updates are available`, `no successful update check`).
+#     (`install: `, dropped like the fenced form, `upgrade: `, `link: `,
+#     `packages: `, `uninstall: `, `one or more links`, `updates are
+#     available`, `no successful update check`).
 # Placeholders (`<path>`, `...`, a number such as the 30 in "30 days") stand for
 # values the code interpolates, so each message is split at them and every
 # literal fragment of 8 or more characters must appear verbatim in the code.
@@ -55,8 +56,8 @@ awk '/^```/ { inblock = !inblock; next }
      }' "$doc" "$recipes" > "$work/msgs"
 # 2. Backtick spans with a message prefix (one span per line of output).
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
-  | grep -E '^(upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
-  >> "$work/msgs" || true
+  | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
+  | sed 's/^install: //' >> "$work/msgs" || true
 
 count="$(grep -c . "$work/msgs" || true)"
 [ "$count" -ge 15 ] || fail "extracted only $count messages from the page (extraction rot?)"
