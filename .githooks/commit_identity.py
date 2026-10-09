@@ -25,7 +25,10 @@ those reachable from a pushed tip but from no remote-tracking ref (of any
 remote) and from no remote oid git names on stdin. A commit already fetched
 from a remote passes whoever made it, so merging a fetched default branch
 does not trip on GitHub's own merge commits; one the remote holds under a
-ref never fetched is still compared. A foreign author is refused on
+ref never fetched is still compared. Any tracked remote counts, even a
+local repository added as one, so a commit fetched from a scratch clone is
+not compared either. Emails are compared exactly, case included, so a
+case-only difference refuses. A foreign author is refused on
 purpose: `git push --no-verify` is the escape for a reviewed commit made by
 someone else. While a config refusal stands the commits are not compared:
 the effective identity is then the polluted one.
@@ -64,6 +67,9 @@ KEYS_REGEXP = r"^(%s)\.(email|name)$" % "|".join(SECTIONS)
 REFUSED_SCOPES = ("local", "worktree")
 IDENTS = (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT"))
 HEX = frozenset("0123456789abcdef")
+# A long rebase under a wrong identity names this many commits, then counts
+# the rest in one line, so the refusal stays readable.
+MAX_COMMITS = 20
 CALLERS = ("pre-commit", "pre-push", "check")
 PREFIX = "commit-identity"
 
@@ -118,11 +124,15 @@ def git_failed(what, p, why=None):
 
 def git_env(gdir):
     """The environment every git call here runs in. GIT_DIR is the absolute
-    git dir (see entries()). GIT_NO_LAZY_FETCH keeps a partial clone from
-    fetching a missing object over the network to answer a hook: a remote
-    oid it lacks is skipped (--ignore-missing) instead. git 2.45 and later
-    honour it, older ones ignore it."""
-    return dict(os.environ, GIT_DIR=gdir, GIT_NO_LAZY_FETCH="1")
+    git dir (see entries()). GIT_NO_REPLACE_OBJECTS makes rev-list read the
+    commits the push sends: a push ignores refs/replace/, so a replacement
+    would otherwise show a clean identity in place of the one going out.
+    GIT_NO_LAZY_FETCH keeps a partial clone from fetching a missing object
+    over the network to answer a hook: a remote oid it lacks is skipped
+    (--ignore-missing) instead. A git that knows it honours it, an older
+    one ignores it."""
+    return dict(os.environ, GIT_DIR=gdir, GIT_NO_REPLACE_OBJECTS="1",
+                GIT_NO_LAZY_FETCH="1")
 
 
 def git_dir():
@@ -298,13 +308,24 @@ def commit_refusals(gdir, stdin):
     if not commits:
         return []
     want = [(role, ident_email(gdir, var)) for role, var in IDENTS]
-    lines = []
+    lines, named, more = [], 0, 0
     for oid, *got in commits:
-        for (role, effective), email in zip(want, got):
-            if email != effective:
-                lines.append("commit %s has %s email %s, not the effective "
-                             "%s" % (oid, role, quoted(email),
-                                     quoted(effective)))
+        # Exact, case included: a case-only difference refuses, which fails
+        # closed.
+        bad = [(role, effective, email)
+               for (role, effective), email in zip(want, got)
+               if email != effective]
+        if not bad:
+            continue
+        if named == MAX_COMMITS:
+            more += 1
+            continue
+        named += 1
+        for role, effective, email in bad:
+            lines.append("commit %s has %s email %s, not the effective %s"
+                         % (oid, role, quoted(email), quoted(effective)))
+    if more:
+        lines.append("and %d more commits whose email differs" % more)
     return lines
 
 

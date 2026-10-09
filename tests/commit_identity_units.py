@@ -142,6 +142,8 @@ check(code == 2 and text.rstrip().endswith("'git config' failed (exit 128)"),
       "entries(): a git failure with no stderr names no empty reason")
 check(mod.git_env("/g").get("GIT_NO_LAZY_FETCH") == "1",
       "git_env(): a partial clone never fetches lazily for a hook")
+check(mod.git_env("/g").get("GIT_NO_REPLACE_OBJECTS") == "1",
+      "git_env(): rev-list reads the commits a push sends, not replacements")
 
 code, _, got = run_with(lambda: mod.pushed_commits("/g", {A40}, set()), 0,
                         ("commit %s\na@x\0c@x\n" % A40).encode())

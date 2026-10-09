@@ -547,17 +547,22 @@ commit-identity: pre-push: refusing: commit <oid> has committer email 'a@b', not
 ```
 
 This catches an identity removed from the config before the push: the
-commits made under it still carry it. The commits compared are those a pushed
-tip reaches and no remote-tracking ref and no remote oid on git's stdin
-reaches. A remote-tracking ref of any remote counts, not only the one pushed
-to, so a commit fetched from a fork and pushed to `origin` is not compared.
-A commit already fetched from a remote passes whoever made it, so merging a
-fetched default branch does not trip on GitHub's own merge commits; one the
-remote holds under a ref never fetched here is still compared. A deletion
-sends no commit and passes without an identity; a push with commits to
-compare and no effective identity exits 2. While a config refusal stands,
-the commits are not compared, since the effective identity is then the one
-being refused.
+commits made under it still carry it. Emails are compared exactly, case
+included, so a case-only difference refuses: that fails closed. The first 20
+offending commits are named, then one line counts the rest.
+
+The commits compared are those a pushed tip reaches and no remote-tracking
+ref and no remote oid on git's stdin reaches. A remote-tracking ref of any
+remote counts, not only the one pushed to, so a commit fetched from a fork
+and pushed to `origin` is not compared, and neither is one fetched from a
+local scratch clone added as a remote. A commit already fetched from a remote
+passes whoever made it, so merging a fetched default branch does not trip on
+GitHub's own merge commits; one the remote holds under a ref never fetched
+here is still compared. A replace ref (`refs/replace/`) is not followed,
+since the push sends the original commit. A deletion sends no commit and
+passes without an identity; a push with commits to compare and no effective
+identity exits 2. While a config refusal stands, the commits are not
+compared, since the effective identity is then the one being refused.
 
 A foreign author is refused on purpose: a cherry-pick that keeps someone
 else's authorship, or their merge, does not match the effective identity.
@@ -888,7 +893,8 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Name the `webauthn-sk-ecdsa-sha2-nistp256@openssh.com` spelling of a security key on purpose: add it to `TYPE_ALIASES`, or pin today's behaviour with a test | A line using that name is malformed here, and `keys_named()` finds its key only because the name contains `sk-ecdsa-sha2-nistp256@openssh.com` | The next edit to `keys_named()` |
 | Require a minimum `ssh-keygen` version for the conformance vectors | The suite uses the host's `ssh-keygen`. The vector `OK \x0da@x @KEY@` was reported to fail with OpenSSH 9.2 and 9.6 and to pass with 9.7 and later; that report has not been reproduced | A host with `ssh-keygen` 9.6 or older goes red on it, or the macOS CI leg shows it |
 | Probe `ssh-keygen -Y sign` and `-Y verify` once, with a named message, before the conformance checks | The suite signs and verifies directly, so a broken `ssh-keygen` fails it without naming the cause | A report of a conformance failure that is empty or a traceback |
-| Allow a reviewed foreign-author commit through pre-push without --no-verify | Refused; `--no-verify` is the escape | The first legitimate foreign-commit push is refused |
+| Allow a reviewed foreign-author commit through pre-push without `--no-verify` | Refused, with `--no-verify` as the escape: a foreign author in a push is rarer here than an accident, and the refusal names the escape | The first legitimate foreign-commit push is refused |
+| Count only the pushed remote's refs as already published | Any tracked remote counts, so forwarding an upstream's commits to a fork passes | A commit reaches a public remote through a local repository added as a remote |
 | Wire `.githooks/` as git hooks on the Mac (`core.hooksPath`, or a dispatcher like the sandbox's) | Not wired: a hook directory a sandbox can write would then run on the host, outside the sandbox. On the Mac the rule runs only as `make commit-identity` | An identity incident happens on the Mac |
 | Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
 
