@@ -155,16 +155,18 @@ def refusals(gdir):
         elif os.path.isabs(path) and escape(path) == path:
             # Quoted: the path is absolute and escapes to itself, so it
             # holds nothing a shell or a terminal would act on, and the
-            # quote keeps a space or a `$` in it one literal word.
-            where = "in %s" % path
+            # quote keeps a space or a `$` in it one literal word. The `in`
+            # text is quoted the same way, so a path holding its own
+            # "; fix: ..." cannot pass for a fix ahead of the real one.
+            where = "in %s" % shlex.quote(path)
             fix = "git config --file %s --unset-all %s" % (
                 shlex.quote(path), key)
         else:
             # No command: the printed path is escaped (a backslash doubled,
             # a control character spelled out) or is not absolute, so a
             # command naming it would name another file, which may not
-            # exist.
-            where = "in %s" % escape(path)
+            # exist. The escaped text is still quoted, for the reason above.
+            where = "in %s" % shlex.quote(escape(path))
             fix = "remove %s from that file (path shown escaped)" % key
         lines.append("%s %s is set at scope %s %s; fix: %s"
                      % (key, shown, scope, where, fix))

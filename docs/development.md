@@ -524,10 +524,12 @@ commit-identity: check: refusing: user.email 'a@b' is set at scope local in /pat
 
 Control characters, bidi and zero-width characters in a value or a path print
 as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`, so a value
-cannot forge a line. When that escaping changes a path, the fix names the key
-to remove from that file instead of a command, which would name another
-file. It exits 2 when it cannot answer: outside a repository, on a config git
-refuses to parse, or on a wrong argument.
+cannot forge a line. The file is shell-quoted wherever it is printed, so a path
+holding its own `; fix:` cannot pass for a second fix. When the escaping
+changes a path, the fix names the key to remove from that file instead of a
+command, which would name another file. It exits 2 when it cannot answer:
+outside a repository, on a config git refuses to parse, or on a wrong
+argument.
 
 The same rule runs as two git hooks, `.githooks/pre-commit` and
 `.githooks/pre-push`, which run `.githooks/commit_identity.py`. `pre-push`

@@ -342,12 +342,28 @@ r="$work/r 8"; new_repo "$r"
 git -C "$r" config user.email a@b
 if try_commit "$r"; then fail "fixture: the commit in '$r' should be refused"; fi
 want="commit-identity: pre-commit: refusing: user.email 'a@b' is set at"
-want="$want scope local in $r/.git/config; fix: git config --file"
+want="$want scope local in '$r/.git/config'; fix: git config --file"
 want="$want '$r/.git/config' --unset-all user.email"
 grep -qxF "$want" "$work/err" || fail "the refusal line is not what was expected: $(err)"
 grep -qF "git -c user.email=" "$work/err" || fail "the refusal must point at 'git -c user.email=...': $(err)"
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "one line per offending key plus one pointer, got: $(err)"
-ok "the message names the file and the --unset-all fix, quoted"
+ok "the message names the file and the --unset-all fix, both quoted"
+
+# A path holding its own "; fix: ..." prints quoted, so it cannot pass for a
+# second fix ahead of the real one.
+r="$work/r-plant"; new_repo "$r"
+mkdir "$r/.git/x; fix: rm y"
+printf '[include]\n\tpath = "x; fix: rm y/extra"\n' >> "$r/.git/config"
+printf '[user]\n\temail = i@x\n' > "$r/.git/x; fix: rm y/extra"
+check "$r"
+[ "$rc" -eq 1 ] \
+  || fail "fixture: the planted path should be refused, got $rc: $(err)"
+want="commit-identity: check: refusing: user.email 'i@x' is set at scope"
+want="$want local in '$r/.git/x; fix: rm y/extra'; fix: git config --file"
+want="$want '$r/.git/x; fix: rm y/extra' --unset-all user.email"
+grep -qxF "$want" "$work/err" \
+  || fail "a path holding '; fix:' must print quoted: $(err)"
+ok "a path holding its own '; fix:' prints quoted in the 'in' text"
 
 r="$work/r9"; new_repo "$r"
 git -C "$r" config user.name "$(printf 'x\033[31my\nforged\342\200\256z\\')"
@@ -380,7 +396,7 @@ check "$r"
 [ "$rc" -eq 1 ] \
   || fail "fixture: the backslash path should be refused, got $rc: $(err)"
 want="commit-identity: check: refusing: user.email 'i@x' is set at scope"
-want="$want local in $r/.git/in\\\\x/extra; fix: remove user.email from"
+want="$want local in '$r/.git/in\\\\x/extra'; fix: remove user.email from"
 want="$want that file (path shown escaped)"
 grep -qxF "$want" "$work/err" \
   || fail "an escaped path must not print a command: $(err)"
