@@ -3501,8 +3501,16 @@ while IFS='|' read -r want shape; do
     grep -qF "$md_msg" "$work/mdw-esc-$i.out" && ok \
       || fail "arm 15 escaped backtick: $shape failed without the arm 15 message"
     # and no other arm fired beside it
-    [ "$(grep -F 'check-patterns:' "$work/mdw-esc-$i.out" | grep -vF "$md_msg" | grep -vcF 'check-patterns: SKIP ')" = 0 ] && ok \
-      || fail "arm 15 escaped backtick: $shape tripped another arm"
+    # Prefix tests on fixed strings, not grep: a message quoted mid-line
+    # (or a regex metacharacter in $md_msg) must not hide another arm.
+    other=0
+    while IFS= read -r line; do
+      case "$line" in
+        "$md_msg"* | "check-patterns: SKIP "*) ;;
+        "check-patterns:"*) other=1 ;;
+      esac
+    done < "$work/mdw-esc-$i.out"
+    [ "$other" = 0 ] && ok || fail "arm 15 escaped backtick: $shape tripped another arm"
   fi
 done <<'SHAPES'
 pass|run
