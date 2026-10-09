@@ -22,8 +22,9 @@
 #                                    signing from the host's allowed_signers and
 #                                    ssh-agent (install runs it too); --rotate
 #                                    replaces a signing key that no longer verifies
-#   install.sh doctor [--verbose]    read only: print each identity or signing
-#                                    problem in one line (--verbose: every check)
+#   install.sh doctor [--verbose]    read only: print each identity, signing or
+#                                    plugin submodule problem in one line
+#                                    (--verbose: every check)
 #   install.sh -h | --help | help    print a short usage line
 #
 # reseed-settings is retired: kept as a no-op, cross-version ABI only (see
@@ -690,7 +691,8 @@ do_identity() {
 }
 
 # do_doctor [--verbose] - `install.sh doctor`: lib/host_identity.py's
-# read-only checks (its CHECKS registry). It writes nothing, prints only the
+# read-only checks (its CHECKS registry): the identity and signing path, and
+# the plugin submodules of this checkout (the --installer path names it). It writes nothing, prints only the
 # problems (every check with --verbose) and returns 1 when it found one. A
 # python3 that does not run is the one problem reported here, since the checks
 # themselves need it.

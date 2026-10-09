@@ -660,6 +660,7 @@ test suite are in development.md's
 | Suggest the account's full name in doctor's name lines too | Doctor's `user.name is not set` lines say `"Full Name"`; only the identity step's line suggests the account's GECOS full name (`suggested_name()` in `lib/host_identity.py`) | An operator asks for it |
 | Decide which full names to suggest by what they hold (a letter of a common script) instead of by what they lack | `suggested_name()` in `lib/host_identity.py` refuses a name with no letter or digit, a space other than U+0020, an unassigned or private-use code point, or one on the `_INVISIBLE` list of blank-looking code points | Another blank-looking code point turns up that the list misses |
 | Guard against a FIFO at `~/.gitconfig` | Not guarded: git itself hangs on one, so every git command does, not only this step | A host reports a hang that traces to a special file at `~/.gitconfig` |
+| Have `install.sh doctor` check the fast-syntax-highlighting seed (an empty `secondary_theme.zsh` under `$XDG_CACHE_HOME/zsh`) | `doctor` checks that each plugin submodule is initialized and at its pin, not the seed; the zshrc writes the seed, and its `curl` and `wget` shims cover a seed that could not be written | The fast-syntax-highlighting pin is bumped, or a non-empty seed is found on a host |
 
 ## Security properties and where they are enforced
 

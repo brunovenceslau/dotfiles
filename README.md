@@ -209,7 +209,7 @@ prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
 | `./install.sh` | Create the state and cache directories, copy a pre-XDG `~/.zsh_history` over, create every link, initialize missing plugin submodules, cache the shell integrations, and run the automatic identity step. Idempotent. |
 | `./install.sh link` | Recreate the links and the manifest, refresh the cached shell integrations, and run the automatic identity step. This is what an upgrade re-runs. |
 | `./install.sh identity [--name "Full Name"] [--rotate]` | Set this machine's git identity and signing key from its allowed-signers file and ssh-agent; `--rotate` replaces a key that no longer verifies. |
-| `./install.sh doctor [--verbose]` | Check the identity, the signing key and the tools they need, without writing anything. Prints only problems, and exits 1 when it finds one. |
+| `./install.sh doctor [--verbose]` | Check the identity, the signing key, the tools they need and the plugin submodules, without writing anything. Prints only problems, and exits 1 when it finds one. |
 | `./install.sh packages` | `brew bundle` over `packages/Brewfile`, then the pinned `gh` extensions. |
 | `./install.sh --help` | Print the usage (`-h` and `help` work too). |
 | `dotfiles-upgrade` | Fetch, fast-forward merge, update submodules, relink, recompile. Same as `./install.sh upgrade`. |

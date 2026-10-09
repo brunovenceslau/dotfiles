@@ -45,7 +45,7 @@ given.
 | `upgrade` | none | Fetch, fast-forward merge, update submodules, relink (which runs the automatic [identity step](#installsh-identity)), recompile. There is no bypass flag, and any argument is rejected. |
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
 | `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent; `commit.gpgsign` comes from the tracked config. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
-| `doctor` | `[--verbose]` | Checks the identity, the signing key and the tools they need, and writes nothing. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
+| `doctor` | `[--verbose]` | Checks the identity, the signing key, the tools they need and the plugin submodules, and writes nothing. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
 
@@ -335,14 +335,15 @@ reported a stale key; and `2` on a usage error.
 
 ### `install.sh doctor`
 
-Checks this host's git identity, its signing key, and the tools they depend
-on, and changes nothing. It reads git config, the allowed-signers and
-revocation files, `ssh-add -L` and `ssh-keygen`, and opens no network
-connection of its own. Each tool runs under a time limit; each file is
-opened without blocking and read up to 1 MiB. `ssh-add -L` asks the agent
-that `SSH_AUTH_SOCK` names for its public keys only; a forwarded agent
-answers over the SSH session that forwards it. What it creates is
-temporary: the empty directory git runs in and, when
+Checks this host's git identity, its signing key, the tools they depend on,
+and the checkout's plugin submodules, and changes nothing. It reads git
+config, the allowed-signers and revocation files, `ssh-add -L`,
+`ssh-keygen`, the checkout's plugin pins and each plugin's checked-out
+commit, and opens no network connection of its own. Each tool runs under a
+time limit; each file is opened without blocking and read up to 1 MiB.
+`ssh-add -L` asks the agent that `SSH_AUTH_SOCK` names for its public keys
+only; a forwarded agent answers over the SSH session that forwards it. What
+it creates is temporary: the empty directory git runs in and, when
 `gpg.ssh.revocationFile` is a KRL, the public key `ssh-keygen -Q` reads.
 Both are removed before it exits, including when ^C, `SIGTERM` or `SIGHUP`
 ends it (a `SIGKILL` cannot be caught). The checks are a registry, `CHECKS`
@@ -359,17 +360,22 @@ in `lib/host_identity.py`, run in this order:
 | `signing key` | the effective `user.signingkey`, as the [stale-key report](#the-stale-key-report) judges it | the key no longer verifies, is not in a reachable agent, names no readable key, or is set outside `config.local` |
 | `ssh session` | `SSH_CONNECTION` | never; with `--verbose` it notes that the automatic step writes nothing in the session |
 | `~/.gitconfig` | `~/.gitconfig` | it is a dangling symlink, not a regular file, or sets `user.*`, `gpg.*`, `commit.gpgsign` or `tag.gpgsign` |
+| `plugins` | the submodule pins of the checkout's `HEAD` (one `git ls-tree`, with the global and system git config left out), and for each plugin the commit its directory has checked out, read from its `.git` file, its gitdir's `HEAD` and the ref that names, never by running git in the plugin | the pins cannot be listed (the checkout is not a git repository), a plugin is not initialized (a clone without `--recurse-submodules`; `./install.sh` initializes it, `link` does not), or which commit a plugin is at cannot be read; a plugin at another commit than its pin is a note naming the command back to the pin, since the installer leaves such a local change alone on purpose |
 
 By default it prints one line per problem, `install: doctor: <check>: <what
 is wrong> - <the fix>`, and nothing else, so a host in good shape prints
 nothing. Before any check, a `config.local` that is not a regular file is
-reported in one line, `doctor: git: <path> is not a regular file`, and
-doctor stops there: git would block on it. A git that cannot be kept outside
-every repository, which the identity step refuses, stops doctor the same way,
-in one line: `doctor: git: not reading the git config: <reason>`.
+reported in one line, `doctor: git: <path> is not a regular file`, and the
+checks that read the git config (`git`, `values`, `trust root`, `ssh-agent`,
+`signing key` and `~/.gitconfig`) are skipped: git would block on it. A git
+that cannot be kept outside every repository, which the identity step
+refuses, skips them the same way, in one line: `doctor: git: not reading the
+git config: <reason>`. The other checks still run, and the line counts as
+one problem.
 
 `--verbose` prints every finding: a problem or a passing check as is, and
-`note:` before one that is neither. Its last line is one of:
+`note:` before one that is neither. Its last line, the verdict on the whole
+run, is one of:
 
 ```text
 install: doctor: verdict: nothing needs action
@@ -386,7 +392,7 @@ counts, since it shapes every commit, signed or not: `user.name`,
 `user.email` (the fix then names `git config --file`, since
 `install.sh identity` needs a signing key), a `commit.gpgsign` or
 `tag.gpgsign` git cannot read, the `[include]` chain, `GIT_CONFIG_GLOBAL`,
-`python3` and `~/.gitconfig`. `--verbose` names the opt-out:
+`python3`, `~/.gitconfig` and the plugins. `--verbose` names the opt-out:
 `commit.gpgsign = false from <origin>: respected as this host's opt-out;
 the automatic step stays quiet and writes nothing`.
 

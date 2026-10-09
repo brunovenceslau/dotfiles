@@ -25,7 +25,9 @@
 #             a stale key or a shadowing signingkey; silent on signing for a
 #             host that opted out
 #   doctor    `install.sh doctor [--verbose]`: read only; print each problem
-#             in one line (every check with --verbose), exit 1 on a problem
+#             in one line (every check with --verbose), exit 1 on a problem;
+#             besides the identity and signing path it checks the plugin
+#             submodules of the checkout that holds --installer
 # `-I` keeps the current directory and PYTHON* variables out of sys.path, so a
 # planted module beside the cwd cannot run. It is never linked onto PATH: lib/
 # is not a tree the link engine walks. The behaviour (lookup order, matching
@@ -971,6 +973,33 @@ def git(args):
     if reason is not None:
         return 127, "", reason
     return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
+
+
+def repo_git(checkout, args):
+    """Run git inside the framework checkout CHECKOUT, the second and only
+    other way this file runs git; return what _run_git() returns.
+
+    git() runs outside every repository and reads the user's global and
+    system config, since that config IS what the identity checks judge. This
+    one is the opposite: it reads the checkout's own repository (doctor's
+    plugin pins), with the global and system config scrubbed, as install.sh's
+    vgit scrubs them, so no user or machine config can steer what it reads,
+    and a config.local that blocks (a FIFO) or a git that cannot be kept out
+    of a repository leaves it working. The repository-local environment
+    (GIT_DIR among them), the GIT_CONFIG_* injections and the traces go as in
+    git_env(), and GIT_CEILING_DIRECTORIES names CHECKOUT's parent, so a
+    checkout that is not a repository is said to be one, never a repository
+    around it (a $HOME that is one) read in its place. The checkout's own
+    .git/config still applies: whoever can write it owns the working tree,
+    the same scope as vgit. Only object reads go through here (ls-tree),
+    never a command that runs a filter, a hook or an fsmonitor."""
+    env = git_env(os.path.dirname(checkout))
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["GIT_CONFIG_SYSTEM"] = os.devnull
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["LC_ALL"] = "C"
+    env.pop("LANGUAGE", None)
+    return _run_git(args, checkout, env)
 
 
 class Value(object):
@@ -2253,8 +2282,13 @@ def advisory(host):
 #
 # `install.sh doctor` runs every check in CHECKS, in order. A check is one
 # method of Doctor: it only reads (git config, files, `ssh-add -L`,
-# `ssh-keygen`) and records findings. It opens no network connection of its
-# own, though a forwarded agent answers over its SSH session. Each tool runs
+# `ssh-keygen`, the checkout's plugin pins through repo_git() and each
+# submodule's HEAD as a file) and records findings. It opens no network
+# connection of its own, though a forwarded agent answers over its SSH
+# session. A check that reads the git config is an identity check (the third
+# field of its CHECKS entry): a config.local that is not a regular file, or a
+# git that cannot be kept outside every repository, is reported once and
+# skips those checks only. Each tool runs
 # under a timeout; each file is opened without blocking and read up to a
 # size cap (read_small_file()). A finding is ok, info or a problem; a
 # problem is one line naming what is wrong, where it comes from and the fix,
@@ -2310,15 +2344,101 @@ def _grouped(lines):
     return folded
 
 
+# A commit id as git prints it: SHA-1 or SHA-256, lower-case hex.
+OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _first_line(path):
+    """(the first line of the small file PATH without its newline, None), or
+    (None, why it cannot be read)."""
+    data, why = read_small_file(path)
+    if data is None:
+        return None, "%s: %s" % (_shown(path), why)
+    return data.split(b"\n", 1)[0].decode("utf-8", "replace").rstrip("\r"), None
+
+
+# What submodule_commit() finds in a submodule's directory.
+ABSENT = "absent"          # no .git: not initialized (`-` in git submodule status)
+AT = "at"                  # checked out at the commit returned with it
+UNRESOLVED = "unresolved"  # HEAD names a ref these files do not resolve
+UNREADABLE = "unreadable"  # .git, its gitdir or HEAD cannot be read
+
+
+def submodule_commit(path):
+    """(state, commit, why) for the submodule checked out at PATH, read from
+    files alone: its .git (a gitfile naming its gitdir, or the gitdir
+    itself), that gitdir's HEAD, and the ref HEAD names, loose or packed.
+    Never git in the submodule: even `git status` with optional locks and
+    the fsmonitor off runs a clean filter the submodule's config names.
+    STATE is ABSENT, AT (COMMIT is set), UNRESOLVED (a reftable, or another
+    worktree's ref store) or UNREADABLE; WHY says why for the last two."""
+    dotgit = os.path.join(path, ".git")
+    try:
+        st = os.lstat(dotgit)
+    except OSError as e:
+        if e.errno == errno.ENOENT:
+            return ABSENT, None, None
+        return UNREADABLE, None, "%s: %s" % (_shown(dotgit), e.strerror)
+    if stat.S_ISDIR(st.st_mode):
+        gitdir = dotgit  # a submodule cloned before git absorbed gitdirs
+    else:
+        line, why = _first_line(dotgit)
+        if line is None:
+            return UNREADABLE, None, why
+        if not line.startswith("gitdir: "):
+            return UNREADABLE, None, "%s does not name a gitdir" % _shown(dotgit)
+        # A relative gitdir is relative to the submodule's directory. Joined,
+        # never normalized: the kernel then resolves each `..` the way git does.
+        gitdir = os.path.join(path, line[len("gitdir: "):])
+    head_path = os.path.join(gitdir, "HEAD")
+    head, why = _first_line(head_path)
+    if head is None:
+        return UNREADABLE, None, why
+    if OBJECT_ID.match(head):
+        return AT, head, None
+    if not head.startswith("ref: "):
+        return UNREADABLE, None, "%s is neither a commit nor a ref" % _shown(head_path)
+    ref = head[len("ref: "):]
+    if not ref.startswith("refs/") or ".." in ref.split("/") or "\0" in ref:
+        return UNREADABLE, None, "%s names %s, which is not a ref" % (_shown(head_path), _shown(ref))
+    loose, _ = _first_line(os.path.join(gitdir, ref))
+    if loose is not None and OBJECT_ID.match(loose.strip()):
+        return AT, loose.strip(), None
+    data, _ = read_small_file(os.path.join(gitdir, "packed-refs"))
+    for record in (data or b"").decode("utf-8", "replace").splitlines():
+        parts = record.split(" ")
+        if len(parts) == 2 and parts[1] == ref and OBJECT_ID.match(parts[0]):
+            return AT, parts[0], None
+    return UNRESOLVED, None, "%s names %s, which its files do not resolve" % (_shown(head_path), _shown(ref))
+
+
+def plugin_pins(checkout):
+    """(pins, None), pins a list of (path, commit) for every submodule the
+    checkout's HEAD pins, or (None, git's error, unescaped) when git cannot
+    list them. One
+    `git ls-tree` through repo_git()."""
+    rc, out, err = repo_git(checkout, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"])
+    if rc != 0:
+        return None, (err or "exit %d" % rc)
+    pins = []
+    for record in out.split("\0"):
+        meta, _, name = record.partition("\t")
+        fields = meta.split(" ")
+        if len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit":
+            pins.append((name, fields[2]))
+    return pins, None
+
+
 class Doctor(object):
     """The checks of `install.sh doctor`. A check method records what it
     found in self.found; doctor() runs CHECKS and labels each finding with
-    the name of the check that recorded it."""
+    the name of the check that recorded it. OPTED_OUT_ORIGIN is opted_out()'s
+    answer, or None when the git config could not be read."""
 
-    def __init__(self, host):
+    def __init__(self, host, opted_out_origin):
         self.host = host
         self.found = []  # (level, text)
-        self.opted_out_origin = opted_out(host)
+        self.opted_out_origin = opted_out_origin
 
     def ok(self, text):
         self.found.append(("ok", text))
@@ -2571,40 +2691,86 @@ class Doctor(object):
         else:
             self.ok(finding)
 
+    def plugins(self):
+        # The SHA-pinned zsh plugin submodules: each pin the checkout's HEAD
+        # records, against the commit its directory has checked out. Only
+        # files are read in a submodule (submodule_commit()).
+        inst = shell_word(self.host.installer)
+        checkout = os.path.dirname(os.path.abspath(self.host.installer))
+        pins, err = plugin_pins(checkout)
+        if pins is None:
+            self.problem("cannot list the plugin pins of %s (%s) - check that it is a git checkout: git -C %s ls-tree HEAD"
+                         % (_shown(checkout), _shown(err), shell_word(checkout)))
+            return
+        for path, pin in pins:
+            state, commit, why = submodule_commit(os.path.join(checkout, path))
+            if state == UNREADABLE:
+                self.problem("cannot read which commit %s is at (%s) - remove that directory, then run: %s install"
+                             % (_shown(path), why, inst))
+            elif state == ABSENT:
+                # ensure_submodules (`install`) initializes it; `link` never
+                # touches submodules.
+                self.problem("%s is not initialized, so zsh starts without it - run: %s install"
+                             % (_shown(path), inst))
+            elif state == UNRESOLVED:
+                self.info("cannot tell which commit %s is at: %s" % (_shown(path), why))
+            elif commit == pin:
+                self.ok("%s is at its pin %s" % (_shown(path), _shown(pin[:12])))
+            else:
+                # A local bump: ensure_submodules leaves it alone on purpose,
+                # and dotfiles-upgrade refuses the dirty tree it makes, so it
+                # is not the way back to the pin.
+                self.info("%s is at %s, not its pin %s: a local change, left as it is - to return to the pin, run: git -C %s -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update -- %s"
+                          % (_shown(path), _shown(commit[:12]), _shown(pin[:12]), shell_word(checkout),
+                             shell_word(path)))
 
-# (name, Doctor method): the checks, in the order they print.
+
+# (name, Doctor method, reads the git config): the checks, in the order they
+# print. A check that reads the git config (through git() or a Host read) is
+# an identity check: when config.local is not a regular file or git cannot be
+# kept outside every repository, doctor() reports that once, under `git`, and
+# skips these; every other check still runs.
 CHECKS = (
-    ("git", Doctor.git),
-    ("python3", Doctor.python3),
-    ("ssh-keygen", Doctor.ssh_keygen),
-    ("values", Doctor.values),
-    ("trust root", Doctor.trust_root),
-    ("ssh-agent", Doctor.ssh_agent),
-    ("signing key", Doctor.signing_key),
-    ("ssh session", Doctor.ssh_session),
-    ("~/.gitconfig", Doctor.gitconfig),
+    ("git", Doctor.git, True),
+    ("python3", Doctor.python3, False),
+    ("ssh-keygen", Doctor.ssh_keygen, False),
+    ("values", Doctor.values, True),
+    ("trust root", Doctor.trust_root, True),
+    ("ssh-agent", Doctor.ssh_agent, True),
+    ("signing key", Doctor.signing_key, True),
+    ("ssh session", Doctor.ssh_session, False),
+    ("~/.gitconfig", Doctor.gitconfig, True),
+    ("plugins", Doctor.plugins, False),
 )
 
 
 def doctor(host, verbose):
     """Run CHECKS; print the problems (everything with VERBOSE). Writes
     nothing. Returns 1 when a problem was found, else 0."""
+    reason = None
     if not local_absent_or_regular(host):
         # Before any git read (see local_absent_or_regular()); one literal,
         # quoted in docs/troubleshooting.md.
-        log("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
-            % _shown(host.config_local))
-        return 1
-    reason = git_isolate()
-    if reason is not None:
-        # Every check reads through git(), so each would report this one
-        # cause as a problem of its own (an unset gpg.format, a git that
-        # did not run). One literal, quoted in docs/troubleshooting.md.
-        log("doctor: git: not reading the git config: %s" % reason)
-        return 1
-    d = Doctor(host)
+        reason = ("doctor: git: %s is not a regular file - git opens it through the include; remove it or make it a file"
+                   % _shown(host.config_local))
+    else:
+        why = git_isolate()
+        if why is not None:
+            # Every identity check reads through git(), so each would report
+            # this one cause as a problem of its own (an unset gpg.format, a
+            # git that did not run). One literal, quoted in
+            # docs/troubleshooting.md.
+            reason = "doctor: git: not reading the git config: %s" % why
     problems = 0
-    for name, method in CHECKS:
+    if reason is not None:
+        # The one line for every identity check; the others still run. Under
+        # `git`, the first check in CHECKS, so the order holds.
+        log(reason)
+        problems += 1
+    d = Doctor(host, None if reason is not None else opted_out(host))
+    for name, method, reads_config in CHECKS:
+        if reads_config and reason is not None:
+            continue
         d.found = []
         method(d)
         for level, finding in d.found:
@@ -2615,6 +2781,7 @@ def doctor(host, verbose):
                 # it through _shown(), so the literal around it stays bare.
                 log("doctor: %s: %s%s" % (_shown(name), "note: " if level == "info" else "", finding))
     if verbose:
+        # The verdict is the whole run's, identity or not.
         if problems:
             log("doctor: verdict: %d problem(s) need action" % problems)
         elif d.opted_out_origin:

@@ -1990,6 +1990,101 @@ has "Jane\\x1b[2JDoe" "doctor escapes a control character"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "doctor printed a raw escape byte: $out"
 ok
 
+# --- doctor: the plugin submodules, read from files, and the early exit's scope
+# A fixture checkout of its own, so each submodule state is staged without
+# touching this one: install.sh and lib/ as they are now, committed with one
+# real submodule under zsh/plugins/ from a local bare repository. fx runs the
+# fixture's own git commands (never doctor) with no ambient config.
+fx() {
+  GIT_CONFIG_GLOBAL=/dev/null git -c user.name=t -c user.email=t@t -c commit.gpgsign=false \
+    -c protocol.file.allow=always "$@"
+}
+# mkcheckout DIR - install.sh and lib/ of this tree, in DIR (no git there).
+mkcheckout() {
+  mkdir -p "$1/lib"
+  cat "$installer" > "$1/install.sh"; chmod u+x "$1/install.sh"
+  for f in "$repo_root"/lib/*.sh "$module"; do cat "$f" > "$1/lib/${f##*/}"; done
+}
+fx init -q --bare -b main "$work/plug.git"
+fx init -q -b main "$work/plug-wt"
+echo one > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" add p.zsh; fx -C "$work/plug-wt" commit -qm one
+pin="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+echo two > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" commit -qam two
+bump="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+fx -C "$work/plug-wt" push -q "$work/plug.git" "$pin:refs/heads/main" "$bump:refs/heads/next"
+co="$work/co"
+fx init -q -b main "$co"; mkcheckout "$co"
+fx -C "$co" submodule add -q "$work/plug.git" zsh/plugins/demo
+fx -C "$co" add -A; fx -C "$co" commit -qm fixture
+pdoc() { rc=0; out="$("$1/install.sh" doctor "${@:2}" 2>&1)" || rc=$?; }
+dhealthy
+# Healthy: `submodule add` leaves HEAD a ref (refs/heads/main), resolved loose.
+pdoc "$co"; expect_rc 0 "doctor, plugin at its pin"; [ -z "$out" ] || fail "doctor, plugin at its pin: $out"
+pdoc "$co" --verbose; expect_rc 0 "doctor --verbose, plugin at its pin"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "doctor names a plugin at its pin"
+# The same, with the ref packed.
+fx -C "$co/zsh/plugins/demo" pack-refs --all
+pdoc "$co" --verbose; expect_rc 0 "doctor, plugin ref packed"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "doctor resolves a packed ref"
+# A local bump is a note, never a problem, and its command returns to the pin.
+fx -C "$co/zsh/plugins/demo" fetch -q origin next; fx -C "$co/zsh/plugins/demo" checkout -q "$bump"
+snap_co="$(HOME="$co" snap)"
+pdoc "$co"; expect_rc 0 "doctor, plugin bumped"; [ -z "$out" ] || fail "doctor, plugin bumped: $out"
+pdoc "$co" --verbose; expect_rc 0 "doctor --verbose, plugin bumped"
+fix="git -C $co -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update -- zsh/plugins/demo"
+has "doctor: plugins: note: zsh/plugins/demo is at ${bump:0:12}, not its pin ${pin:0:12}: a local change, left as it is - to return to the pin, run: $fix" "doctor notes a local bump"
+lacks "dotfiles-upgrade" "a moved pin is not sent to dotfiles-upgrade"
+[ "$(HOME="$co" snap)" = "$snap_co" ] || fail "doctor wrote in the checkout"
+GIT_CONFIG_GLOBAL=/dev/null $fix >/dev/null 2>&1 || fail "the bumped plugin's fix did not run"
+pdoc "$co" --verbose; has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "the bump's fix returns to the pin"
+# A HEAD naming a ref its files do not hold (a reftable store reads so).
+printf 'ref: refs/heads/nowhere\n' > "$co/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$co" --verbose; expect_rc 0 "doctor, unresolved plugin HEAD"
+has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at: $co/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo/HEAD names refs/heads/nowhere, which its files do not resolve" "doctor notes an unresolved HEAD"
+# A non-recursive clone leaves the directory empty: a problem, fixed by install.
+fx clone -q "$co" "$work/co2"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin not initialized"; one "doctor, plugin not initialized"
+has "doctor: plugins: zsh/plugins/demo is not initialized, so zsh starts without it - run: $work/co2/install.sh install" "doctor names an uninitialized plugin and install"
+# A config.local git would block on, and git refused outright, stop only the
+# identity checks: the plugin line still comes, and so does the verdict.
+mv "$local_cfg" "$work/plug_local"; mkfifo "$local_cfg"
+bounded_run 20 "$work/doctor.out" "$work/co2/install.sh" doctor --verbose || fail "bounded_run could not start (no job control)"
+[ "$br_hung" -eq 0 ] && [ "$br_stuck" -eq 0 ] || fail "doctor hung on a FIFO config.local (plugins)"
+rc="$br_rc"; out="$(cat "$work/doctor.out")"
+expect_rc 1 "doctor, FIFO config.local and a plugin not initialized"
+has "doctor: git: $local_cfg is not a regular file" "the FIFO line still comes first"
+has "doctor: plugins: zsh/plugins/demo is not initialized" "a FIFO config.local stops only the identity checks"
+has "doctor: python3: " "a FIFO config.local leaves python3 checked"
+lacks "doctor: values:" "a FIFO config.local skips the identity checks"
+has "doctor: verdict: 2 problem(s) need action" "the verdict counts the early exit and the plugin"
+rm -f "$local_cfg"; mv "$work/plug_local" "$local_cfg"
+# The second runner reads the checkout with every ambient config scrubbed: a
+# global config git cannot parse, a malformed GIT_CONFIG_PARAMETERS and a
+# GIT_DIR elsewhere stop the identity checks, never the plugin check.
+printf '[broken\n' > "$work/broken.gitconfig"
+rc=0; out="$(GIT_CONFIG_GLOBAL="$work/broken.gitconfig" GIT_CONFIG_PARAMETERS="'bogus" GIT_DIR="$work/nowhere" \
+  "$co/install.sh" doctor --verbose 2>&1)" || rc=$?
+expect_rc 1 "doctor, git config unreadable"
+has "doctor: git: not reading the git config: " "an unreadable global config stops the identity checks"
+has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at" "the plugin check runs under a broken global config"
+has "doctor: verdict: 1 problem(s) need action" "the verdict follows the early exit"
+# A gitfile naming a gitdir that is gone: a problem, and its fix works.
+fx -C "$work/co2" submodule update -q --init
+printf 'gitdir: ../../../.git/modules/gone\n' > "$work/co2/zsh/plugins/demo/.git"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin gitdir gone"; one "doctor, plugin gitdir gone"
+has "doctor: plugins: cannot read which commit zsh/plugins/demo is at ($work/co2/zsh/plugins/demo/../../../.git/modules/gone/HEAD: " "doctor names an unreadable plugin"
+has " - remove that directory, then run: $work/co2/install.sh install" "the unreadable plugin's fix"
+rm -rf "$work/co2/zsh/plugins/demo"
+fx -C "$work/co2" submodule update -q --init || fail "removing the unreadable plugin did not let it initialize again"
+pdoc "$work/co2"; expect_rc 0 "doctor, plugin initialized again"; [ -z "$out" ] || fail "doctor after the fix: $out"
+# Not a git checkout, even inside a repository: the pins are not listed, and
+# the outer repository is never read in its place.
+fx init -q -b main "$work/outer"; mkcheckout "$work/outer/co3"
+pdoc "$work/outer/co3"; expect_rc 1 "doctor, not a git checkout"; one "doctor, not a git checkout"
+has "doctor: plugins: cannot list the plugin pins of $work/outer/co3 (fatal: not a git repository" "doctor names a checkout that is not one"
+has " - check that it is a git checkout: git -C $work/outer/co3 ls-tree HEAD" "the not-a-checkout fix"
+ok
+
 # --- --rotate and identity on an opted-out host -------------------------------
 fresh
 printf 'me@example.com valid-before="20000101" %s\nme@example.com %s\n' "$K1" "$K2" > "$signers"

@@ -1154,6 +1154,8 @@ MESSAGE_FUNCS = {
     "auto": (1,), "run": (1,),  # (exit status, the one line's suffix)
     "select": (1,),  # (chosen, the lines that say why none was)
     "read_small_file": (1,), "load_revocation": (1,),  # (data, why not)
+    "_first_line": (1,),  # (line, why not)
+    "submodule_commit": (2,),  # (state, commit, why)
 }
 MESSAGE_METHODS = {
     "why_no_candidate": None, "why_invalid": None,
@@ -1600,6 +1602,56 @@ EVASIONS = (
 )
 
 
+def submodule_units(mod, scratch):
+    """submodule_commit() on the shapes tests/host_identity_test.sh does not
+    stage through a real submodule: each read from files, none hanging."""
+    base = os.path.join(scratch, "submodules")
+    sha = "a" * 40
+
+    def sub(name):
+        path = os.path.join(base, name)
+        os.makedirs(path)
+        return path
+
+    def write(path, text):
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    # A .git directory (a submodule cloned before git absorbed gitdirs).
+    p = sub("dotgit-dir")
+    os.mkdir(os.path.join(p, ".git"))
+    write(os.path.join(p, ".git", "HEAD"), sha + "\n")
+    check(mod.submodule_commit(p) == (mod.AT, sha, None), "a .git directory's detached HEAD is read")
+    # A SHA-256 commit id is one too.
+    write(os.path.join(p, ".git", "HEAD"), "b" * 64 + "\n")
+    check(mod.submodule_commit(p) == (mod.AT, "b" * 64, None), "a SHA-256 HEAD is read")
+    # A ref outside refs/, or climbing out of the gitdir, is never followed.
+    for ref in ("ref: ../../../etc/passwd", "ref: refs/../../x", "ref: HEAD"):
+        write(os.path.join(p, ".git", "HEAD"), ref + "\n")
+        check(mod.submodule_commit(p)[0] == mod.UNREADABLE, "a HEAD naming %r is unreadable, not followed" % ref)
+    # A gitfile that names no gitdir.
+    p = sub("bad-gitfile")
+    write(os.path.join(p, ".git"), "not a gitfile\n")
+    state, _, why = mod.submodule_commit(p)
+    check(state == mod.UNREADABLE and "does not name a gitdir" in why, "a gitfile without gitdir: is unreadable")
+    # A FIFO where .git or HEAD should be answers at once (read_small_file()).
+    p = sub("fifo")
+    os.mkfifo(os.path.join(p, ".git"))
+    started = time.time()
+    state, _, why = mod.submodule_commit(p)
+    check(state == mod.UNREADABLE and "not a regular file" in why and time.time() - started < 5,
+          "a FIFO .git is unreadable at once, never waited on")
+    # An empty directory is an uninitialized submodule; so is one deleted.
+    check(mod.submodule_commit(sub("empty")) == (mod.ABSENT, None, None), "an empty directory is not initialized")
+    check(mod.submodule_commit(os.path.join(base, "gone"))[0] == mod.ABSENT, "a missing directory is not initialized")
+    # A packed ref that names another ref's commit is not taken for HEAD's.
+    p = sub("packed")
+    os.mkdir(os.path.join(p, ".git"))
+    write(os.path.join(p, ".git", "HEAD"), "ref: refs/heads/main\n")
+    write(os.path.join(p, ".git", "packed-refs"), "# pack-refs with: peeled\n%s refs/heads/mainline\n" % sha)
+    check(mod.submodule_commit(p)[0] == mod.UNRESOLVED, "a packed ref is matched by its whole name")
+
+
 def static_units(source):
     found = unescaped_values(source)
     check(not found, "every value lib/host_identity.py puts into a string is escaped (unescaped: %r)" % found)
@@ -1698,7 +1750,7 @@ def main(argv):
     saved_global = os.environ.pop("GIT_CONFIG_GLOBAL", None)
     try:
         host = mod.Host(scratch, os.path.join(scratch, "config.local"), "INSTALLER")
-        d = mod.Doctor(host)
+        d = mod.Doctor(host, None)
         d.git()
     finally:
         mod.git = real_git
@@ -2185,6 +2237,8 @@ def main(argv):
     finally:
         os.environ.clear()
         os.environ.update(saved)
+
+    submodule_units(mod, scratch)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0

@@ -894,14 +894,21 @@ The identity step and `install.sh doctor` live in `lib/host_identity.py`;
    only reads: a tool under a timeout, a file through `read_small_file()`
    (non-blocking, size-capped). It states each problem as one line with its
    fix, and passes `signing=True` only for a problem that matters to signing
-   alone, which an opted-out host sees as a note.
+   alone, which an opted-out host sees as a note. Its `CHECKS` entry says
+   whether it reads the git config (through `git()` or a `Host` read): such
+   a check is skipped when that config cannot be read safely, and every
+   other check must not depend on it. git in the checkout itself goes
+   through `repo_git()` only, which leaves the global and system config
+   out, and never runs inside a plugin submodule.
 4. A change to how the allowed-signers file is read needs a vector in
    `tests/fixtures/allowed_signers/verify-git.txt`.
    `tests/host_identity_test.sh` checks every vector against `ssh-keygen` in
    four time zones, and runs the generated differential leg of
    `tests/host_identity_conformance.py` once.
 5. Run `STRICT=1 bash tests/host_identity_test.sh`, then
-   `make local-ci STRICT=1`.
+   `make local-ci STRICT=1`. The suite runs `doctor` from this checkout, so
+   its plugin submodules must be initialized (`git submodule update
+   --init`), as CI's recursive checkout has them.
 
 ## Deferred decisions
 
@@ -911,7 +918,7 @@ is until its trigger fires. The ones about the framework's behaviour are in
 
 | Decision | Kept for now | Reopen when |
 | --- | --- | --- |
-| Extend `install.sh doctor` to the framework's other dependencies (gh auth and its scopes, Homebrew, the pinned plugins, and the like) | `doctor` checks the identity and signing path and the tools it uses: git, python3, ssh-keygen, the ssh-agent | A pull request opens that changes `CHECKS` in `lib/host_identity.py`, or a host breaks on one of those dependencies without a `doctor` line naming it |
+| Extend `install.sh doctor` to gh (its login, token and scopes) and Homebrew | `doctor` checks the identity and signing path, the tools it uses (git, python3, ssh-keygen, the ssh-agent) and the plugin submodules | A pull request opens that adds a gh or Homebrew check to `CHECKS` in `lib/host_identity.py`, or a host breaks on gh or Homebrew without a `doctor` line naming it |
 | Test two identity runs writing `config.local` at once | One writer per run: a temporary file and a rename, and the first `.bak` is never replaced; no concurrency test | A host reports a corrupt `config.local` or a second `.bak` |
 | Test the identity step's macOS-only paths on Linux: a case-insensitive APFS spelling of `TMPDIR`, `/var` as a link to `/private/var`, and an execute-only or deleted working directory | The macOS CI legs run `tests/host_identity_test.sh`: every case there runs under the macOS `TMPDIR` in `/var/folders`, a case-insensitive spelling of `TMPDIR` is run there and skipped elsewhere, and an execute-only working directory must either work or give the one refusal for it. A deleted working directory is not tested | The first macOS run of the identity step that reports a refusal, or a macOS CI leg that fails one of these cases |
 | Hold the test `.py` files to the Python 3.9 floor, in `tests/host_identity_units.py` and the Makefile `py-syntax` leg | The floor is checked for `lib/host_identity.py` only | A test `.py` file uses syntax newer than 3.9, or CI gains a 3.9 leg |
