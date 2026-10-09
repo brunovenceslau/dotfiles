@@ -1088,8 +1088,12 @@ cat >"$work/r/docs/spans2.md" <<'MD'
 
 ## \` escaped
 
+## [`a](u`)
+
+## ![`a](u`) x
+
 [1](#a) [2](#a-b) [3](#a-c) [4](#a-c-1) [5](#pad-x) [6](#ab-foo)
-[7](#unclosed--tick) [8](#-escaped)
+[7](#unclosed--tick) [8](#-escaped) [9](#au) [10](#au-x)
 MD
 git -C "$work/r" add -A
 run
@@ -1116,6 +1120,14 @@ expect_broken README.md '<b title="`">x</b> <a id="p"></a> `y`
 
 [l](#p)' 'no such anchor in README\.md: #p' \
   "a backtick in another tag's value pairs with a later one (known miss)"
+# Pinned miss: in a body link a backtick in the destination can pair with a
+# later one, so the link is hidden and the anchor after it is lost.
+new_tree
+printf '%s\n' '[a](docs/gone-bt.md`) `b` <a id="k"></a>' >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a backtick in a body link destination hides the link, a known miss (exit $rc): $out"
+ok "a backtick in a body link's destination pairs with a later one (known miss, pinned)"
 expect_broken README.md '<a x<img id="q">
 
 [l](#q)' 'no such anchor in README\.md: #q' \
@@ -1152,6 +1164,13 @@ git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "controls around an href, tabs and newlines inside it, and an empty href must pass (exit $rc): $out"
 ok "an href with C0 references around it, tabs and newlines inside it, or nothing but spaces passes"
+# A raw C0 byte (U+0001, U+001F) around the value, not a reference to one.
+new_tree
+printf '<a href="\001guide.md\037">1</a>\n' >"$work/r/docs/raw-c0.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "raw C0 bytes around an href must be stripped (exit $rc): $out"
+ok "an href with raw C0 bytes around it passes"
 expect_broken README.md '<a href="&#xA0;docs/guide.md">x</a>' \
   'no such tracked file or directory: ' \
   "a no-break space is not stripped from an href, so the target is reported"

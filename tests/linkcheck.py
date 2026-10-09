@@ -533,9 +533,10 @@ def _code_spans(text):
     tighter than link syntax (CommonMark 6.1) except where a link's
     destination or title holds the backtick: `[a](u`) `b`` is a link and a
     span, not a span over `) `. So the spans are found once, a link or
-    image that opens outside them marks its destination and title as a zone
-    where no backtick opens or closes anything, and they are found again
-    with the zones hidden."""
+    image that opens outside them, with no span opening in its text (that span
+    takes the `](`: `[`a](u`)` is `a](u` in code), marks its destination and
+    title as a zone where no backtick opens or closes anything, and they are
+    found again with the zones hidden."""
     spans = [m for m in _SPAN.finditer(text) if m.group(1)]
     if not spans:
         return []
@@ -546,8 +547,12 @@ def _code_spans(text):
     for rx in (HEADING_IMAGE, HEADING_LINK):
         for m in rx.finditer(text):
             k = bisect.bisect_right(starts, m.start()) - 1
-            if k < 0 or m.start() >= spans[k].end():
-                zones.append((m.end(1) + 1, m.end()))
+            if k >= 0 and m.start() < spans[k].end():
+                continue   # the link opens inside a span: code
+            j = k + 1
+            if j < len(starts) and starts[j] < m.end(1):
+                continue   # a span opens in its text and takes the `](`
+            zones.append((m.end(1) + 1, m.end()))
     pieces, pos = [], 0
     for a, b in sorted(zones):
         if a >= pos:

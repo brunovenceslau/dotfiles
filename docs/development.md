@@ -480,11 +480,13 @@ link-convention change.
   `-1`, `-2` in order, the way github-slugger numbers it. An explicit
   anchor counts too: the `id` or `name` of an `<a>` tag, unless the tag sits
   in a code span, where it is text. Link and image markup inside a heading's
-  code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. A backtick
-  opens a code span only outside a link's destination and title and when no
-  backslash escapes it, and not inside an `<a>` or `<img>` tag. A backtick
-  in any other tag's quoted value is a known miss: it can still pair with a
-  later one. An anchor into any other file, such as a `#L10` line anchor, is
+  code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. In a
+  heading, a backtick opens a code span only outside a link's destination
+  and title. In any text, a backtick opens a span only when no backslash
+  escapes it, and not inside an `<a>` or `<img>` tag. A backtick in the
+  destination of a body link is a known miss: it can pair with a later one
+  and hide the link. A backtick in any other tag's quoted value is a known
+  miss too. An anchor into any other file, such as a `#L10` line anchor, is
   not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
