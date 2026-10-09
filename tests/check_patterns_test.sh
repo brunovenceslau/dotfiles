@@ -3466,17 +3466,7 @@ SHAPES
 # With the branch it takes 0.1 s. Each shape is one link
 # over the limit, exempt only as ONE whole link, so the verdict is checked
 # beside the bound: a bound alone would pass a gate that exits early and wrong.
-# What each shape pins: every shape but backslash-pair and unclosed trips
-# that two-character skip (a hang before skipcode's guard, a fast exit 2
-# since; the guard case below pins that); run-literal catches a mutant where
-# the escaped run still opens its own span; run-rest catches a mutant where the REST of the run opens a
-# span (the CommonMark reading, length L-1, which pairs with the next run of
-# that length); after-run pins that the walk resumes AT the character after
-# the run (a skip one too far jumps over the `]`); backslash-pair pins that
-# `\\` is consumed as a pair, so the backtick after it is real (a mutant that
-# does not flips it to a fail); unclosed pins skipcode's unclosed-run
-# fallback (`return i + rl[k]`), it stays green under the revert.
-# other_arm FILE - sets other=1 when FILE holds a check-patterns line that is
+# other_arm FILE - succeeds when FILE holds a check-patterns line that is
 # neither arm 15's message nor a SKIP. Prefix tests on fixed strings: a grep
 # -v on the message hid any other arm's line that merely CONTAINED $md_msg or
 # SKIP, and a final line without a newline is read too.
@@ -3485,19 +3475,31 @@ other_arm() {
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "$md_msg"* | "check-patterns: SKIP "*) ;;
-      "check-patterns:"*) other=1 ;;
+      "check-patterns:"*) return 0 ;;
     esac
   done < "$1"
+  return 1
 }
 # the check itself, red-green: a second arm's line (even last, unterminated,
 # or quoting arm 15's message) is seen; arm 15's own lines and SKIPs are not.
 printf '%s\n%s\n' "$md_msg x" "check-patterns: SKIP y" > "$work/oa1.out"
-other=0; other_arm "$work/oa1.out"; [ "$other" = 0 ] && ok || fail "other_arm: arm 15 and SKIP lines alone must not count"
+if other_arm "$work/oa1.out"; then fail "other_arm: arm 15 and SKIP lines alone must not count"; else ok; fi
 printf '%s\n%s' "$md_msg x" "$curl_msg" > "$work/oa2.out"
-other=0; other_arm "$work/oa2.out"; [ "$other" = 1 ] && ok || fail "other_arm: an unterminated last line of another arm must count"
+if other_arm "$work/oa2.out"; then ok; else fail "other_arm: an unterminated last line of another arm must count"; fi
 printf 'check-patterns: other arm, quoting %s and SKIP \n' "$md_msg" > "$work/oa3.out"
-other=0; other_arm "$work/oa3.out"; [ "$other" = 1 ] && ok || fail "other_arm: a line quoting the message mid-line must count"
+if other_arm "$work/oa3.out"; then ok; else fail "other_arm: a line quoting the message mid-line must count"; fi
 
+# What each shape pins: every shape but backslash-pair and unclosed trips
+# that two-character skip (a hang before skipcode's guard, a fast exit 2
+# since; the guard case below pins that); run-literal catches a mutant where
+# the escaped run still opens its own span; run-rest catches a mutant where
+# the REST of the run opens a span (the CommonMark reading, length L-1, which
+# pairs with the next run of that length); after-run pins that the walk
+# resumes AT the character after the run (a skip one too far jumps over the
+# `]`); backslash-pair pins that
+# `\\` is consumed as a pair, so the backtick after it is real (a mutant that
+# does not flips it to a fail); unclosed pins skipcode's unclosed-run
+# fallback (`return i + rl[k]`), it stays green under the revert.
 i=0
 while IFS='|' read -r want shape; do
   i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"
@@ -3525,8 +3527,11 @@ while IFS='|' read -r want shape; do
     grep -qF "$md_msg" "$work/mdw-esc-$i.out" && ok \
       || fail "arm 15 escaped backtick: $shape failed without the arm 15 message"
     # and no other arm fired beside it
-    other=0; other_arm "$work/mdw-esc-$i.out"
-    [ "$other" = 0 ] && ok || fail "arm 15 escaped backtick: $shape tripped another arm"
+    if other_arm "$work/mdw-esc-$i.out"; then
+      fail "arm 15 escaped backtick: $shape tripped another arm"
+    else
+      ok
+    fi
   fi
 done <<'SHAPES'
 pass|run
@@ -3592,6 +3597,19 @@ bounded_run 20 "$work/mdw-guard-flush.out" env STRICT= "$mut" "$r" \
 case "$(cat "$work/mdw-guard-flush.out")" in
   *"(${r}/docs/a.md:3, "*) ok ;;
   *) fail "arm 15 guard flush: the message must name docs/a.md:3: $(cat "$work/mdw-guard-flush.out")" ;;
+esac
+
+# The END path: an unclosed front matter in the LAST file is flushed in END,
+# where FNR is the file's last line, not the held line's. Line 3 of 4 below.
+r="$work/mdw-guard-end"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n[%s \\`` %s](%s)\nshort\n' "$md40" "$md40" "$_md_long_token" > "$r/docs/a.md"
+bounded_run 20 "$work/mdw-guard-end.out" env STRICT= "$mut" "$r" \
+  || fail "arm 15 guard end: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && [ "$br_rc" = 2 ] && ok \
+  || fail "arm 15 guard end: expected exit 2 inside the bound (rc $br_rc, hung $br_hung)"
+case "$(cat "$work/mdw-guard-end.out")" in
+  *"(${r}/docs/a.md:3, "*) ok ;;
+  *) fail "arm 15 guard end: the message must name docs/a.md:3: $(cat "$work/mdw-guard-end.out")" ;;
 esac
 
 # runs() clears lastrun on every line. A stale entry names a run index of an
