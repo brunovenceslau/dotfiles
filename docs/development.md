@@ -478,8 +478,16 @@ link-convention change.
   turned into `-`. Text inside a code span is kept as written, so
   `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
   `-1`, `-2` in order, the way github-slugger numbers it. An explicit
-  anchor counts too: the `id` or `name` of an `<a>` tag. An anchor into any
-  other file, such as a `#L10` line anchor, is not checked.
+  anchor counts too: the `id` or `name` of an `<a>` tag, unless the tag sits
+  in a code span, where it is text. Link and image markup inside a heading's
+  code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. In a
+  heading, a backtick opens a code span only outside a link's destination
+  and title. In any text, a backtick opens a span only when no backslash
+  escapes it, and not inside an `<a>` or `<img>` tag. A backtick in the
+  destination or title of a body link is a known miss: it can pair with a
+  later one, which hides the link and any anchor between the two backticks.
+  A backtick in any other tag's quoted value is a known miss too. An
+  anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
 - Front matter, fenced code blocks and HTML comments (both running to the end
@@ -490,9 +498,16 @@ link-convention change.
   tag is read much the way GitHub's HTML5 parser reads an HTML block, since
   a link it renders is live: an attribute may follow a quoted value with no
   space, a name may open with a digit, a `>` inside a quoted attribute value
-  does not end the tag, and one that crosses a blank line is text. Three
-  shapes HTML5 reads as live links are known misses: `<a/href="t.md">`,
-  `<a =x href="t.md">` and `<a x<y href="t.md">`. A link whose text wraps
+  does not end the tag, and one that crosses a blank line is text. A `/`
+  between attributes (`<a/href="t.md">`), a name opening with `=`
+  (`<a =x href="t.md">`) and a `<` in a name (`<a x<y href="t.md">`) are
+  read as HTML5 reads them. One divergence is kept: a `<` that opens
+  another `<a` or `<img` inside a name (`<a x<a href="t.md">`) ends the
+  tag, so the inner tag is read on its own: its `href` is still checked,
+  but an `id` or `name` after the inner opener is credited to the inner tag
+  and not to the outer one. An `href` or `src` loses its leading and
+  trailing controls and spaces before it is resolved, and every tab and
+  newline inside it, as the URL standard strips them. A link whose text wraps
   across lines is still found, and a CRLF file reads exactly like its LF
   twin. A link destination ends at ASCII whitespace only, may hold
   balanced parentheses (up to 3 levels deep), backslash escapes and
@@ -501,13 +516,18 @@ link-convention change.
   its own delimiter escaped. Neither has a length limit. Every other URL
   scheme is out of scope, since the gate never touches the network.
 
-It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
-bytes escaped as `\xHH` and the characters that reorder or hide text (bidi
-controls, zero-width characters, the soft hyphen) as `\uHHHH`, and the tag
-characters (U+E0000 to U+E007F) as `\UHHHHHHHH`. It
-exits 2 when it cannot run: the root is not a checkout's toplevel, git fails
-or warns, or a file is unreadable, not UTF-8, or reached through a symlink
-swapped into the working tree.
+It exits 1 on a broken link, printing `FILE:LINE: reason: target`. The target
+is printed through `tty_safe`, which escapes by Unicode category (see
+`ESCAPED_CATEGORIES` in the script): control bytes as `\xHH`, and every
+character of a format, line or paragraph separator, private-use, surrogate
+or unassigned category as `\uHHHH` (`\UHHHHHHHH` past U+FFFF). Characters
+outside those categories print raw even when they look blank or alike (a
+space separator such as U+00A0, a variation selector), so a name can still
+resemble another. It exits 2 when it cannot run: the root is not a
+checkout's toplevel, git fails or warns, or a file is unreadable, not UTF-8,
+over `MAX_FILE_BYTES` (1 MiB, since the worst-case scan costs seconds per
+MB), or reached through a symlink swapped into the working tree (or no longer
+a regular file).
 `tests/linkcheck_test.sh` proves each rule against a fixture.
 
 ### What `make commit-identity` checks

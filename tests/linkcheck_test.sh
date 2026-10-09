@@ -635,14 +635,116 @@ expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
   'docs/a\\u202eb\.md' \
   "a bidi override in a report prints as \\uHHHH"
 
+# tty_safe escapes by Unicode category (ESCAPED_CATEGORIES in the gate), so the
+# table below holds the boundaries of each range that matters: the last
+# printable and first escaped character on each side. Every code point here
+# keeps its category from Python 3.9 on (unicodedata follows the running
+# Python's Unicode version, and only Cn moves, so the unassigned ones are
+# noncharacters or blocks the standard reserves for good). The expectation is
+# written out, never computed with the gate's own rule.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "tty_safe: the escape table does not hold"
+import sys
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+
+RAW = None
+TABLE = [
+    # C0 and C1: TAB stays, LF and DEL escape, the C1 block ends at U+009F.
+    (0x08, "\\x08"), (0x09, RAW), (0x0A, "\\x0a"), (0x1F, "\\x1f"),
+    (0x20, RAW), (0x7E, RAW), (0x7F, "\\x7f"), (0x80, "\\x80"),
+    (0x9F, "\\x9f"), (0xA0, RAW), (0xA1, RAW),
+    # Cf, with printable neighbours: the soft hyphen, the Arabic letter mark.
+    (0xAC, RAW), (0xAD, "\\u00ad"), (0xAE, RAW), (0xE9, RAW), (0x4E2D, RAW),
+    (0x0301, RAW),
+    (0x061B, RAW), (0x061C, "\\u061c"), (0x0600, "\\u0600"),
+    (0x180E, "\\u180e"),
+    # General punctuation: spaces stay, zero-width and bidi controls escape.
+    (0x200A, RAW), (0x200B, "\\u200b"), (0x200F, "\\u200f"), (0x2010, RAW),
+    (0x2027, RAW), (0x2028, "\\u2028"), (0x2029, "\\u2029"),
+    (0x202A, "\\u202a"), (0x202E, "\\u202e"), (0x202F, RAW), (0x205F, RAW),
+    (0x2060, "\\u2060"), (0x2064, "\\u2064"), (0x2065, "\\u2065"),
+    (0x2066, "\\u2066"), (0x2069, "\\u2069"), (0x206A, "\\u206a"),
+    (0x206F, "\\u206f"), (0x2070, RAW),
+    # Cn, Co and Cs on the BMP (U+FFFF is the last `\u` escape), and the BOM.
+    # A combining mark (Mn, U+0301) is printable and stays raw.
+    (0x0378, "\\u0378"), (0xDFFF, "\\udfff"), (0xE000, "\\ue000"),
+    (0xF8FF, "\\uf8ff"), (0xFEFF, "\\ufeff"), (0xFFF9, "\\ufff9"),
+    (0xFFFE, "\\ufffe"), (0xFFFF, "\\uffff"),
+    # A lone surrogate is Cs, and DC80-DCFF is an undecodable byte, `\xHH`.
+    (0xD800, "\\ud800"), (0xDC7F, "\\udc7f"), (0xDC80, "\\x80"),
+    (0xDCFF, "\\xff"), (0xDD00, "\\udd00"),
+    # Past U+FFFF the escape is `\U` plus eight digits, never `\u` plus five.
+    (0x1D173, "\\U0001d173"), (0x1F600, RAW), (0xE0000, "\\U000e0000"),
+    (0xE0001, "\\U000e0001"), (0xE0020, "\\U000e0020"),
+    (0xE007F, "\\U000e007f"), (0xE0080, "\\U000e0080"),
+    (0xF0000, "\\U000f0000"), (0x10FFFF, "\\U0010ffff"),
+]
+bad = []
+for cp, want in TABLE:
+    got = linkcheck.tty_safe(chr(cp))
+    if got != (chr(cp) if want is RAW else want):
+        bad.append("U+%04X: %r" % (cp, got))
+if bad:
+    sys.exit("; ".join(bad))
+PY
+ok "tty_safe escapes by Unicode category and leaves printable non-ASCII raw, at every range edge"
+
+# A tag whose quote never closes is text, not a link: the same line's other
+# links are still read, and the gate does not read to the end of the file for
+# the quote. A newline right after the opening quote belongs to the value, so
+# a broken target there is still reported.
+new_tree
+printf '%s\n' 'A <a href="docs/gone-unclosed.md and [x](docs/gone-after.md).' \
+  >"$work/r/docs/unclosed.md"
+printf '%s\n' 'A <a href="docs/gone-blank.md' '' 'closes later">x</a>' \
+  >"$work/r/docs/quote-blank.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'docs/unclosed\.md:1: .*docs/gone-after\.md' <<<"$out" \
+  && ! grep -q 'gone-unclosed' <<<"$out" && ! grep -q 'gone-blank' <<<"$out" \
+  || fail "a tag with an unclosed quote, or a quote spanning a blank line, must be text and leave other links read (exit $rc): $out"
+ok "a tag with an unclosed quote, or one crossing a blank line, is text, and the link after it is still checked"
+new_tree
+printf '%s\n' 'A <a href="docs/gone-lf.md' '">x</a>' >"$work/r/docs/quote-lf.md"
+printf '%s\n' 'A <a href="' 'docs/gone-lf2.md">x</a>' >"$work/r/docs/quote-lf2.md"
+printf "%s\n" "A <a href='" "docs/gone-lf3.md'>x</a>" >"$work/r/docs/quote-lf3.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'docs/quote-lf\.md:1: .*gone-lf\.md' <<<"$out" \
+  && grep -q 'docs/quote-lf2\.md:1: .*gone-lf2\.md' <<<"$out" \
+  && grep -q 'docs/quote-lf3\.md:1: .*gone-lf3\.md' <<<"$out" \
+  || fail "a newline inside a quoted href must not hide its target (exit $rc): $out"
+ok "a newline inside a quoted href, even right after the opening quote, still reports a broken target"
+
+# A heading's code span is bounded at 2048 characters, for speed: one of
+# exactly that length renders verbatim, one character longer is prose, so
+# its emphasis underscores go (the bound is a deliberate cap, pinned here so
+# a change to it is a decision). The span is `_x..._`: emphasis tells the
+# two readings apart in the slug.
+new_tree
+python3 -I - "$work/r/docs" <<'PY'
+import os, sys
+d = sys.argv[1]
+for name, n in (("span-in.md", 2048), ("span-out.md", 2049)):
+    inner = "_" + "x" * (n - 2) + "_"
+    slug = inner if n == 2048 else "x" * (n - 2)
+    with open(os.path.join(d, name), "w") as f:
+        f.write("# `%s`\n\n[self](#%s)\n" % (inner, slug))
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a heading code span of 2048 characters is verbatim, of 2049 prose (exit $rc): $out"
+ok "a heading's code span is read verbatim up to 2048 characters and as prose past it"
+
 # Hostile input stays near-linear: many unclosed comment openers, tag
 # openers with no `>`, unclosed quotes, backtick runs of every length and
-# unclosed brackets, 100 KB to 2.2 MB each, in prose and in headings (a link
-# with an #anchor into each file makes the heading pass read it too). The
-# previous regexes were quadratic here (measured: one 200 KB line of
-# `[a](b` alone, or of `<a `, outlived 20 s, and a single 200 KB heading of
-# `[` or of `[a](x` did too), while every scan now takes well under a second,
-# so the 30 s bound separates the two with room for a slow runner.
+# unclosed brackets, 100 KB to just under the 1 MiB file cap each, in prose
+# and in headings (a link with an #anchor into each file makes the heading
+# pass read it too). The previous regexes were quadratic here (measured: one
+# 200 KB line of `[a](b` alone, or of `<a `, outlived 20 s, and a single
+# 200 KB heading of `[` or of `[a](x` did too), while every scan now takes
+# well under a second, so the 60 s bound separates the two with room for a
+# slow runner.
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
 new_tree
@@ -653,7 +755,7 @@ shapes = {
     "h1.md": "<!-- x " * 30000,
     "h2.md": '<a title="x ' * 18000,
     "h3.md": "<img href='" * 18000,
-    "h4.md": "".join("`" * k + " x " for k in range(1, 1500)),
+    "h4.md": "".join("`" * k + " x " for k in range(1, 1400)),
     "h5.md": "[" * 100000,
     "h6.md": "<a " * 60000 + ">",
     "h7.md": "[a](b" * (n // 5),
@@ -665,7 +767,7 @@ shapes = {
     "h13.md": "# " + "[a](x" * (n // 5),
     "h14.md": "# " + "[" * n,
     "h15.md": "# " + "<" * (2 * n),
-    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 2100)),
+    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 1400)),
     "h17.md": "[a][" * (n // 4),
     # A heading link or image whose destination is unclosed after a run of
     # spaces and then a character (atx_text strips trailing spaces, so the
@@ -710,6 +812,20 @@ shapes = {
     "h46.md": '<a x="y"' * (n // 8),
     "h47.md": "<a 1" * (n // 4),
     "h48.md": "[a](" + "&amp;" * (n // 5),
+    # Tags read past a `/`, a leading `=` and a `<` in a name, none closed.
+    "h49.md": "<a/" * (n // 3),
+    "h50.md": "<a =x" * (n // 5),
+    "h51.md": "<a x<y" * (n // 6),
+    "h52.md": "<a x<a " * (n // 7),
+    # One tag with a long run of `name =value` pairs: without the lookahead
+    # in _hattr each pair parses two ways and the scan is exponential.
+    "h53.md": "<a " + "x =y " * (n // 5),
+    "h54.md": "<a x</ =" * (n // 8),
+    "h55.md": "<a href=x=" * (n // 10),
+    "h56.md": "<a href=`x " * (n // 11),
+    "h57.md": "`<a t=\"`" * (n // 8) + "\\`" * (n // 4),
+    "h58.md": "[a](u`) `" * (n // 9),
+    "h59.md": "# [a](u`) `b` ![i](v`) `" * (n // 25),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -718,13 +834,130 @@ with open(os.path.join(d, "hostile-links.md"), "w") as f:
         f.write("[x](%s#x)\n" % name)
 PY
 git -C "$work/r" add -A
-bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
+# 60 s, not 30: measured 5.9 to 7.6 s here at load 1.8, so 30 s gave a
+# 1.3x to 1.7x margin on a runner three times slower.
+bounded_run 60 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: bounded_run could not turn job control on"
 [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
-  || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
+  || fail "hostile input: linkcheck outlived 60 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
+
+# blank_spans must stay linear with no comment in the text. Two shapes, each
+# a quadratic hazard of its own: many paired spans (scanning for the next
+# `<!--` again at every span, when it answers -1 once, not once per run), and
+# K runs of distinct lengths with no partner followed by M paired runs (a
+# walk over the later runs to find a partner, instead of the one-pass lookup,
+# costs K x M: 0.4 s against 16 s at K=600, M=120000). Compare growth, not
+# wall time: each shape runs at 1x and 8x, a linear scan costs about 8x to 10x
+# (up to 17x under load), a quadratic one 64x, so a ratio past 23 on the best
+# of five runs, with the collector off, separates them on any runner. The
+# 5 ms floor keeps a very fast 1x run from inflating the ratio.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "blank_spans must scale linearly with no comment in the text"
+import gc, sys, time
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+
+def best(text):
+    lo = None
+    gc.disable()
+    try:
+        for _ in range(5):
+            t = time.perf_counter()
+            linkcheck.blank_spans(text, True)
+            dt = time.perf_counter() - t
+            lo = dt if lo is None else min(lo, dt)
+    finally:
+        gc.enable()
+    return lo
+
+def pairs(n):
+    return "`a` b " * n
+
+def distinct_then_pairs(k, m):
+    return "".join("`" * (j + 2) + " x " for j in range(k)) + pairs(m)
+
+bad = []
+for name, small, big in (
+        ("paired spans", pairs(10000), pairs(80000)),
+        ("distinct runs then pairs", distinct_then_pairs(100, 10000),
+         distinct_then_pairs(800, 80000))):
+    a, b = best(small), best(big)
+    if b > 23 * max(a, 0.005):
+        bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
+if bad:
+    sys.exit("; ".join(bad))
+PY
+ok "blank_spans grows linearly with the number of code spans and unpartnered runs when no comment is open"
+
+# A file over MAX_FILE_BYTES is refused, one at the cap is read: the cap is
+# measured in bytes, before decoding, and read from the gate so the test
+# follows it.
+cap="$(python3 -I -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkcheck; print(linkcheck.MAX_FILE_BYTES)' "$repo_root/tests")"
+case "$cap" in ''|*[!0-9]*) fail "could not read MAX_FILE_BYTES from the gate: $cap" ;; esac
+new_tree
+python3 -I - "$work/r/docs/big.md" "$cap" <<'PY'
+import sys
+with open(sys.argv[1], "w") as f:
+    f.write("x" * (int(sys.argv[2]) - 1) + "\n")
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a file of exactly MAX_FILE_BYTES must be read (exit $rc): $out"
+printf 'y' >>"$work/r/docs/big.md"
+run
+[ "$rc" = 2 ] && grep -q 'docs/big\.md: over '"$cap"' bytes' <<<"$out" \
+  || fail "a file one byte over MAX_FILE_BYTES must exit 2 (got $rc): $out"
+ok "a file over the size cap exits 2 and one at the cap is read"
+
+# The cap counts bytes, not characters: a file under it in characters and
+# over it in bytes is refused. The name is hostile (ESC, U+202E): the error
+# line must print it escaped.
+new_tree
+python3 -I - "$work/r/docs" "$cap" <<'PY'
+import os, sys
+d, cap = sys.argv[1], int(sys.argv[2])
+with open(os.path.join(d, "wide\x1b\u202e.md"), "w", encoding="utf-8") as f:
+    f.write("\u00e9" * (cap // 2 + 1))
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 2 ] && grep -qF 'wide\x1b\u202e.md: over '"$cap"' bytes' <<<"$out" \
+  && ! grep -q "$(printf '\033')" <<<"$out" \
+  && ! grep -q "$(printf '\342\200\256')" <<<"$out" \
+  || fail "a file over the cap in bytes, not in characters, must exit 2 with its name escaped (got $rc): $out"
+ok "the cap counts bytes, and the over-cap error prints a hostile name escaped"
+
+# A symlink swapped into the final component after realpath's check: the open
+# itself refuses it (O_NOFOLLOW), with the same error as the check. realpath
+# is stubbed to pass, which stands for losing that race.
+new_tree
+ln -s ../README.md "$work/r/docs/swapped.md"
+python3 -I -B - "$repo_root/tests" "$work/r" <<'PY' || fail "O_NOFOLLOW: a final-component symlink must be refused"
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+linkcheck.os.path.realpath = lambda p: p
+try:
+    linkcheck.read_text(sys.argv[2], "docs/swapped.md")
+except linkcheck.GateError as e:
+    if "reached through a symlink" not in str(e):
+        sys.exit("wrong message: %s" % e)
+else:
+    sys.exit("the symlink was read")
+PY
+ok "a symlink swapped into the final component after the check is refused at the open"
+
+# A tracked file swapped for a FIFO must fail closed, not wait for a writer.
+new_tree
+rm "$work/r/docs/guide.md"; mkfifo "$work/r/docs/guide.md"
+bounded_run 20 "$work/fifo.out" python3 -I -B "$gate" "$work/r" \
+  || fail "FIFO: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
+  || fail "FIFO: linkcheck blocked on a tracked file swapped for a FIFO"
+[ "$br_rc" = 2 ] || fail "FIFO: expected exit 2, got $br_rc: $(cat "$work/fifo.out")"
+ok "a tracked file swapped for a FIFO exits 2 without blocking"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
@@ -761,5 +994,198 @@ run
 [ "$rc" = 2 ] && grep -q 'reached through a symlink' <<<"$out" \
   || fail "a tracked file reached through a swapped-in directory symlink must exit 2, got $rc: $out"
 ok "a directory swapped for a symlink in the working tree: exit 2"
+
+# Code spans: a tag inside one is text, so it defines no anchor; only a
+# heading keeps a span, because its text is part of the id. Likewise link
+# and image markup inside a heading's code span is code, not a link: GitHub's
+# id reads the rendered text, `![i](u)` verbatim, then drops the punctuation
+# (checked against markdown-it 14.1.0 and github-slugger 2.0.0, which
+# agree on `iu-foo`, `a-foo` and `ab-x` for the headings below).
+expect_broken README.md '`<a id="x">` and [l](#x).' \
+  'no such anchor in README\.md: #x' \
+  "an <a id> inside an inline code span is text, not an anchor"
+new_tree
+cat >"$work/r/docs/spans.md" <<'MD'
+# Spans
+
+## `![i](u)` Foo
+
+## [`a`](https://e.com/u) Foo
+
+## `[a](b)` x
+
+`<a id="real">` <a id="y"></a>
+
+[1](#iu-foo) [2](#a-foo) [3](#ab-x) [4](#y)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "link markup in a heading's code span is verbatim, a link around a span is its text (exit $rc): $out"
+ok "a heading's code span keeps link and image markup as text; a link around a span slugs to the span's text"
+expect_broken README.md '## `![i](u)` Foo
+
+[l](#-foo)' 'no such anchor in README\.md: #-foo' \
+  "a heading's image markup in a code span adds text, so the id has no leading hyphen"
+
+# Tags HTML5 reads as live links although CommonMark's inline grammar does
+# not (checked against parse5 7.1.2, a WHATWG tokenizer: each yields an href
+# attribute): `/` between attributes, a name opening with `=`, a `<` in a
+# name. One divergence is kept on purpose, pinned below: a `<` that opens
+# another `<a` or `<img` in a name ends the tag.
+expect_broken README.md '<a/href="docs/gone-slash.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-slash\.md$' \
+  "an href after a solidus instead of a space is checked"
+expect_broken README.md '<a =x href="docs/gone-eq.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-eq\.md$' \
+  "an href after a name opening with = is checked"
+expect_broken README.md '<a x<y href="docs/gone-lt.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-lt\.md$' \
+  "an href after a name holding < is checked"
+expect_broken README.md '<img src="docs/guide.md"/ x<y src=docs/gone-img.md>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-img\.md$' \
+  "a second attribute after a solidus and a < in a name is checked"
+new_tree
+printf '%s\n' '<a/href="guide.md#tail">1</a> <a =x href=guide.md>2</a> <a x<y href="guide.md">3</a>' \
+  '<a href =guide.md>4</a> <a/>5</a> <a href="guide.md"/>6</a>' >"$work/r/docs/shapes.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "good targets in the solidus, = and < shapes must pass (exit $rc): $out"
+ok "good targets in the solidus, = and < shapes, a spaced = and self-closed tags pass"
+
+# The URL standard strips leading and trailing C0 controls and spaces from
+# an href before parsing it (parse5 keeps the LF in the value, a URL parser
+# drops it), so a good target behind whitespace passes and a bad one fails.
+new_tree
+printf '<a href="\nguide.md">1</a> <a href=" \t\r\nguide.md#tail\n ">2</a>\n' >"$work/r/docs/ws.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an href with leading/trailing whitespace on a good target must pass (exit $rc): $out"
+ok "an href padded with whitespace or a newline resolves to its target"
+expect_broken README.md "$(printf '<a href="\n docs/gone-ws.md\n">x</a>')" \
+  '^README\.md:[0-9]+: no such tracked file or directory: ' \
+  "an href padded with whitespace is still reported when its target is gone"
+
+# CommonMark parses a link's destination and title before a backtick there can
+# open a span, and a backslash-escaped backtick opens nothing (checked against
+# markdown-it 14.1.0 and github-slugger 2.0.0: `a`, `a-b`, `a-c`, `a-c`).
+# A one-space pad on both sides of a span is not part of the code, and a
+# longer fence holds a shorter run. Each heading below links to its id.
+new_tree
+cat >"$work/r/docs/spans2.md" <<'MD'
+# Spans two
+
+## \`[a](https://e.com/b)\`
+
+## [a](https://e.com/u`) `b`
+
+## [a](<https://e.com/u`>) `c`
+
+## [a](https://e.com/b "`") `c`
+
+## ` pad ` x
+
+## ``a`b`` Foo
+
+## unclosed ` tick
+
+## \` escaped
+
+[1](#a) [2](#a-b) [3](#a-c) [4](#a-c-1) [5](#pad-x) [6](#ab-foo)
+[7](#unclosed--tick) [8](#-escaped)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "headings with backticks in destinations, escaped, padded, fenced or unclosed must slug as CommonMark reads them (exit $rc): $out"
+ok "a backtick in a link destination or title, an escaped, padded, multi-backtick or unclosed span slugs as CommonMark reads it"
+
+# An anchor kept by a tag or an escape: backticks inside an <a> tag's value,
+# or escaped, are not a span, so the ids around them count.
+new_tree
+cat >"$work/r/docs/ids2.md" <<'MD'
+\`<a id="x">\` text
+
+<a id="y" title="`"></a> and `code`
+
+[1](#x) [2](#y)
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an id after an escaped backtick or beside a backtick in a tag value is an anchor (exit $rc): $out"
+ok "an <a id> after an escaped backtick, or a tag holding a backtick in a value, is an anchor"
+# Pinned divergences: a backtick in another tag's value can still pair with
+# a later one, and an id after an inner <img opener is the inner tag's.
+expect_broken README.md '<b title="`">x</b> <a id="p"></a> `y`
+
+[l](#p)' 'no such anchor in README\.md: #p' \
+  "a backtick in another tag's value pairs with a later one (known miss)"
+# heading_slug HEADING ID WHY - a heading in a fresh tree must have this id.
+heading_slug() {
+  new_tree
+  printf '## %s\n\n[l](#%s)\n' "$1" "$2" >"$work/r/docs/slug1.md"
+  git -C "$work/r" add -A
+  run
+  [ "$rc" = 0 ] || fail "$3: $1 must slug to $2 (exit $rc): $out"
+  ok "$3"
+}
+heading_slug '[`a](u`)' au "a span opened in link text takes the closing bracket and the destination"
+heading_slug '![`a](u`) x' au-x "a span opened in image alt text takes the closing bracket and the destination"
+heading_slug '[`a`](u`) `c`' a-c "a span closed inside the link text leaves the destination backtick to the link"
+heading_slug '[`a` b](u`) `c`' a-b-c "a span closed inside longer link text leaves the destination backtick to the link"
+# Pinned miss: in a body link a backtick in the destination can pair with a
+# later one, so the link is hidden and the anchor after it is lost.
+new_tree
+printf '%s\n' '[a](docs/gone-bt.md`) <a id="k"></a> `b`' '' '[l](#k)' >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'no such anchor in README\.md: #k' <<<"$out" \
+  && ! grep -q 'gone-bt' <<<"$out" \
+  || fail "a backtick in a body link destination hides the link and the anchor after it, a known miss (exit $rc): $out"
+ok "a backtick in a body link's destination pairs with a later one (known miss, pinned)"
+expect_broken README.md '<a x<img id="q">
+
+[l](#q)' 'no such anchor in README\.md: #q' \
+  "an id after an inner <img opener belongs to the inner tag (kept divergence)"
+expect_broken README.md '<a x<a href="docs/gone-inner.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-inner\.md$' \
+  "an href after an inner <a opener in a name is still checked"
+expect_broken README.md '<a x<img src="docs/gone-inner2.png">' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-inner2\.png$' \
+  "a src after an inner <img opener in a name is still checked"
+expect_broken README.md '<a x =y href="docs/gone-eq2.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-eq2\.md$' \
+  "a valueless name, then =y as its value, then an href is checked"
+expect_broken README.md '<a href=docs/gone.md?x=1>x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md\?x=1$' \
+  "a bare href holding = is checked"
+expect_broken README.md '<a href=docs/gone`b.md>x</a>' \
+  'no such tracked file or directory: docs/gone`b\.md$' \
+  "a bare href holding a backtick is checked"
+expect_broken README.md '<a title="x"/href="docs/gone-q.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-q\.md$' \
+  "an href after a solidus that follows a closing quote is checked"
+expect_broken README.md '<a href="docs/gone-sc.md"/>x' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone-sc\.md$' \
+  "a self-closed tag is checked"
+
+# The URL standard strips leading and trailing C0 controls and spaces only
+# (U+0001 is one, U+00A0 is not), then deletes tabs and newlines anywhere;
+# an href empty after the strip is the page itself.
+new_tree
+printf '%s\n' '<a href="&#x1;guide.md&#x1f;">1</a> <a href="gu&#9;ide.&#10;md">2</a> <a href=" ">3</a>' \
+  >"$work/r/docs/ws2.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "controls around an href, tabs and newlines inside it, and an empty href must pass (exit $rc): $out"
+ok "an href with C0 references around it, tabs and newlines inside it, or nothing but spaces passes"
+# A raw C0 byte (U+0001, U+001F) around the value, not a reference to one.
+new_tree
+printf '<a href="\001guide.md\037">1</a>\n' >"$work/r/docs/raw-c0.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "raw C0 bytes around an href must be stripped (exit $rc): $out"
+ok "an href with raw C0 bytes around it passes"
+expect_broken README.md '<a href="&#xA0;docs/guide.md">x</a>' \
+  'no such tracked file or directory: ' \
+  "a no-break space is not stripped from an href, so the target is reported"
 
 echo "linkcheck_test: $pass passed"
