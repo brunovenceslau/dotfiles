@@ -1933,9 +1933,19 @@ md_width=80
 # fallback to the default awk, which would make that leg vacuous.
 md_awk="${CHECK_PATTERNS_AWK:-awk}"
 md_awk_lc="${CHECK_PATTERNS_AWK_LC_ALL:-C}"
-if [ -n "${CHECK_PATTERNS_AWK:-}" ] && ! command -v "$md_awk" >/dev/null 2>&1; then
-  _err "check-patterns: CHECK_PATTERNS_AWK names '$md_awk', which is not an executable on PATH"
-  exit 2
+if [ -n "${CHECK_PATTERNS_AWK:-}" ]; then
+  # `command -v` also answers for a builtin, a function or an alias (it prints
+  # the bare name): only a path is an awk program. A leading `-` would be read
+  # as an option by `env`.
+  case "$md_awk" in -*) md_awk_path="" ;; *) md_awk_path="$(command -v -- "$md_awk" 2>/dev/null || true)" ;; esac
+  case "$md_awk_path" in
+    /*) [ -x "$md_awk_path" ] && [ -f "$md_awk_path" ] || md_awk_path="" ;;
+    *) md_awk_path="" ;;
+  esac
+  if [ -z "$md_awk_path" ]; then
+    _err "check-patterns: CHECK_PATTERNS_AWK names '$md_awk', which does not resolve to an executable file (an absolute path, or a name found on PATH, not starting with '-')"
+    exit 2
+  fi
 fi
 # shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
 md_width_awk='

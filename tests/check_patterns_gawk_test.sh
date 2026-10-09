@@ -28,10 +28,8 @@ if ! command -v gawk >/dev/null 2>&1; then
   if [ -n "${STRICT:-}" ]; then fail "gawk not installed and STRICT=1"; fi
   echo "SKIP: check_patterns_gawk_test (gawk unavailable)"; exit 0
 fi
-loc=""
-for l in en_US.UTF-8 C.UTF-8; do
-  if [ "$(LC_ALL=$l gawk 'BEGIN { print length("\303\251") }' 2>/dev/null)" = 1 ]; then loc=$l; break; fi
-done
+# The Makefile's own probe, so the leg and this test cannot pick differently.
+loc="$(make -s --no-print-directory -C "$repo_root" print-gawk-utf8-lc)"
 if [ -z "$loc" ]; then
   if [ -n "${STRICT:-}" ]; then fail "no UTF-8 locale makes gawk count characters and STRICT=1"; fi
   echo "SKIP: check_patterns_gawk_test (gawk counts bytes in every UTF-8 locale tried)"; exit 0
@@ -80,12 +78,30 @@ for lc in "$loc" C; do   # the character path, then the byte path: same verdicts
   done
 done
 
-# An awk that is not there is exit 2, never a fallback to the default awk.
-rc=0; out="$(STRICT= CHECK_PATTERNS_AWK=no-such-awk-here "$cp" "$r" 2>&1)" || rc=$?
-[ "$rc" = 2 ] || fail "a missing CHECK_PATTERNS_AWK must exit 2, got $rc: $out"
-case "$out" in
-  *"CHECK_PATTERNS_AWK names 'no-such-awk-here'"*) ok ;;
-  *) fail "a missing CHECK_PATTERNS_AWK must say so: $out" ;;
-esac
+# Invalid UTF-8 is where the two paths part, so it shows the seam is honoured:
+# a lone continuation byte is one character to gawk in a UTF-8 locale and zero
+# columns on the byte path (which deletes 0x80-0xBF). 79 columns, a space and
+# two such bytes are 82 on the character path and 80 on the byte path. The
+# default awk and a gawk under LC_ALL=C take the byte path, so only the
+# CHECK_PATTERNS_AWK and CHECK_PATTERNS_AWK_LC_ALL pair, both reaching the awk,
+# gives the 1. A seam that ignored either, or an `env` that dropped LC_ALL,
+# would give 0.
+printf '%s \251\251\n' "$(words 79)" > "$r/docs/x.md"
+expect 1 "$loc" "invalid UTF-8 must count as characters on gawk's character path"
+expect 0 C "the same bytes must be deleted on gawk's byte path"
+rc=0; out="$(STRICT= "$cp" "$r" 2>&1)" || rc=$?
+[ "$rc" = 0 ] || fail "the default awk with no seam set must take the byte path, got $rc: $out"
+ok
+
+# A name that is no executable file is exit 2: absent, a builtin, a relative
+# path, an option.
+for bad in no-such-awk-here cd ./gawk -F; do
+  rc=0; out="$(STRICT= CHECK_PATTERNS_AWK="$bad" "$cp" "$r" 2>&1)" || rc=$?
+  [ "$rc" = 2 ] || fail "CHECK_PATTERNS_AWK=$bad must exit 2, got $rc: $out"
+  case "$out" in
+    *"CHECK_PATTERNS_AWK names '$bad'"*) ok ;;
+    *) fail "CHECK_PATTERNS_AWK=$bad must say so: $out" ;;
+  esac
+done
 
 echo "PASS: check_patterns_gawk_test ($pass assertions)"

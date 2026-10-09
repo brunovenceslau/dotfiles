@@ -6,8 +6,8 @@
 #
 # Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint +
 # check-patterns-gawk + test-env-scrub + test + reuse + gitleaks + secret-scan
-# + smoke + forkgate + linkcheck + commit-identity) - on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS
-# arm64 + Intel. macOS is the only platform the framework installs on, so
+# + smoke + forkgate + linkcheck + commit-identity) - on both macOS legs, every
+# leg on a GITHUB-HOSTED runner: macOS arm64 + Intel. macOS is the only platform the framework installs on, so
 # there is no leg for any other OS. There is deliberately NO QEMU/container
 # emulation: each leg is real hardware of its own architecture, which is what
 # the Brewfile on_arm/on_intel blocks, the Homebrew-prefix detection and the

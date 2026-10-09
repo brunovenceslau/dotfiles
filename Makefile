@@ -37,7 +37,7 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns check-patterns-gawk py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
+.PHONY: help lint check-patterns check-patterns-gawk print-gawk-utf8-lc py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
@@ -105,6 +105,18 @@ lint: check-patterns py-syntax
 check-patterns:
 	@bin/check-patterns
 
+# The locale in which gawk counts characters: the first of en_US.UTF-8 (macOS)
+#   and C.UTF-8 (most Linux images) under which gawk's length() of a two-byte
+#   character is 1. Empty when gawk is absent or counts bytes in both. ONE
+#   probe, read by check-patterns-gawk, by the local-ci summary and (through
+#   print-gawk-utf8-lc) by tests/check_patterns_gawk_test.sh. Recursive (=), so
+#   it forks only where a recipe expands it.
+GAWK_UTF8_LC = $(shell command -v gawk >/dev/null 2>&1 && for l in en_US.UTF-8 C.UTF-8; do \
+  if [ "$$(LC_ALL=$$l gawk 'BEGIN { print length("\303\251") }' 2>/dev/null)" = 1 ]; then echo $$l; break; fi; done)
+
+print-gawk-utf8-lc:
+	@echo '$(GAWK_UTF8_LC)'
+
 # The static patterns again, under a CHARACTER-counting awk. arm 15's width
 #   check picks its counting path by probing the awk it runs under, and the
 #   awks the other legs use (macOS's byte-counting onetrue awk, mawk on Linux)
@@ -123,10 +135,7 @@ check-patterns-gawk:
 	  fi; \
 	  echo "WARN: gawk not installed - skipping (set STRICT=1 to fail; CI enforces it)"; exit 0; \
 	fi; \
-	loc=''; \
-	for l in en_US.UTF-8 C.UTF-8; do \
-	  if [ "$$(LC_ALL=$$l gawk 'BEGIN { print length("\303\251") }' 2>/dev/null)" = 1 ]; then loc=$$l; break; fi; \
-	done; \
+	loc='$(GAWK_UTF8_LC)'; \
 	if [ -z "$$loc" ]; then \
 	  if [ -n "$(STRICT)" ]; then \
 	    echo "ERROR: gawk counts bytes under en_US.UTF-8 and C.UTF-8 and STRICT=1 - failing closed" >&2; exit 1; \
@@ -506,9 +515,9 @@ commit-identity:
 local-ci: lint check-patterns-gawk test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck commit-identity
 	@echo "----------------------------------------------------------------"
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + check-patterns-gawk + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
+	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	else \
-	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + check-patterns-gawk + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
+	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	  echo "local-ci: SKIP shellcheck (not installed locally; enforced in CI)"; \
 	fi
 	@# reuse reports on its own line, for the reason shellcheck does: without
@@ -519,10 +528,12 @@ local-ci: lint check-patterns-gawk test-env-scrub test reuse gitleaks secret-sca
 	else \
 	  echo "local-ci: SKIP reuse (not installed locally; enforced in CI)"; \
 	fi
-	@if command -v gawk >/dev/null 2>&1; then \
-	  echo "local-ci: PASS check-patterns-gawk (patterns under a character-counting awk)"; \
+	@# check-patterns-gawk reports on its own line too, and on the target's own
+	@# probe: gawk present but counting bytes in every locale also skips.
+	@if [ -n '$(GAWK_UTF8_LC)' ]; then \
+	  echo "local-ci: PASS check-patterns-gawk (patterns under a character-counting awk, $(GAWK_UTF8_LC))"; \
 	else \
-	  echo "local-ci: SKIP check-patterns-gawk (gawk not installed locally; enforced in CI)"; \
+	  echo "local-ci: SKIP check-patterns-gawk (no gawk, or none that counts characters, locally; enforced in CI)"; \
 	fi
 	@if command -v gitleaks >/dev/null 2>&1; then \
 	  echo "local-ci: PASS gitleaks (maintained secret rule set)"; \

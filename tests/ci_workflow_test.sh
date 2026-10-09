@@ -50,6 +50,13 @@ grep -qE '(^|[^[:alnum:]_])([Ll]inux|ubuntu-[a-z0-9.]+)([^[:alnum:]_]|$)' <<<"$c
 grep -Eq 'make[[:space:]]+local-ci[[:space:]]+STRICT=1' <<<"$commands" \
   || fail "ci.yml must run 'make local-ci STRICT=1' so a skipped check fails closed"
 
+# --- the gawk leg is part of the gate: local-ci depends on it, and CI installs gawk
+# (the only run of arm 15's character-counting path; see the Makefile).
+grep -Eq '^local-ci:.*[[:space:]]check-patterns-gawk([[:space:]]|$)' "$repo_root/Makefile" \
+  || fail "the Makefile's local-ci must depend on check-patterns-gawk"
+grep -Eq '^[[:space:]]*for tool in .*[[:space:]]gawk[[:space:];]' <<<"$commands" \
+  || fail "ci.yml's gate-tools loop must install gawk"
+
 # --- the gate must not be exit-suppressed -------------------------
 # `make local-ci || true` (or `; true`) would green a failed lint/test/smoke.
 if grep -Eq '\|\|[[:space:]]*(true|:)' <<<"$(grep -E 'make[[:space:]]+local-ci' <<<"$commands")"; then
