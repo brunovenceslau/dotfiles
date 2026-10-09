@@ -58,6 +58,17 @@ def stub(directory, name, body):
     os.chmod(path, stat.S_IRWXU)
 
 
+def default_signals():
+    """A signal child's preexec_fn: SIGINT, SIGHUP and SIGQUIT at their
+    defaults. A suite run under nohup, or as a `&` job of a shell without
+    job control, inherits them ignored, and an ignored signal stays ignored
+    across exec: a child sent one would not die of it, and the module's
+    entry() leaves an ignored one alone on purpose. With SIGINT at its
+    default, the child's Python installs its own ^C handler as usual."""
+    for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, signal.SIG_DFL)
+
+
 def cwd_now():
     """os.getcwd(), or why it failed: a check on the working directory
     reports a FAIL line, never a traceback, when that directory is gone."""
@@ -818,7 +829,7 @@ def killed_units(mod, scratch):
         env = dict(os.environ, HOME=scratch, TMPDIR=tmpdir, PATH=bindir + os.pathsep + os.environ["PATH"])
         p = subprocess.Popen([sys.executable, "-I", "-B", "-c", child, mod.__file__,
                               os.path.join(scratch, "c.local"), os.devnull, K1],
-                             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                             env=env, preexec_fn=default_signals, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # Bounded: 20 s for the stub to start, then 20 s for the child to go.
         for _ in range(200):
             if os.path.exists(started) or p.poll() is not None:
@@ -859,13 +870,15 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
         "    elif sys.argv[3] == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif sys.argv[3] == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    else:\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
         "    return 0, None\n"
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."), ("gh", "host_identity.gh."),
                          ("write", ".config.local."), ("backup", ".config.local.bak.")):
         tmpdir = os.path.join(scratch, "created-tmp-" + what)
         confdir = os.path.join(scratch, "created-conf-" + what)
@@ -875,7 +888,7 @@ def killed_units(mod, scratch):
         with open(local, "w") as fh:
             fh.write("[user]\n\temail = a@x\n")
         p = subprocess.run([sys.executable, "-I", "-B", "-c", created, mod.__file__, local, what, prefix, K1],
-                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n != "config.local"]
         check(p.returncode == -signal.SIGTERM and left == [] and b"Traceback" not in p.stderr,
@@ -914,7 +927,7 @@ def killed_units(mod, scratch):
             os.mkdir(tmpdir, 0o700)
             p = subprocess.run([sys.executable, "-I", "-B", "-c", twice, mod.__file__, os.path.join(scratch, "c.local"),
                                 str(int(first)), str(int(second)), K1],
-                               env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                               env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             left = os.listdir(tmpdir)
             check(p.returncode == -first and left == [] and b"Traceback" not in p.stderr,
@@ -946,6 +959,8 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
         "    elif sys.argv[3] == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif sys.argv[3] == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    elif sys.argv[3] == 'write':\n"
         "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
@@ -955,7 +970,7 @@ def killed_units(mod, scratch):
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."), ("gh", "host_identity.gh."),
                          ("write", ".config.local."), ("backup", ".config.local.bak.")):
         tmpdir = os.path.join(scratch, "cleaning-tmp-" + what)
         confdir = os.path.join(scratch, "cleaning-conf-" + what)
@@ -965,7 +980,7 @@ def killed_units(mod, scratch):
         with open(local, "w") as fh:
             fh.write("[user]\n\temail = a@x\n")
         p = subprocess.run([sys.executable, "-I", "-B", "-c", cleaning, mod.__file__, local, what, prefix, K1],
-                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         # The backup case finishes its .bak before the signal: that one stays.
         left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n not in ("config.local", "config.local.bak")]
@@ -989,6 +1004,8 @@ def killed_units(mod, scratch):
         "        return n.endswith('.pub')\n"
         "    if what == 'git':\n"
         "        return n.startswith('host_identity.git.')\n"
+        "    if what == 'gh':\n"
+        "        return n.startswith('host_identity.gh.')\n"
         "    if what == 'write':\n"
         "        return n.startswith('.config.local.') and not n.startswith('.config.local.bak.')\n"
         "    return n.startswith('.config.local.bak.')\n"
@@ -1008,6 +1025,8 @@ def killed_units(mod, scratch):
         "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[4]))\n"
         "    elif what == 'git':\n"
         "        m.git(['--version'])\n"
+        "    elif what == 'gh':\n"
+        "        m.gh_token('/bin/true')\n"
         "    elif what == 'write':\n"
         "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
         "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
@@ -1017,7 +1036,7 @@ def killed_units(mod, scratch):
         "m.run = run\n"
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
-    for what in ("krl", "git", "write", "backup"):
+    for what in ("krl", "git", "gh", "write", "backup"):
         tmpdir = os.path.join(scratch, "before-tmp-" + what)
         confdir = os.path.join(scratch, "before-conf-" + what)
         os.mkdir(tmpdir, 0o700)
@@ -1026,7 +1045,7 @@ def killed_units(mod, scratch):
         with open(local, "w") as fh:
             fh.write("[user]\n\temail = a@x\n")
         p = subprocess.run([sys.executable, "-I", "-B", "-c", before, mod.__file__, local, what, K1],
-                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n not in ("config.local", "config.local.bak")]
         check(p.returncode == -signal.SIGTERM and left == [] and b"Traceback" not in p.stderr,
@@ -1057,7 +1076,7 @@ def killed_units(mod, scratch):
         os.mkdir(tmpdir, 0o700)
         p = subprocess.run([sys.executable, "-I", "-B", "-c", both, mod.__file__, os.path.join(scratch, "c.local"),
                             str(int(first)), str(int(second))],
-                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
         # The lower-numbered signal is handled first.
         check(p.returncode == -min(first, second) and os.listdir(tmpdir) == [] and p.stderr == b"",
@@ -1079,7 +1098,7 @@ def killed_units(mod, scratch):
         "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
     )
     p = subprocess.run([sys.executable, "-I", "-B", "-c", ignored, mod.__file__, os.path.join(scratch, "c.local")],
-                       env=dict(os.environ, HOME=scratch), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       env=dict(os.environ, HOME=scratch), preexec_fn=default_signals, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                        stderr=subprocess.PIPE, timeout=60)
     check(p.returncode == 0, "a SIGTERM the caller ignores stays ignored (rc %d, %r)" % (p.returncode, p.stderr))
 
@@ -1177,9 +1196,11 @@ LITERAL_NAMES = {
 # Doctor's found list holds what its printers were handed; a GitPlace's
 # refusal is what _isolate() returned.
 LITERAL_ATTRS = {"strerror", "pathsep", "found", "refusal"}
-# Not checked inside: the escapers format characters, not values, and the
-# printers print the message they are handed, checked where it is built.
-SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log", "ok", "info", "problem"}
+# Not checked inside: the escapers format characters, not values, the
+# printers print the message they are handed, checked where it is built,
+# and _probe_config() builds config text that only git reads, on its
+# standard input.
+SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log", "ok", "info", "problem", "_probe_config"}
 # What prints a message: warn(), note(), log(), print(), a doctor finding,
 # and a Refusal, whose text is shown later through str().
 SINK_FUNCS = {"warn", "note", "log", "print", "Refusal"}
@@ -1701,6 +1722,214 @@ def doctor_parse_units(mod):
             check(mod.lazy_fetch_off("/x") is want, "%s honours GIT_NO_LAZY_FETCH: %s" % (version, want))
     finally:
         mod.repo_git = real
+
+
+
+def doctor_deps_units(mod, scratch):
+    """The Homebrew check's outcomes on a Mac, with the prefixes pointed at
+    scratch directories (no test can stage /opt/homebrew), and the parsers
+    of the gh check: gh's answer, and the helper `gh auth setup-git`
+    writes."""
+    bindir = os.path.join(scratch, "brew-path")
+    os.mkdir(bindir)
+    prefixes = [os.path.join(scratch, "brew-arm"), os.path.join(scratch, "brew-intel")]
+    real_platform, real_prefixes, real_path = sys.platform, mod.HOMEBREW_PREFIXES, os.environ["PATH"]
+
+    def found():
+        d = mod.Doctor(None, None)
+        d.homebrew()
+        return d.found
+
+    try:
+        mod.HOMEBREW_PREFIXES = prefixes
+        sys.platform = "darwin"
+        os.environ["PATH"] = bindir
+        brews = " or ".join(os.path.join(p, "bin", "brew") for p in prefixes)
+        check(found() == [("problem", "Homebrew is not installed: brew is not on PATH, and there is no %s - install it as docs/new-mac-host.md shows" % brews)],
+              "a Mac with no brew anywhere has a Homebrew problem (%r)" % found())
+        os.makedirs(os.path.join(prefixes[1], "bin"))
+        stub(os.path.join(prefixes[1], "bin"), "brew", "exit 0\n")
+        want = os.path.join(prefixes[1], "bin", "brew")
+        check(found() == [("problem", "%s is installed, but brew is not on PATH - start a new zsh (exec zsh): its zshrc puts it there" % want)],
+              "a Mac whose Intel prefix holds brew, off PATH, names it (%r)" % found())
+        os.makedirs(os.path.join(prefixes[0], "bin"))
+        with open(os.path.join(prefixes[0], "bin", "brew"), "w") as fh:
+            fh.write("not executable")
+        check(found()[0][1].startswith(want + " is installed"),
+              "a bin/brew that is not executable is not Homebrew, as zshrc's -x reads it (%r)" % found())
+        stub(bindir, "brew", "exit 0\n")
+        check(found() == [("ok", "brew is %s" % os.path.join(bindir, "brew"))], "brew on PATH is Homebrew (%r)" % found())
+        sys.platform = "linux"
+        check(found() == [("ok", "not macOS: Homebrew is checked only on macOS")], "Homebrew is not checked off macOS")
+    finally:
+        sys.platform, mod.HOMEBREW_PREFIXES = real_platform, real_prefixes
+        os.environ["PATH"] = real_path
+    check(mod.HOMEBREW_PREFIXES == ["/opt/homebrew", "/usr/local"],
+          "the Homebrew prefixes are zshrc's, Apple Silicon first (%r)" % mod.HOMEBREW_PREFIXES)
+
+    ok_head = "HTTP/2.0 200 OK\r\nX-Oauth-Scopes: repo, admin:ssh_signing_key\r\n\r\n"
+    for args, want in (
+            ((0, ok_head, ""), ("in", ["repo", "admin:ssh_signing_key"])),
+            ((0, "HTTP/1.1 200 OK\r\nx-oauth-scopes: \r\n\r\n", ""), ("in", None)),
+            ((0, "HTTP/2.0 200 OK\r\n\r\n", ""), ("in", None)),
+            ((4, "", "To get started with GitHub CLI, please run:  gh auth login\n"), ("out", None)),
+            ((1, "HTTP/2.0 401 Unauthorized\r\n\r\n", "gh: Bad credentials (HTTP 401)\n"), ("refused", 401)),
+            ((1, "HTTP/2.0 403 Forbidden\r\n\r\n", "gh: Forbidden (HTTP 403)\n"), ("refused", 403)),
+            ((4, "HTTP/2.0 401 Unauthorized\r\n\r\n", ""), ("refused", 401)),
+            ((1, "HTTP/2.0 502 Bad Gateway\r\n\r\n", "gh: HTTP 502\n"), ("unknown", "HTTP 502")),
+            ((1, "", "\nGet \"https://api.github.com/user\": no such host\n"),
+             ("unknown", 'Get "https://api.github.com/user": no such host')),
+            ((1, "", ""), ("unknown", "gh exited 1")),
+            ((1, "", "x" * 300), ("unknown", "x" * 200)),
+            ((0, "HTTP/2.0 2000 OK\r\n", ""), ("unknown", "gh exited 0"))):
+        got = mod._gh_answer(*args)
+        check(got == want, "gh's answer %r reads as %r (got %r)" % (args, want, got))
+    for value, want in (("!gh auth git-credential", True), ("!/opt/homebrew/bin/gh auth git-credential", True),
+                        ("!'/Users/a b/bin/gh' auth git-credential", True), ("gh auth git-credential", False),
+                        ("!gh auth git-credential --extra", False), ("!/bin/ghx auth git-credential", False),
+                        ("osxkeychain", False), ("", False), ("!'unclosed auth git-credential", False)):
+        check(mod.gh_helper(value) is want, "the helper %r is gh's: %s" % (value, want))
+
+    # GitHub's rate limit is not a refused token: x-ratelimit-remaining 0
+    # (the primary limit) or a retry-after header (a secondary one) on a 403
+    # or a 429 reads as no answer, a note.
+    for args, want in (
+            ((1, "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 0\r\n\r\n", ""), ("unknown", "rate limited, HTTP 403")),
+            ((1, "HTTP/2.0 403 Forbidden\r\nRetry-After: 60\r\n\r\n", ""), ("unknown", "rate limited, HTTP 403")),
+            ((1, "HTTP/2.0 429 Too Many Requests\r\nx-ratelimit-remaining: 0\r\n\r\n", ""),
+             ("unknown", "rate limited, HTTP 429")),
+            ((1, "HTTP/2.0 403 Forbidden\r\nX-Ratelimit-Remaining: 4999\r\n\r\n", ""), ("refused", 403)),
+            ((1, "HTTP/2.0 401 Unauthorized\r\nX-Ratelimit-Remaining: 0\r\n\r\n", ""), ("refused", 401))):
+        got = mod._gh_answer(*args)
+        check(got == want, "gh's answer %r reads as %r (got %r)" % (args, want, got))
+
+    # A helper is named by its program, never by an argument that can hold
+    # a secret; a snippet whose first word is no command is named as such.
+    for value, want in (("osxkeychain", "osxkeychain"), ("store --file /x/ghp_secret", "store"),
+                        ("!f() { echo password=ghp_secret; }; f", "a shell snippet"),
+                        ("!TOKEN=ghp_secret helper", "a shell snippet"), ("/usr/bin/h ghp_secret", "/usr/bin/h"),
+                        ("!'/Users/a b/bin/gh' auth git-credential", "/Users/a b/bin/gh"),
+                        ("!'unclosed", "a shell snippet"), ("", "a shell snippet")):
+        got = mod.helper_program(value)
+        check(got == want and "ghp_secret" not in got, "the helper %r is named %r (got %r)" % (value, want, got))
+
+    # gh's helper runs when the path it names is an executable file, or its
+    # bare name is on PATH: the gh on PATH says nothing about the first.
+    ghdir = os.path.join(scratch, "helper-gh")
+    os.mkdir(ghdir)
+    stub(ghdir, "gh", "exit 0\n")
+    with open(os.path.join(scratch, "gh"), "w") as fh:
+        fh.write("not executable")
+    try:
+        os.environ["PATH"] = os.path.join(scratch, "brew-path")
+        for value, want in (("!%s auth git-credential" % shlex.quote(os.path.join(ghdir, "gh")), True),
+                            ("!%s auth git-credential" % shlex.quote(os.path.join(scratch, "missing", "gh")), False),
+                            ("!%s auth git-credential" % shlex.quote(os.path.join(scratch, "gh")), False),
+                            ("!gh auth git-credential", False)):
+            check(mod.helper_runs(value) is want, "gh's helper %r runs off PATH: %s" % (value, want))
+        os.environ["PATH"] = ghdir
+        check(mod.helper_runs("!gh auth git-credential"), "gh's helper by bare name runs when gh is on PATH")
+    finally:
+        os.environ["PATH"] = real_path
+
+    # A pattern that is no full URL matches as git's fallback does: each
+    # part it names must be the context's (https://github.com).
+    for sub, want in (("github.com", True), ("https://", True), ("", True), ("github.com/", True),
+                      ("github.com/x", False), ("u@github.com", False), ("http://github.com", False),
+                      ("github.com:8443", False), ("gitlab.com", False), ("github%2ecom", True)):
+        check(mod._partial_match(sub, "github.com") is want, "the pattern %r matches github.com: %s" % (sub, want))
+
+    # gh's environment drops each caller setting that would change what gh
+    # prints or where it asks (gh help environment, gh 2.102) and git's
+    # repository-local ones, and points gh's directories at STATE. The
+    # names are written out here, not read from the module, so a name the
+    # module stops dropping fails this check.
+    dropped = ["CLICOLOR_FORCE", "DEBUG", "GH_DEBUG", "GH_FORCE_TTY", "GH_HOST", "GH_PAGER", "GH_REPO", "PAGER",
+               "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_CONFIG_COUNT",
+               "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_GRAFT_FILE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE",
+               "GIT_NO_REPLACE_OBJECTS", "GIT_OBJECT_DIRECTORY", "GIT_PREFIX", "GIT_REPLACE_REF_BASE",
+               "GIT_SHALLOW_FILE", "GIT_WORK_TREE", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"]
+    saved = dict(os.environ)
+    try:
+        os.environ.update(dict.fromkeys(dropped + ["XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"], "caller"))
+        env = mod.gh_env("/state")
+        kept = [k for k in dropped if k in env]
+        check(not kept, "gh runs without the caller's %s (of %d)" % (kept, len(dropped)))
+        dirs = [env.get(k) for k in ("XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")]
+        check(dirs == ["/state"] * 3, "gh's state, cache and data directories are its temporary one (%r)" % dirs)
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+    # gh_token(): no answer within GH_TIMEOUT, or an answer past
+    # GH_OUTPUT_CAP, ends gh's whole process group, so a wrapper's child
+    # does not outlive it; a gh that cannot run is no answer either. Each
+    # leaves no temporary directory.
+    def alive(pid):
+        # A zombie is gone too: only its parent's wait is missing.
+        for _ in range(50):
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], stdout=subprocess.PIPE,
+                                   stderr=subprocess.DEVNULL).stdout.decode().strip()
+            if not state or state.startswith("Z"):
+                return False
+            time.sleep(0.1)
+        return True
+
+    tmpdir = os.path.join(scratch, "gh-token-tmp")
+    os.mkdir(tmpdir, 0o700)
+    real_timeout, real_cap = mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP
+    pidfile = os.path.join(scratch, "gh-child.pid")
+    try:
+        use_tmpdir(mod, tmpdir)
+        mod.GH_TIMEOUT = 1
+        stub(ghdir, "gh-slow", 'sleep 30 &\necho $! > "%s"\nwait\n' % pidfile)
+        began = time.monotonic()
+        got = mod.gh_token(os.path.join(ghdir, "gh-slow"))
+        took = time.monotonic() - began
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        # Bounded: a gh left in this process's group is not killed with
+        # the group, and the wait for it then lasts the child's 30 s.
+        check(got == ("unknown", "no answer within 1 seconds") and took < 10 and not alive(child)
+              and os.listdir(tmpdir) == [],
+              "a gh that does not answer in time is no answer, at once, and its child goes with it (%r, %.1f s)"
+              % (got, took))
+        # A gh that answers and exits, leaving a child that let go of the
+        # pipes: where Python can wait without reaping, the child goes too.
+        stub(ghdir, "gh-quick", 'sleep 30 >/dev/null 2>&1 &\necho $! > "%s"\n'
+             'printf "HTTP/2.0 200 OK\\r\\n\\r\\n"\n' % pidfile)
+        got = mod.gh_token(os.path.join(ghdir, "gh-quick"))
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        if mod._CAN_WAIT_UNREAPED:
+            check(got == ("in", None) and not alive(child) and os.listdir(tmpdir) == [],
+                  "a gh that answers leaves no child behind (%r)" % (got,))
+        else:
+            os.kill(child, signal.SIGKILL)
+            check(got == ("in", None) and os.listdir(tmpdir) == [],
+                  "a gh that answers is read (no os.waitid: its child is not killed) (%r)" % (got,))
+        mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = 20, 100
+        stub(ghdir, "gh-loud", 'sleep 30 &\necho $! > "%s"\nprintf "%%0200d" 0\nwait\n' % pidfile)
+        got = mod.gh_token(os.path.join(ghdir, "gh-loud"))
+        with open(pidfile) as fh:
+            child = int(fh.read())
+        check(got == ("unknown", "gh printed more than 100 bytes") and not alive(child) and os.listdir(tmpdir) == [],
+              "a gh that prints past the cap is cut off with its child (%r)" % (got,))
+        got = mod.gh_token(os.path.join(scratch, "gh"))
+        check(got[0] == "unknown" and got[1] == os.strerror(errno.EACCES) and os.listdir(tmpdir) == [],
+              "a gh that is not executable is no answer (%r)" % (got,))
+    finally:
+        mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = real_timeout, real_cap
+
+def ls_tree_missing_units(mod):
+    """LS_TREE_MISSING reads both ways git 2.53's ls-tree says an object is
+    missing, and nothing else: an unborn HEAD stays a problem."""
+    for err, want in (("fatal: not a tree object", True),
+                      ("error: Could not read 5fdc090f32f353f10f252d87a7c59fae399ec698", True),
+                      ("warning: x\nerror: Could not read " + "a" * 64, True),
+                      ("fatal: Not a valid object name HEAD", False),
+                      ("error: Could not read HEAD", False), ("fatal: not a tree object here", False)):
+        check(bool(mod.LS_TREE_MISSING.search(err)) is want, "ls-tree's %r names a missing object: %s" % (err, want))
 
 
 def static_units(source):
@@ -2291,6 +2520,8 @@ def main(argv):
 
     submodule_units(mod, scratch)
     doctor_parse_units(mod)
+    doctor_deps_units(mod, scratch)
+    ls_tree_missing_units(mod)
 
     print("%d failure(s)" % len(failures))
     return 1 if failures else 0

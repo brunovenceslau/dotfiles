@@ -22,8 +22,9 @@
 #                                    signing from the host's allowed_signers and
 #                                    ssh-agent (install runs it too); --rotate
 #                                    replaces a signing key that no longer verifies
-#   install.sh doctor [--verbose]    read only: print each identity, signing or
-#                                    plugin submodule problem in one line
+#   install.sh doctor [--verbose]    read only: print each identity, signing,
+#                                    plugin submodule, Homebrew, gh or
+#                                    credential helper problem in one line
 #                                    (--verbose: every check)
 #   install.sh -h | --help | help    print a short usage line
 #
@@ -598,8 +599,9 @@ EOF
     warn "  no credentials to fetch."
     warn "  Credentials needed (a private fork, or an SSH remote)? The upgrade"
     warn "  fetch scrubs ~/.gitconfig and reads only the XDG config, so put a"
-    warn "  credential helper there:"
-    warn "    git config -f ~/.config/git/config.local 'credential.https://github.com.helper' '!gh auth git-credential'"
+    warn "  credential helper there (gh writes an empty helper first, which"
+    warn "  keeps a system helper such as osxkeychain from being asked first):"
+    warn "    GIT_CONFIG_GLOBAL=\"\$HOME/.config/git/config.local\" gh auth setup-git"
     return 1
   fi
   if [ "$(vgit rev-parse FETCH_HEAD)" = "$(vgit rev-parse HEAD)" ]; then
@@ -691,11 +693,13 @@ do_identity() {
 }
 
 # do_doctor [--verbose] - `install.sh doctor`: lib/host_identity.py's
-# read-only checks (its CHECKS registry): the identity and signing path, and
-# the plugin submodules of this checkout (the --installer path names it). It
-# writes nothing, prints only the problems (every check with --verbose) and
-# returns 1 when it found one. A python3 that does not run is the one problem
-# reported here, since the checks themselves need it.
+# read-only checks (its CHECKS registry): the identity and signing path, the
+# plugin submodules of this checkout (the --installer path names it),
+# Homebrew, gh (asked over the network whether GitHub accepts its token) and
+# git's credential helper. It writes nothing that stays, prints only the
+# problems (every check with --verbose) and returns 1 when it found one. A
+# python3 that does not run is the one problem reported here, since the
+# checks themselves need it.
 do_doctor() {
   if ! _python_ok; then
     log "doctor: python3: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)"
