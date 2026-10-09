@@ -489,9 +489,8 @@ link-convention change.
   text wraps across lines is still found, and a CRLF file reads exactly like
   its LF twin. A link destination may hold balanced parentheses (up to 3
   levels deep) and backslash escapes, or be written `<...>` with spaces, and
-  its title may be double- or single-quoted or in parentheses. An
-  inline link whose destination runs past 2048 characters is not read as a
-  link. Every other URL scheme is out of scope, since the gate
+  its title may be double- or single-quoted or in parentheses. Neither has
+  a length limit. Every other URL scheme is out of scope, since the gate
   never touches the network.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control

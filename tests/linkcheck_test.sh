@@ -378,11 +378,13 @@ expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
 # A body link's destination follows the heading's rule: balanced parentheses
-# nested up to 3 levels, an escaped paren (read unescaped), and the
-# `<...>` form, which may hold a space. A bare destination never starts with
-# `<`, so `[a](<b)` is literal text, in a heading too.
+# nested up to 3 levels, an escaped paren (read unescaped, in a definition
+# too), and the `<...>` form, which may hold a space or an escaped `>`. A
+# bare destination never starts with `<`, so `[a](<b)` is literal text, in a
+# heading too.
 new_tree
 printf '# Paren\n' >"$work/r/docs/a_(b).md"
+printf '# Gt\n' >"$work/r/docs/a>b.md"
 printf '# Deep\n' >"$work/r/docs/z_(((w))).md"
 printf '# Space\n' >"$work/r/docs/sp ace.md"
 cat >"$work/r/docs/body-paren.md" <<'MD'
@@ -390,17 +392,36 @@ cat >"$work/r/docs/body-paren.md" <<'MD'
 
 [1](a_(b).md) [2](a_(b).md#paren) [3](a_\(b\).md) [4](<a_(b).md>)
 [5](z_(((w))).md#deep) [6](<sp ace.md>) [7](<sp ace.md#space>) [8](#l-ab-t)
+[10][r]
+
+[r]: a_\(b\).md#paren
 MD
+# \134 is the backslash: check-patterns refuses a literal backslash-`>` in
+# shell, since BSD and GNU grep read it differently.
+printf '[9](<a\134>b.md#gt>)\n' >>"$work/r/docs/body-paren.md"
 git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a body destination with parentheses, an escape or <...> must resolve (exit $rc): $out"
-ok "a body link resolves balanced parentheses to 3 levels, an escaped paren and the <...> form; [a](<b) is literal"
+ok "a body link resolves nested parentheses, escapes (in a definition too) and <...> with an escaped '>'; [a](<b) is literal"
 expect_broken README.md 'See [x](docs/gone_(b).md).' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone_\(b\)\.md$' \
   "a broken body destination with parentheses is reported whole"
 expect_broken README.md 'See [x](<docs/gone file.md>).' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
   "a broken <...> destination holding a space is checked"
+expect_broken README.md 'See [x](docs/gone\(1\).md).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\\\(1\\\)\.md$' \
+  "a broken destination is reported as written, escapes and all"
+expect_broken README.md "$(printf 'See [x](<docs/gone\134>b.md>).')" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone.>b\.md$' \
+  "a broken <...> destination holding an escaped '>' is checked"
+# A title never crosses a blank line (CommonMark), so this is text, not a link.
+new_tree
+printf '[x](docs/gone.md "a\n\nb")\n' >"$work/r/docs/para-title.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a title across a blank line must not make a link (exit $rc): $out"
+ok "a title across a blank line is text, not a link"
 # Forms that hid a link before: a single-quoted or parenthesized title, a
 # `>` inside a quoted HTML attribute before the href, an escaped `]` in a
 # reference label (full, collapsed and in the definition), and a `<...>`
@@ -455,6 +476,23 @@ long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
 expect_broken README.md "An <a href=\"docs/$long_name\">long</a>." \
   "no such tracked file or directory: docs/$long_stem\\.md\$" \
   "an HTML href over 2048 characters is still checked"
+# No destination, title or anchor id has a length limit: a bound once
+# skipped every link past it in silence.
+expect_broken README.md "See [x](docs/$long_name)." \
+  "^README\\.md:[0-9]+: no such tracked file or directory: docs/$long_stem\\.md\$" \
+  "a broken destination over 2048 characters is reported"
+expect_broken README.md "See [x](<docs/$long_name>)." \
+  "^README\\.md:[0-9]+: no such tracked file or directory: docs/$long_stem\\.md\$" \
+  "a broken <...> destination over 2048 characters is reported"
+expect_broken README.md "See [x](docs/gone.md \"$long_stem\")." \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a broken destination with a title over 2048 characters is reported"
+new_tree
+printf '<a id="%s"></a>\n\n[x](#%s)\n' "$long_stem" "$long_stem" >"$work/r/docs/long-id.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "an explicit <a id> over 2048 characters must be an anchor (exit $rc): $out"
+ok "an explicit <a id> over 2048 characters is an anchor"
 expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
   'docs/a\\u202eb\.md' \
   "a bidi override in a report prints as \\uHHHH"

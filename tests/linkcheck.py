@@ -21,9 +21,8 @@ same tracked set:
     is read the CommonMark way: balanced parentheses (3 levels deep),
     backslash escapes of ASCII punctuation (undone before resolving), or
     the `<...>` form, which may hold spaces; a title may follow, double-
-    or single-quoted or in parentheses. An inline link's
-    destination is read up to 2048 characters: a longer one is not a link
-    to this gate (no file name in a git tree comes close). An untracked
+    or single-quoted or in parentheses. Neither has a length limit,
+    as in cmark. An untracked
     file on this machine does not count: GitHub
     renders the tracked tree, so a link to a gitignored `.local` file is broken
     there even though it resolves here. Case is compared exactly for the same
@@ -56,11 +55,15 @@ the tree.
 
 Hostile input stays near-linear. A pattern that could rescan the rest of a
 line or file once per opener is bounded (a definition's label at
-CommonMark's 999 characters, a title or an `<a>` id at 2048, a link
-destination's scan at 3 later openers, since each brings an unclosed
-parenthesis and a 4th level ends the destination)
-or stops at the next opener of its kind; everything else is a str.find loop
-or a lookup built in one pass. An HTML attribute value is read up to its
+CommonMark's 999 characters, a heading's code span at 2048), stops at the
+next opener of its kind (a title or an attribute value at its own quote,
+never past a blank line), or crosses at most 3 later openers (a link
+destination, since each opener brings an unclosed parenthesis and a 4th
+level ends it); everything else is a str.find loop or a lookup built in
+one pass. No destination, title or attribute value has a length limit:
+each was bounded once, which silently skipped a long link, and the 800 KB
+hostile shapes, measured at 800 KB each, run in well under a second
+without one. An HTML attribute value is read up to its
 closing quote by str.find, within its paragraph, so it has no length
 cap; html_targets says why an unclosed one costs at most two such scans.
 
@@ -97,14 +100,15 @@ LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|[0-9]+[.)])(?:[ \t]|$)")
 # optional closing sequence backtracked quadratically on a run of spaces.
 ATX_OPEN = re.compile(r"^ {0,3}#{1,6}(?=[ \t]|$)")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-# `<a ... id="x">` (or name=): the attributes before it are read lazily, at
-# most 2048 characters and never past the next `<`, so a line of `<a `
-# openers costs each one the stretch up to the next.
-EXPLICIT = re.compile(r"<a(?=\s)[^<>]{0,2048}?(?<=\s)(?:id|name)=\"([^\"]{1,2048})\"")
+# `<a ... id="x">` (or name=): the attributes before it are read lazily and
+# never past the next `<`, and the value never past its quote, so a line of
+# `<a ` openers costs each one the stretch up to the next.
+EXPLICIT = re.compile(r"<a(?=\s)[^<>]*?(?<=\s)(?:id|name)=\"([^\"]+)\"")
 # A link destination follows CommonMark, in the body and in a heading alike:
 # no whitespace; a backslash escapes only ASCII punctuation (`\(` and `\)`
 # included), else it is a literal; balanced parentheses nest; it never starts
-# with `<`, since that opens the other form, `<...>`, which may hold spaces.
+# with `<`, since that opens the other form, `<...>`, which may hold spaces
+# and an escaped `\>`.
 # Nesting stops at 3 levels: GitHub's cmark-gfm allows 32 (inlines.c), but a
 # destination deeper than 3 is far past anything in a tracked doc, and a
 # deeper one is not read as a link here (pinned by a test) instead of a hang
@@ -118,7 +122,7 @@ _NEST = r"\((?:" + _DEST_CHAR + r")*\)"
 for _ in range(2):
     _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
 _DEST_BARE = r"(?!<)(?:" + _DEST_CHAR + "|" + _NEST + r")+"
-_DEST_ANGLE = r"<([^<>\n]*)>"
+_DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
 # Either form is read with its escapes undone (md_dest), as the renderer
 # reads it: `a\(b.md` names the file `a(b.md`.
 MD_ESCAPE = re.compile(r"\\(" + _PUNCT + ")")
@@ -130,18 +134,19 @@ _LABEL_CHAR = r"(?:[^\[\]\\]|\\[\s\S])"
 # [text](dest "title"): text may wrap across lines (never across a blank
 # line) and may hold one level of nested brackets, which covers an image
 # inside a link (a badge). The title is double-quoted, single-quoted or
-# parenthesized, each bounded. The destination is either form above, captured
+# parenthesized, and never crosses a blank line. The destination is either
+# form above, captured
 # as group 2 (`<...>`, without its brackets) or 3 (bare). The bare form is
 # ATOMIC (a lookahead captures it, a backreference consumes it, so it is
 # never backtracked into): nothing it could give back would let the match
 # succeed, since a destination never ends where a dest character follows.
-# Neither form is bounded by the regex; check_file skips a destination over
-# DEST_MAX characters, as the bounded class it replaces did.
 TEXT = (r"((?:[^\[\]\\\n]|\\[^\n]|\\(?=\n)|\n(?![ \t]*\n)|\["
         + _LABEL_CHAR + r"*\])*)")
-LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*(?:" + _DEST_ANGLE + r"|(?=(" + _DEST_BARE + r"))\3)"
-                  r"(?:\s+(?:\"[^\"]{0,2048}\"|'[^']{0,2048}'|\([^()]{0,2048}\)))?\s*\)")
-DEST_MAX = 2048
+_PARA = r"\n(?![ \t]*\n)"   # a line break that is not a blank line
+_TITLE = (r"(?:\"(?:[^\"\n]|" + _PARA + r")*\"|'(?:[^'\n]|" + _PARA + r")*'"
+          r"|\((?:[^()\n]|" + _PARA + r")*\))")
+LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*(?:" + _DEST_ANGLE
+                  + r"|(?=(" + _DEST_BARE + r"))\3)(?:\s+" + _TITLE + r")?\s*\)")
 REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]")
 # A definition's label holds no unescaped bracket and at most 999 characters
 # (CommonMark): unbounded, each line opening with `[` scanned the rest of the
@@ -373,12 +378,11 @@ def atx_text(rest):
 
 
 # A link inside a heading, for slugify: it renders as its text, whatever its
-# destination (the rule above LINK). A quoted or parenthesized title may
-# follow. The optional group holds the whole destination-title-spaces tail,
-# so a run of spaces is retried at most once per part, never once per start
-# position.
+# destination and title (the rules above LINK). The optional group holds
+# the whole destination-title-spaces tail, so a run of spaces is retried at
+# most once per part, never once per start position.
 _TAIL = (r"\(\s*(?:(?:" + _DEST_ANGLE + "|" + _DEST_BARE + r")"
-         r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*)?\)")
+         r"(?:\s+" + _TITLE + r")?\s*)?\)")
 # An image shares the link's tail, else the `[alt](...)` part of an image with
 # a title would match as a link and leak its alt text; an escaped `!` makes it
 # a plain link.
@@ -578,8 +582,7 @@ def check_file(tree, rel):
         base, text = pending.pop()
         for m in LINK.finditer(text):
             g = 2 if m.group(2) is not None else 3
-            if len(m.group(g)) <= DEST_MAX:
-                targets.append((base + m.start(g), m.group(g), md_dest(m.group(g))))
+            targets.append((base + m.start(g), m.group(g), md_dest(m.group(g))))
             # An image inside a link (a badge) is a link of its own.
             pending.append((base + m.start(1), m.group(1)))
     labels = set()
