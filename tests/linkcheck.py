@@ -15,8 +15,7 @@ same tracked set:
 
   - the target of an inline link `[text](path#anchor)`, an image, a
     reference definition `[ref]: path`, and the `href` or `src` of an HTML
-    `<a>` or `<img>` tag (double- or single-quoted; a `>` inside a quoted
-    value does not end the tag, a blank line does) must name a tracked
+    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked
     file, or a directory holding one, inside ROOT. A Markdown destination
     is read the CommonMark way: balanced parentheses (3 levels deep),
     backslash escapes of ASCII punctuation (undone before resolving), or
@@ -31,8 +30,13 @@ same tracked set:
   - a full or collapsed reference link, `[text][ref]` or `[text][]`, must have
     a matching definition in the same file (labels compared case-folded, with
     whitespace collapsed). A backslash-escaped bracket does not end link
-    text or a label. A shortcut `[ref]` is not checked: it cannot be told
-    apart from bracketed prose;
+    text or a label, and an escaped quote or paren does not end a title.
+    A shortcut `[ref]` is not checked: it cannot be told apart from
+    bracketed prose;
+  - an `<a>` or `<img>` tag is read as CommonMark reads raw HTML: a `>`
+    inside a quoted value does not end it, and one that crosses a blank
+    line or runs a quoted value into the next attribute is text, so a tag
+    inside it is still found;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
     github-slugger numbers them, or an explicit `<a id="...">` /
@@ -63,9 +67,7 @@ level ends it); everything else is a str.find loop or a lookup built in
 one pass. No destination, title or attribute value has a length limit:
 each was bounded once, which silently skipped a long link, and the 800 KB
 hostile shapes, measured at 800 KB each, run in well under a second
-without one. An HTML attribute value is read up to its
-closing quote by str.find, within its paragraph, so it has no length
-cap; html_targets says why an unclosed one costs at most two such scans.
+without one. HTML_OPEN says why an open tag's scan stays linear.
 
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
@@ -128,9 +130,19 @@ _DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
 MD_ESCAPE = re.compile(r"\\(" + _PUNCT + ")")
 # A bracket escaped by a backslash (`\]`) neither opens nor closes link text
 # or a label; `\\` is an escaped backslash, so the bracket after it counts.
-# Every alternative starts on its own character (in TEXT, a lookahead splits
-# the two backslash forms), so a string splits into units one way only.
+# The same holds for a title's closing quote or paren. _span_char(c) is one
+# character of such a run, never c unescaped and never a blank line. Every
+# alternative starts on its own character (a lookahead splits the two
+# backslash forms), so a string splits into units one way only.
 _LABEL_CHAR = r"(?:[^\[\]\\]|\\[\s\S])"
+_PARA = r"\n(?![ \t]*\n)"   # a line break that is not a blank line
+
+
+def _span_char(c):
+    return r"[^" + c + r"\\\n]|\\[^\n]|\\(?=\n)|" + _PARA
+
+
+
 # [text](dest "title"): text may wrap across lines (never across a blank
 # line) and may hold one level of nested brackets, which covers an image
 # inside a link (a badge). The title is double-quoted, single-quoted or
@@ -140,26 +152,43 @@ _LABEL_CHAR = r"(?:[^\[\]\\]|\\[\s\S])"
 # ATOMIC (a lookahead captures it, a backreference consumes it, so it is
 # never backtracked into): nothing it could give back would let the match
 # succeed, since a destination never ends where a dest character follows.
-TEXT = (r"((?:[^\[\]\\\n]|\\[^\n]|\\(?=\n)|\n(?![ \t]*\n)|\["
-        + _LABEL_CHAR + r"*\])*)")
-_PARA = r"\n(?![ \t]*\n)"   # a line break that is not a blank line
-_TITLE = (r"(?:\"(?:[^\"\n]|" + _PARA + r")*\"|'(?:[^'\n]|" + _PARA + r")*'"
-          r"|\((?:[^()\n]|" + _PARA + r")*\))")
+TEXT = r"((?:" + _span_char(r"\[\]") + r"|\[" + _LABEL_CHAR + r"*\])*)"
+_TITLE = (r"(?:\"(?:" + _span_char(r"\"") + r")*\"|'(?:" + _span_char("'") + r")*'"
+          r"|\((?:" + _span_char(r"()") + r")*\))")
 LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*(?:" + _DEST_ANGLE
                   + r"|(?=(" + _DEST_BARE + r"))\3)(?:\s+" + _TITLE + r")?\s*\)")
 REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]")
 # A definition's label holds no unescaped bracket and at most 999 characters
-# (CommonMark): unbounded, each line opening with `[` scanned the rest of the
+# (CommonMark; an escape pair counts as one here, so the bound is loose by
+# at most half): unbounded, each line opening with `[` scanned the rest of the
 # file for a `]`. Its destination is either form, as in LINK: group 2 holds
 # a `<...>` one (spaces allowed), group 3 a bare one.
 REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:" + _DEST_ANGLE
                     + r"|((?!<)\S+))(?:[ \t].*)?$", re.M)
-# An `<a` or `<img` tag opener. html_targets walks its attributes with
-# TAG_STOP, which finds the next `>` or the next `=` opening a quoted value
-# (group 1 set when that value is an href or src, group 2 its quote); a
-# `>` inside a quoted value does not close the tag.
-HTML_TAG = re.compile(r"<(?:a|img)(?=[\s>/])", re.I)
-TAG_STOP = re.compile(r">|(\s(?:href|src)\s*)?=\s*([\"'])", re.I)
+# An `<a>` or `<img>` open tag, read as CommonMark reads raw HTML (6.6):
+# attributes after whitespace, each value quoted or bare; a `>` inside a
+# quoted value does not end the tag, a quoted value must be followed by
+# whitespace, `/` or `>`, and nothing crosses a blank line. Anything else is
+# text, so a later tag inside it is still found. HTML_ATTR walks the
+# attributes of a matched tag (group 1 the name, 2 or 3 a quoted value).
+# Linear: every alternative starts on its own character, so a tag parses
+# one way only, and a `<` outside a quoted value ends an opener's scan. An
+# opener inside another's quoted value runs on only through a value of the
+# other quote kind, so scans overlap at most two deep.
+_HWS = r"(?:[ \t]|" + _PARA + r")"
+
+
+def _hattr(group):
+    """One attribute; group is "(" to capture its name and quoted value,
+    "(?:" for the copy inside HTML_OPEN."""
+    value = (r"(?:\"" + group + r"(?:[^\"\n]|" + _PARA + r")*)\"|'" + group
+             + r"(?:[^'\n]|" + _PARA + r")*)'|[^\s\"'=<>`]+)")
+    return (_HWS + r"+" + group + r"[A-Za-z_:][A-Za-z0-9_.:-]*)(?:" + _HWS + r"*="
+            + _HWS + r"*" + value + r")?")
+
+
+HTML_ATTR = re.compile(_hattr("("))
+HTML_OPEN = re.compile(r"<(?:a|img)((?:" + _hattr("(?:") + r")*)" + _HWS + r"*/?>", re.I)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
@@ -532,39 +561,17 @@ class Lines:
 
 
 def html_targets(text):
-    """(offset, value) of every href and src in an `<a>` or `<img>` tag.
-    A tag ends at the first `>` outside a quoted value, within its
-    paragraph: inline HTML never crosses a blank line, and a tag that does
-    not close there is text, not a tag. Linear: an opener inside a tag, or
-    inside the stretch a failed scan crossed, is not scanned again. The
-    cost: an opener that a failed scan read as part of a quoted value is
-    never tried on its own, which only matters after a tag that never
-    closes (broken HTML). Once a quote never closes in a paragraph, no later
-    opener there holds that quote, so each paragraph pays at most two such
-    scans to its end."""
-    ends = [m.start() for m in BLANK_LINE.finditer(text)] + [len(text)]
-    out, skip = [], -1
-    for m in HTML_TAG.finditer(text):
-        if m.start() < skip:
-            continue
-        stop = ends[bisect.bisect_left(ends, m.start())]
-        pos, found = m.end(), []
-        while True:
-            a = TAG_STOP.search(text, pos, stop)
-            if not a:
-                skip = stop   # no `>` left in the paragraph for any opener
-                break
-            if a.group() == ">":
-                out.extend(found)
-                skip = a.end()
-                break
-            close = text.find(a.group(2), a.end(), stop)
-            if close < 0:
-                skip = a.end()   # an unclosed quote: not a tag
-                break
-            if a.group(1):
-                found.append((a.end(), text[a.end():close]))
-            pos = close + 1
+    """(offset, value) of every quoted href and src in an `<a>` or `<img>`
+    open tag. A bare (unquoted) value is read as part of the tag but not
+    checked."""
+    out = []
+    for m in HTML_OPEN.finditer(text):
+        # The attributes tile group 1 with no gap, one parse only, so
+        # HTML_ATTR's walk is the parse HTML_OPEN matched.
+        for a in HTML_ATTR.finditer(text, m.start(1), m.end(1)):
+            g = 2 if a.group(2) is not None else 3
+            if a.group(1).lower() in ("href", "src") and a.group(g) is not None:
+                out.append((a.start(g), a.group(g)))
     return out
 
 

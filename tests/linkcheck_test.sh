@@ -470,6 +470,31 @@ expect_broken README.md 'See [no\]def][].' \
 expect_broken README.md '[sp]: <docs/gone file.md>' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
   "a <...> definition holding a space is checked whole"
+# An open tag is read as CommonMark reads raw HTML: a quoted value must be
+# followed by whitespace, `/` or `>`, and no tag crosses a blank line. What
+# fails that is text, so a tag inside it is still found.
+expect_broken README.md "<a t='x <a href=\"docs/gone.md\">y</a>" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a tag after an opener whose quote never closes is checked"
+expect_broken README.md 'A stray <a title="oops in prose, then <a href="docs/gone.md">t</a> later.' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a tag inside the would-be quoted value of a stray opener is checked"
+new_tree
+printf '<a href="docs/gone.md"\n\n>x</a>\n\n<a title="x"y href="docs/gone-too.md">z</a>\n' \
+  >"$work/r/docs/not-tags.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a tag across a blank line, or with a quoted value run into a name, is text (exit $rc): $out"
+ok "a tag across a blank line, or with a quoted value run into a name, is text, not a tag"
+# A title may hold its own delimiter escaped, in each of its three forms.
+new_tree
+printf '%s\n' '[1](docs/gone.md "t \" q") [2](docs/gone-2.md '"'t \\' q'"') [3](docs/gone-3.md (t \) q))' \
+  >"$work/r/docs/esc-title.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && [ "$(grep -c 'docs/esc-title.md:1: no such tracked file' <<<"$out")" = 3 ] \
+  || fail "a title holding its escaped delimiter must still make a link, in all three forms (exit $rc): $out"
+ok "a title may hold its own delimiter escaped, in all three forms"
 # The pattern spells the 2100 x's out: an interval such as x{2100} is past
 # RE_DUP_MAX (255) on BSD regex, so macOS grep cannot match it.
 long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
@@ -553,6 +578,15 @@ shapes = {
     "h32.md": "<a t='" * (n // 6),
     "h33.md": "<a t=\"x' " * (n // 9),
     "h34.md": "<a =" + " " * n + "x",
+    # Unbounded titles and ids, escaped title delimiters, and open tags that
+    # nest quote kinds, run a quoted value into a name, or never close.
+    "h35.md": '[a](b "' + "x" * n,
+    "h36.md": '[a](b "\\' * (n // 8),
+    "h37.md": '<a id="x ' * (n // 9),
+    "h38.md": "<a t=\"<a u='" * (n // 12),
+    "h39.md": '<a t="' + "<a b " * (n // 5) + '" c="d"x',
+    "h40.md": '<a t="x"y ' * (n // 10),
+    "h41.md": "<a" + " a=b" * (n // 4),
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -567,7 +601,7 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
-ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, in prose and headings) finishes in bounded time"
+ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"

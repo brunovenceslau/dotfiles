@@ -484,12 +484,15 @@ link-convention change.
   of the file when never closed, as GitHub renders them), indented code blocks
   and inline code spans are not prose, so a link inside one is ignored. Front
   matter that never closes is prose, since GitHub renders its `---` as a rule.
-  An HTML `href` or `src` may be double- or single-quoted, and a `>` inside
-  a quoted attribute value does not end the tag. A link whose
+  An HTML `href` or `src` may be double- or single-quoted. A tag is read as
+  CommonMark reads raw HTML: a `>` inside a quoted attribute value does not
+  end it, and one that crosses a blank line, or runs a quoted value into
+  the next attribute, is text. A link whose
   text wraps across lines is still found, and a CRLF file reads exactly like
   its LF twin. A link destination may hold balanced parentheses (up to 3
   levels deep) and backslash escapes, or be written `<...>` with spaces, and
-  its title may be double- or single-quoted or in parentheses. Neither has
+  its title may be double- or single-quoted or in parentheses, holding its
+  own delimiter escaped. Neither has
   a length limit. Every other URL scheme is out of scope, since the gate
   never touches the network.
 
