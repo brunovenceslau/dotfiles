@@ -79,11 +79,11 @@ PREFIX = "commit-identity"
 # counts them printable (letters, marks or symbols, not format characters):
 # the Hangul fillers, the combining grapheme joiner, the Khmer and Mongolian
 # invisible vowels and selectors, the variation selectors, the braille blank,
-# the Egyptian hieroglyph blanks and the Khitan small script filler. The same
-# list as lib/host_identity.py's _INVISIBLE.
+# the Egyptian hieroglyph blanks, the Khitan small script filler and the
+# musical null notehead. The same list as lib/host_identity.py's _INVISIBLE.
 _INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
               (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
-              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0x1D159, 0x1D159), (0xE0100, 0xE01EF))
 
 
 def _invisible(c):

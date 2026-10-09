@@ -529,6 +529,9 @@ def entry_verifies(entry, principal, now):
     return ok and match_pattern_list(principal, entry.principals)
 
 
+# Combining marks: each draws on the character before it, never on its own.
+_MARKS = frozenset(["Mn", "Me"])
+
 # Unicode categories never allowed in a value that lands in a git ident line:
 # controls, invisible format characters, line and paragraph separators, and
 # the surrogates that stand for bytes that were not UTF-8.
@@ -578,10 +581,13 @@ def _shown(value):
     """VALUE (a config value, an origin, a path, a tool's message) as a
     message prints it: bare when escape() leaves it as it is and it is not
     empty, does not start or end with a space and holds no run of two
-    spaces, else quoted(). An empty or edge-spaced value would print as
-    nothing or blur into the words around it, and a run of spaces could
-    push the words after it onto a soft-wrapped line of their own, where
-    they pass for a line this module printed. Applied to each
+    spaces (combining marks left out of both tests), else quoted(). An
+    empty or edge-spaced value would print as nothing or blur into the
+    words around it, and a run of spaces could push the words after it to
+    the start of a soft-wrapped row, where they look like a line of their
+    own. That is all the quotes promise: a value cannot add a line break,
+    rewrite the terminal or hide characters, and a long value of single
+    spaces stays bare and can still wrap like any long text. Applied to each
     interpolated value at its call site, never to a whole line: the line's
     literal text is what docs/troubleshooting.md quotes, and it must print as
     written.
@@ -594,7 +600,11 @@ def _shown(value):
     tests/host_identity_units.py checks statically that every value put into
     a string goes through an escaper."""
     value = str(value)
-    if value and value == value.strip() and "  " not in value and escape(value) == value:
+    # A combining mark (Mn, Me) after a space draws nothing of its own, so a
+    # space-mark run would hide a run of spaces: the space tests read the
+    # value without its marks.
+    spaced = "".join(c for c in value if unicodedata.category(c) not in _MARKS)
+    if spaced and spaced == spaced.strip() and "  " not in spaced and escape(value) == value:
         return value
     return quoted(value)
 
@@ -659,12 +669,12 @@ _SHELL_ACTIVE = '"\\$`!'
 # _BAD_CATEGORIES lets through (they are letters, marks or symbols, not
 # format characters): the Hangul fillers, the combining grapheme joiner,
 # the Khmer and Mongolian invisible vowels and selectors, the variation
-# selectors, the braille blank, the Egyptian hieroglyph blanks and the
-# Khitan small script filler. A suggested name holding one would look like
-# a different name than the one written.
+# selectors, the braille blank, the Egyptian hieroglyph blanks, the Khitan
+# small script filler and the musical null notehead. A suggested name
+# holding one would look like a different name than the one written.
 _INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
               (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
-              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0x1D159, 0x1D159), (0xE0100, 0xE01EF))
 # Unassigned (Cn) and private-use (Co) code points have no agreed glyph, so
 # a suggestion holding one may render as another name. Only the suggestion
 # refuses them: valid_name(), which decides what is written, does not, and
@@ -677,19 +687,26 @@ def _invisible(c):
     return any(lo <= o <= hi for lo, hi in _INVISIBLE)
 
 
+# The longest full name the missing-name line suggests: a longer one would
+# wrap that line on a common terminal, and a name that long is more likely
+# a GECOS field holding something else than the operator's name.
+SUGGESTED_NAME_MAX = 100
+
+
 def suggested_name(name):
     """The value the missing-name line puts after --name: NAME when
     install.sh identity would accept it, a shell passes it through double
     quotes unchanged, and it reads on screen as what it is (a letter or a
     digit, no space but U+0020, no invisible, unassigned or private-use
-    code point), and it prints bare through _shown(), else the placeholder.
+    code point, at most SUGGESTED_NAME_MAX characters), and it prints bare
+    through _shown(), else the placeholder.
     That last test keeps the double quotes of the suggested command around
     the name alone: a name _shown() quotes (a space at an edge, a run of
     two) would be pasted with its single quotes as part of it.
     missing_name_line() puts it in through _shown() as well, so a control
     character could never reach the terminal even if valid_name() were
     loosened."""
-    if (name and valid_name(name)
+    if (name and len(name) <= SUGGESTED_NAME_MAX and valid_name(name)
             and not any(c in _SHELL_ACTIVE for c in name)
             and any(c.isalnum() for c in name)
             and not any(c.isspace() and c != " " for c in name)
@@ -871,6 +888,7 @@ def _isolate(place):
     try:
         with _Held():
             place.made = tempfile.mkdtemp(prefix="host_identity.git.")
+            _left.add(place.made)
         cwd = _getcwd_in(place.made)
     except Refusal as refusal:
         return str(refusal)
@@ -942,6 +960,7 @@ def git_release():
     with _Held():
         if _git_place is not None and _git_place.made is not None:
             shutil.rmtree(_git_place.made, ignore_errors=True)
+            _left.discard(_git_place.made)
         _git_place = None
 
 
@@ -1075,13 +1094,22 @@ def load_revocation(path):
 UNWINDING = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
+# Every temporary file or directory made and not yet removed, added in the
+# same _Held block that makes it and dropped in the one that removes it.
+# A signal can still land after a normal way out enters a finally and
+# before that finally's _Held blocks it; the unwind then skips the removal,
+# and entry() removes what is left here instead (_remove_left()).
+_left = set()
+
+
 class _Held(object):
     """A block during which the UNWINDING signals wait: one that arrives is
     delivered when the block ends. Wraps the creation of a temporary file or
-    directory AND the assignment that records it, inside the try whose
-    finally removes it, so no signal can unwind between the two and leave
-    one nobody removes; and wraps that finally's removal, so a signal that
-    lands while it runs on a normal way out cannot cut it short."""
+    directory AND the assignments that record it (in its own variable and in
+    _left), inside the try whose finally removes it, so no signal can unwind
+    between the two and leave one nobody removes; and wraps that finally's
+    removal, so a signal that lands while it runs on a normal way out cannot
+    cut it short."""
 
     def __enter__(self):
         self.old = signal.pthread_sigmask(signal.SIG_BLOCK, UNWINDING)
@@ -1089,6 +1117,22 @@ class _Held(object):
     def __exit__(self, *exc):
         signal.pthread_sigmask(signal.SIG_SETMASK, self.old)
         return False
+
+
+def _remove_left():
+    """Remove every temporary file or directory still in _left: entry()'s
+    last cleanup on a signal, for one whose own cleanup the signal skipped.
+    Best effort, the signals held: the process dies of the signal next."""
+    with _Held():
+        for path in sorted(_left):
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+        _left.clear()
 
 
 def krl_revokes(path, key):
@@ -1101,6 +1145,7 @@ def krl_revokes(path, key):
     try:
         with _Held():
             fd, pub = tempfile.mkstemp(prefix="host_identity.", suffix=".pub")
+            _left.add(pub)
         with os.fdopen(fd, "w") as fh:
             fh.write(" ".join(key) + "\n")
         p = subprocess.run(
@@ -1116,6 +1161,7 @@ def krl_revokes(path, key):
         # Held: a signal that lands mid-cleanup waits for it to finish.
         with _Held():
             if pub is not None:
+                _left.discard(pub)
                 try:
                     os.unlink(pub)
                 except OSError:
@@ -1409,6 +1455,7 @@ def backup_once(path, src_fd, mode):
     try:
         with _Held():
             fd, tmp = tempfile.mkstemp(prefix=".config.local.bak.", dir=os.path.dirname(path))
+            _left.add(tmp)
         os.close(fd)
         _copy_fd(src_fd, tmp)
         os.chmod(tmp, mode)
@@ -1424,6 +1471,7 @@ def backup_once(path, src_fd, mode):
         # Held: a signal that lands mid-cleanup waits for it to finish.
         with _Held():
             if tmp is not None:
+                _left.discard(tmp)
                 os.unlink(tmp)
     log("identity: backed up %s -> %s" % (_shown(path), _shown(bak)))
 
@@ -1460,6 +1508,7 @@ def write_keys(path, items):
             os.makedirs(d, exist_ok=True)
             with _Held():
                 fd, tmp = tempfile.mkstemp(prefix=".config.local.", dir=d)
+                _left.add(tmp)
             os.close(fd)
         except OSError as e:
             warn("identity: cannot stage a write next to %s: %s" % (_shown(path), e.strerror))
@@ -1476,8 +1525,12 @@ def write_keys(path, items):
                     return False
             if src is not None:
                 backup_once(path, src, mode)
-            os.replace(tmp, path)
-            tmp = None
+            # Held: the rename and dropping the record are one step, so the
+            # last cleanup never looks for a name the rename took away.
+            with _Held():
+                os.replace(tmp, path)
+                _left.discard(tmp)
+                tmp = None
         except OSError as e:
             warn("identity: cannot write %s: %s" % (_shown(path), e.strerror))
             return False
@@ -1486,8 +1539,10 @@ def write_keys(path, items):
         with _Held():
             if src is not None:
                 os.close(src)
-            if tmp is not None and os.path.lexists(tmp):
-                os.unlink(tmp)
+            if tmp is not None:
+                _left.discard(tmp)
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
     return True
 
 
@@ -2091,8 +2146,11 @@ def gitconfig_finding(host):
     rc, out, _ = git(["config", "--file", path, "--name-only", "--get-regexp", GITCONFIG_IDENTITY])
     names = sorted(set(out.split("\n"))) if rc == 0 and out else []
     if names:
+        # A subsection can hold a comma or a quote: such a name is quoted,
+        # so the comma-joined list still reads as its names.
         return "problem", ("~/.gitconfig sets %s, and git reads it after ~/.config/git/config - move its settings into %s and remove it"
-                           % (", ".join(_shown(n) for n in names), _shown(host.config_local)))
+                           % (", ".join(quoted(n) if "," in n or "'" in n else _shown(n) for n in names),
+                              _shown(host.config_local)))
     return "info", "~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it"
 
 
@@ -2694,7 +2752,8 @@ def _die_of(signum):
 def entry(argv):
     """main(), with an interrupt or a termination reported without a
     traceback. main()'s finally has already removed git's empty directory
-    by then, and krl_revokes() its key file. A SIGTERM or SIGHUP the caller
+    by then, and krl_revokes() its key file; _remove_left() removes any
+    temporary one a signal kept its cleanup from removing. A SIGTERM or SIGHUP the caller
     left at its default unwinds like ^C (Terminated), and ^C keeps its
     KeyboardInterrupt, all three through _unwind(); one the caller ignores
     (nohup) stays ignored."""
@@ -2707,8 +2766,10 @@ def entry(argv):
     try:
         return main(argv)
     except KeyboardInterrupt:
+        _remove_left()
         return _die_of(signal.SIGINT)
     except Terminated as e:
+        _remove_left()
         return _die_of(e.signum)
 
 

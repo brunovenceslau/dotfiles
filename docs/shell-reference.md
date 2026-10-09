@@ -395,16 +395,17 @@ file is recognised by its first line and judged by the `.pub` beside it.
 Agent keys print as `SHA256:` fingerprints. Each value a line puts in (a
 config value, an origin, a path, a tool's message) prints bare when it
 holds only printable characters and no backslash. An empty value, one with
-a space at either end and one with a run of two spaces print quoted too, so
-a value can neither vanish nor wrap words onto a line of their own. A
-quoted value prints in single quotes, with each control, bidi or invisible
-character (a Hangul filler and the braille blank included), backslash,
-quote and byte that is not UTF-8 escaped (`\x1b`, `\u202e`, `\u3164`), so
-it cannot rewrite the terminal or pass for message text. The words around it
-print as written. A path inside a command a line tells you to run (the
-installer, `config.local`) is quoted for the shell when it needs it, so the
-command runs as printed from a `HOME` that holds a space. The identity
-step's own lines follow the same rules.
+a space at either end and one with a run of two spaces (combining marks
+between them not counted) print quoted too, so a value cannot vanish or
+blur into the words around it. A quoted value prints in single quotes, with
+each control, bidi or invisible character (a Hangul filler and the braille
+blank included), backslash, quote and byte that is not UTF-8 escaped
+(`\x1b`, `\u202e`, `\u3164`), so it cannot add a line break, rewrite the
+terminal or hide characters. A long value can still wrap like any long text.
+The words around it print as written. A path inside a command a line tells
+you to run (the installer, `config.local`) is quoted for the shell when it
+needs it, so the command runs as printed from a `HOME` that holds a space.
+The identity step's own lines follow the same rules.
 
 `install.sh doctor` exits `0` when it found no problem (a host that opted out
 included), `1` when it found one (a `python3` that does not run included),

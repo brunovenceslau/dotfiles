@@ -553,13 +553,25 @@ def escaping_units(mod, scratch):
           "_shown() quotes an empty value and one that starts or ends with a space")
     check([mod._shown(v) for v in ("a b", "a  b", "me@x.org" + " " * 40 + "fix: run this")]
           == ["a b", "'a  b'", "'me@x.org%sfix: run this'" % (" " * 40)],
-          "_shown() keeps a single inner space bare and quotes a run of spaces, which could wrap into a line of its own")
+          "_shown() keeps a single inner space bare and quotes a run of spaces")
+    # A zero-width mark between the spaces does not hide the run: marks
+    # (Mn, Me) are left out of the space tests, so a space-mark run, or a
+    # space followed only by marks at an edge, is quoted. A mark on a letter
+    # (a decomposed e-acute) keeps a name bare.
+    forged = "me@x.org" + " \u2d7f" * 40 + "fix: run this"
+    check([mod._shown(v) for v in (forged, "x \u0301", "\u20dd x", "\u0301", "Jose\u0301 Doe")]
+          == ["'%s'" % forged, "'x \u0301'", "'\u20dd x'", "'\u0301'", "Jose\u0301 Doe"],
+          "_shown() quotes a run of spaces, an edge space or a value that combining marks pad, and keeps an accented name bare")
+    # What quoting does not promise: a long value of single spaces stays
+    # bare, and a terminal may wrap it like any long text.
+    long_words = "x " * 36 + "identity: signing is set up"
+    check(mod._shown(long_words) == long_words, "_shown() keeps a long value of single spaces bare")
     # The code points a terminal shows as nothing, though Python counts them
     # printable: escaped, so a value cannot hide text behind them.
-    blanks = "\u3164\u115f\u2800\u034f\ufe0f\U000e0100"
-    check(mod.escape("a" + blanks + "b") == "a\\u3164\\u115f\\u2800\\u034f\\ufe0f\\U000e0100b"
+    blanks = "\u3164\u115f\u2800\u034f\ufe0f\U000e0100\U0001d159"
+    check(mod.escape("a" + blanks + "b") == "a\\u3164\\u115f\\u2800\\u034f\\ufe0f\\U000e0100\\U0001d159b"
           and mod._shown("Jane\u3164Doe") == "'Jane\\u3164Doe'",
-          "escape() spells out the Hangul fillers, the braille blank, the CGJ and the variation selectors")
+          "escape() spells out the Hangul fillers, the braille blank, the CGJ, the variation selectors and the null notehead")
     # One rule for both printers: .githooks/commit_identity.py keeps its own
     # escape() (it runs alone), held here to this one over every code point.
     hook = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, ".githooks", "commit_identity.py")
@@ -640,6 +652,17 @@ def escaping_units(mod, scratch):
     check(rc == 1 and printable(text) and text.count("\n") == 1
           and "; every commit fails until this host has a signing key - run %s identity on this host" % inst_shown
           in text, "auto's one line escapes the installer in its fail-closed suffix (%r)" % text)
+
+    # ~/.gitconfig's key names, joined by ", ": a name holding a comma or a
+    # quote (a subsection can) is quoted, so the list still reads as its
+    # names.
+    gc_home = os.path.join(scratch, "gitconfig-names")
+    os.mkdir(gc_home)
+    with open(os.path.join(gc_home, ".gitconfig"), "w") as fh:
+        fh.write('[user "a, b"]\n\tx = 1\n[user "it\'s"]\n\ty = 1\n[user]\n\temail = e@x\n')
+    level, finding = mod.gitconfig_finding(mod.Host(gc_home, os.path.join(gc_home, "c"), "INSTALLER"))
+    check(level == "problem" and finding.startswith("~/.gitconfig sets 'user.a, b.x', user.email, 'user.it\\x27s.y', and"),
+          "a ~/.gitconfig key name holding a comma or a quote is quoted in the list (%r)" % finding)
 
     # The sweep: every mode on a host whose every value holds one, nothing
     # printed raw.
@@ -929,6 +952,66 @@ def killed_units(mod, scratch):
               "a SIGTERM while %s's cleanup runs on a normal way out waits for it (rc %d, left %r, %r)"
               % (what, p.returncode, left, p.stderr))
 
+    # A signal on a normal way out that lands just before the cleanup holds
+    # the signals: _Held, patched, signals the process the first time it is
+    # entered while the temporary file or directory exists, before the real
+    # one blocks anything. The cleanup never runs, so entry() must remove
+    # what is left on its way out.
+    before = (
+        "import importlib.util, os, signal, subprocess, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "what = sys.argv[3]\n"
+        "dirs = (os.environ['TMPDIR'], os.path.dirname(sys.argv[2]))\n"
+        "def made(n):\n"
+        "    if what == 'krl':\n"
+        "        return n.endswith('.pub')\n"
+        "    if what == 'git':\n"
+        "        return n.startswith('host_identity.git.')\n"
+        "    if what == 'write':\n"
+        "        return n.startswith('.config.local.') and not n.startswith('.config.local.bak.')\n"
+        "    return n.startswith('.config.local.bak.')\n"
+        "sent = []\n"
+        "Base = m._Held\n"
+        "class Held(Base):\n"
+        "    def __enter__(self):\n"
+        "        if not sent and any(made(n) for d in dirs for n in os.listdir(d)):\n"
+        "            sent.append(1)\n"
+        "            os.kill(os.getpid(), signal.SIGTERM)\n"
+        "            (lambda: None)()  # a Python call: a pending handler runs here\n"
+        "        return Base.__enter__(self)\n"
+        "m._Held = Held\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    if what == 'krl':\n"
+        "        m.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)\n"
+        "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[4]))\n"
+        "    elif what == 'git':\n"
+        "        m.git(['--version'])\n"
+        "    elif what == 'write':\n"
+        "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
+        "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
+        "    else:\n"
+        "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for what in ("krl", "git", "write", "backup"):
+        tmpdir = os.path.join(scratch, "before-tmp-" + what)
+        confdir = os.path.join(scratch, "before-conf-" + what)
+        os.mkdir(tmpdir, 0o700)
+        os.mkdir(confdir, 0o700)
+        local = os.path.join(confdir, "config.local")
+        with open(local, "w") as fh:
+            fh.write("[user]\n\temail = a@x\n")
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", before, mod.__file__, local, what, K1],
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n not in ("config.local", "config.local.bak")]
+        check(p.returncode == -signal.SIGTERM and left == [] and b"Traceback" not in p.stderr,
+              "a SIGTERM just before %s's cleanup holds the signals leaves nothing behind (rc %d, left %r, %r)"
+              % (what, p.returncode, left, p.stderr))
+
     # Two different signals pending at once: the first unwinds, the second is
     # ignored quietly, with no "Exception ignored" report of a race. Both are
     # sent while blocked, so both are pending when they are let through.
@@ -1005,7 +1088,20 @@ def killed_units(mod, scratch):
 # 3. Every value a message function returns (its message part) is safe; an
 #    attribute it returns counts when every value ever stored in it is one.
 # 4. A printer is only ever called by its name, never aliased, passed on or
-#    looked up by a string.
+#    looked up by a string. A standard stream is only ever named as
+#    `sys.stderr` or `sys.stdout` (never imported from sys, never with sys
+#    renamed) and only to call its write() or as print()'s file=, so no
+#    alias, writelines() or buffer reaches it; os.write() and os.writev()
+#    are printers of their data arguments.
+# 5. A message function is matched by how it is called: one in
+#    MESSAGE_FUNCS by its bare name only, one in MESSAGE_METHODS as a method
+#    only, and each is defined that way, so `subprocess.run()` is not run().
+#    An attribute counts as a memo (rule 3) only when every store to it is
+#    a plain assignment; setattr() and globals() are never called.
+#
+# Not covered, so kept by review: a trusted container changed through an
+# alias of it (`l = lines; l.append(p)`), and a file other than the
+# standard streams written to directly.
 #
 # A name or a function joins a list here only with the reason it holds
 # message text, and the rules above then hold every binding of it to that.
@@ -1020,8 +1116,9 @@ SAFE_CALLS = {
 SAFE_DOTTED = {"platform.python_version"}  # digits and dots
 # Functions whose return value is message text this module built: None for
 # the whole value, else the indexes of the message parts of the tuple they
-# return. Each return of each def of that name is checked; a method is
-# matched by its attribute name (host.agent()), so these names stay
+# return. Each return of each def of that name is checked. A module-level
+# function is matched by a call to its bare name, a method (MESSAGE_METHODS)
+# by a call to its attribute name (host.agent()), so these names stay
 # distinctive.
 MESSAGE_FUNCS = {
     "missing_name_line": None,
@@ -1030,13 +1127,15 @@ MESSAGE_FUNCS = {
     "_capture": (1,),  # (result, the warn() lines it collected)
     "git_isolate": None, "_isolate": None,  # why git cannot be isolated
     "overridden_line": None,
-    "why_no_candidate": None, "why_invalid": None,
     "entry_usable_now": (1,),  # (usable, why not)
     "stale_reason": (2,),  # (email, path, why)
     "gitconfig_finding": (1,),  # (level, text)
     "auto": (1,), "run": (1,),  # (exit status, the one line's suffix)
     "select": (1,),  # (chosen, the lines that say why none was)
     "read_small_file": (1,), "load_revocation": (1,),  # (data, why not)
+}
+MESSAGE_METHODS = {
+    "why_no_candidate": None, "why_invalid": None,
     "agent": (1,), "_read_agent": (1,),  # (keys, why not)
     "revocation": (1,), "_read_revocation": (1,),  # (path, why not)
     "locate_signers": (1, 2),  # (path, which config named it, why not)
@@ -1063,6 +1162,10 @@ SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log", "o
 SINK_FUNCS = {"warn", "note", "log", "print", "Refusal"}
 SINK_METHODS = {"ok", "info", "problem"}
 SINK_STREAMS = {"sys.stderr", "sys.stdout"}
+STREAM_NAMES = {"stderr", "stdout", "__stderr__", "__stdout__"}
+STREAMS = set("sys." + n for n in STREAM_NAMES)
+# Printers of every argument after the first (a file descriptor).
+SINK_DOTTED = {"os.write", "os.writev"}
 NOT_MESSAGE_KEYWORDS = {"signing"}  # Doctor.problem(signing=...) is a flag
 # Message templates held in a name and filled with `%` later.
 TEMPLATES = {"form", "FAIL_CLOSED", "name_local", "name_step", "email_local", "email_step"}
@@ -1093,10 +1196,15 @@ def _callee(node):
 
 def _message_call(node, index):
     """Whether NODE calls a message function whose message is INDEX of what
-    it returns (None: the whole value)."""
-    if not (isinstance(node, ast.Call) and _callee(node) in MESSAGE_FUNCS):
+    it returns (None: the whole value): a MESSAGE_FUNCS one by its bare
+    name, a MESSAGE_METHODS one as a method."""
+    if not isinstance(node, ast.Call):
         return False
-    parts = MESSAGE_FUNCS[_callee(node)]
+    f = node.func
+    table = MESSAGE_FUNCS if isinstance(f, ast.Name) else MESSAGE_METHODS if isinstance(f, ast.Attribute) else {}
+    if _callee(node) not in table:
+        return False
+    parts = table[_callee(node)]
     return parts is None if index is None else parts is not None and index in parts
 
 
@@ -1162,6 +1270,7 @@ def _is_sink(node):
         return False
     f = node.func
     return (isinstance(f, ast.Name) and f.id in SINK_FUNCS
+            or _dotted(f) in SINK_DOTTED
             or isinstance(f, ast.Attribute) and (f.attr in SINK_METHODS | SINK_FUNCS
                                                  or f.attr == "write" and _dotted(f.value) in SINK_STREAMS))
 
@@ -1185,6 +1294,23 @@ def unescaped_values(source):
                     for e in t.elts:
                         if isinstance(e, ast.Attribute):
                             stored.setdefault(e.attr, []).append(None)
+        elif isinstance(n, (ast.AugAssign, ast.AnnAssign)) and isinstance(n.target, ast.Attribute):
+            stored.setdefault(n.target.attr, []).append(None)  # self.x += ...: not a memo
+    # Rule 5: each message function is defined the way it is matched.
+    for cls in [n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)]:
+        for fn in cls.body:
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in MESSAGE_FUNCS:
+                found.append((fn.lineno, "message function %s defined as a method" % fn.name))
+    for fn in tree.body:
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in MESSAGE_METHODS:
+            found.append((fn.lineno, "message method %s defined as a function" % fn.name))
+    # Rule 4: where a standard stream may be named.
+    stream_ok = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "write":
+            stream_ok.add(n.func.value)
+        if isinstance(n, ast.Call) and _callee(n) == "print":
+            stream_ok.update(k.value for k in n.keywords if k.arg == "file")
     # Functions with a parameter that carries a trusted name: checked at
     # every call (rule 2).
     trusted_params = {}
@@ -1202,6 +1328,8 @@ def unescaped_values(source):
         return ast.get_source_segment(source, node)
 
     def operands(node):
+        if isinstance(node, ast.Call) and _dotted(node.func) in SINK_DOTTED:
+            return list(node.args[1:])
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             left = node.left
             if not (_str_literal(left) or isinstance(left, ast.Name) and left.id in TEMPLATES):
@@ -1317,6 +1445,8 @@ def unescaped_values(source):
             skip = skip or node.name in SKIPPED
             if node.name in MESSAGE_FUNCS:
                 returns(node, MESSAGE_FUNCS[node.name])
+            elif node.name in MESSAGE_METHODS:
+                returns(node, MESSAGE_METHODS[node.name])
         if isinstance(node, ast.Lambda) or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
                 and node.name not in trusted_params:
             a = node.args
@@ -1345,8 +1475,18 @@ def unescaped_values(source):
                 bad(node, "%s used, not called" % node.id)
             if isinstance(node, ast.Attribute) and (node.attr in SINK_METHODS | SINK_FUNCS
                                                     or node.attr in trusted_params
+                                                    or _dotted(node) in SINK_DOTTED
                                                     or node.attr == "write" and _dotted(node.value) in SINK_STREAMS):
                 bad(node, "%s used, not called" % seg(node))
+        if isinstance(node, ast.Attribute) and _dotted(node) in STREAMS and node not in stream_ok:
+            bad(node, "%s used other than by write() or print(file=)" % seg(node))
+        if isinstance(node, ast.Import) and any(a.name == "sys" and a.asname for a in node.names):
+            bad(node, "sys imported under another name")
+        if isinstance(node, ast.ImportFrom) and node.module in ("sys", "os") and any(
+                a.name in STREAM_NAMES or a.name in ("write", "writev") for a in node.names):
+            bad(node, "a stream or os.write imported by name")
+        if isinstance(node, ast.Call) and _callee(node) in ("setattr", "globals"):
+            bad(node, "%s() called" % _callee(node))
         if isinstance(node, ast.Call) and _callee(node) == "getattr" and any(
                 isinstance(x, ast.Constant) and (x.value in SINK_FUNCS | SINK_METHODS or x.value == "write")
                 for x in node.args):
@@ -1423,6 +1563,19 @@ EVASIONS = (
     "def _x(p):\n    warn('x %d %s' % (1, p))\n",
     "def _x(p):\n    try:\n        pass\n    except OSError as why:\n        warn(why)\n",
     "def _x(p):\n    getattr(sys.modules[__name__], 'warn')(p)\n",
+    "def _x(p):\n    e = sys.stderr\n    e.write(p)\n",
+    "def _x(p):\n    sys.stderr.writelines([p])\n",
+    "def _x(p):\n    sys.stdout.buffer.write(p)\n",
+    "def _x(p):\n    from sys import stderr\n    stderr.write(p)\n",
+    "def _x(p):\n    import sys as s\n    s.stderr.write(p)\n",
+    "def _x(p):\n    os.write(2, p)\n",
+    "def _x(p):\n    w = os.write\n    w(2, p)\n",
+    "def _x(p):\n    _, why = subprocess.run(p)\n    warn(why)\n",
+    "def _x(host, p):\n    why = host.missing_name_line(p)\n    warn(why)\n",
+    "class _K(object):\n    def _m(self, p):\n        self._memo = missing_name_line(p)\n        self._memo += p\n"
+    "        why = self._memo\n        warn(why)\n",
+    "def _x(self, p):\n    setattr(self, 'refusal', p)\n",
+    "def _x(p):\n    globals()['why'] = p\n",
 )
 
 
@@ -1702,6 +1855,10 @@ def main(argv):
         got = mod.suggested_name(blank)
         check(got == "Full Name", "a full name %r a terminal does not show as it is is not suggested (got %r)"
               % (blank, got))
+    # A name longer than the cap would wrap the hint on a narrow terminal.
+    at_cap = "J" * mod.SUGGESTED_NAME_MAX
+    check(mod.suggested_name(at_cap) == at_cap and mod.suggested_name(at_cap + "J") == "Full Name",
+          "a full name of %d characters is suggested, one more is not" % mod.SUGGESTED_NAME_MAX)
     for good in ("Jos\u00e9 \u00d1\u00fa\u00f1ez", "Jane Doe 3rd", "\u674e\u5c0f\u9f8d", "O'Brien-Smith"):
         got = mod.suggested_name(good)
         check(got == good, "a full name %r is suggested as it is (got %r)" % (good, got))
