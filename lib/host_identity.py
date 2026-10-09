@@ -595,13 +595,15 @@ def _shown(value):
 
 def shell_word(path):
     """PATH as one word of a command a message tells the operator to run
-    (the installer, config.local): shlex.quote(), so a space or a `$` in it
-    stays one literal word and the command runs as printed. A path that
-    _shown() leaves bare is quoted only when a shell needs it, so the
-    quoted messages keep their shape. One that escape() changes (a control
-    character, a backslash) prints escaped inside the quotes: it can never
-    reach the terminal raw, and the command then names its escaped
-    spelling, a path no shell would turn back into the real one."""
+    (the installer, config.local), quoted by shlex.quote() so a space, a `$`
+    or a backslash in it stays one literal word and the command runs as
+    printed; a plain path stays bare, so the quoted messages keep their
+    shape. A path holding a character escape() spells out (a control, a
+    bidi mark, a byte that is not UTF-8) is quoted in its escaped spelling
+    instead: it can never reach the terminal raw, and the command then
+    names that spelling, a path no shell turns back into the real one."""
+    if escape(path) == path.replace("\\", "\\\\"):
+        return shlex.quote(path)
     return shlex.quote(escape(path))
 
 

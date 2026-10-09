@@ -702,6 +702,10 @@ def command_word_units(mod, scratch):
     rc, text = h.said("identity", installer=inst)
     check(command(text, "user.name is not set - run: ") == [inst, "identity", "--name", "Full Name"],
           "identity's missing-name line names the installer as one shell word (%r)" % text)
+    slashed = os.path.join(h.home, "dot\\files", "install.sh")
+    rc, text = h.said("identity", installer=slashed)
+    check(command(text, "user.name is not set - run: ") == [slashed, "identity", "--name", "Full Name"],
+          "a printable installer path holding a backslash runs as printed (%r)" % text)
     # Two identities for the agent's key: the fix sets user.email first.
     with open(h.signers, "w") as fh:
         fh.write("a@example.com %s\nb@example.com %s\n" % (K1, K1))
