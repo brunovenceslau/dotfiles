@@ -417,6 +417,8 @@ ok "pre-push refuses a pushed commit with two author headers"
 # A NUL inside the headers hides a second author or committer from
 # `git rev-list --header`, which stops there, while %ae and %ce read past
 # it: the guard reads the raw object and refuses a NUL among the headers.
+# These fixtures also hold a second header, so the duplicate rule refuses
+# them too; the case after this loop isolates the NUL rule.
 for role in committer author; do
   nul="$(printf 'tree %s\nparent %s\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\nx\0y\n%s E <e@x> 1 +0000\n\nnul\n' \
     "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" "$role" \
