@@ -167,24 +167,39 @@ fi
 ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignannotated "$ex" || :)" "0"
 # Style-independent twin of the uncommenting below: whatever indentation a
 # commented line takes, no line of the example may read as a gpgsign opt-out,
-# with or without the commit. prefix. git reads `false`, `no`, `off`, `0` and an
-# EMPTY value as false; `#` and `;` both start a comment; a trailing comment may
-# follow the value, and the value may be quoted.
-optout_re='^[#;][[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*("?(false|no|off|[-+]?0+)"?)?[[:space:]]*([#;].*)?$'
+# with or without the commit. prefix. git reads `false`, `no`, `off`, any zero
+# integer (signed, hex, with a k/m/g suffix: 00, -0, 0x0, 0k) and an EMPTY value
+# (bare or `""`) as false; `#` and `;` both start a comment, repeated and
+# indented too; a trailing comment may follow the value.
+optout_re='^[[:space:]]*[#;]+[[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*(""|"?(false|no|off|[-+]?(0x0+|0+)[kmgKMG]?)"?)?[[:space:]]*([#;].*)?$'
 optout_count() { grep -ciE "$optout_re" "$1" || :; }
 # The matcher itself is proven on one line per shape, so it cannot go blind to
-# one of them while the example stays clean.
+# one of them while the example stays clean. Each must-catch value is also
+# checked against git itself: uncommented, git must read it as false (and the
+# must-ignore values as true, or not as a gpgsign opt-out at all).
 shapes="$work/optout_shapes"
+catch_n=0
 for line in '# gpgsign = false' '#commit.gpgsign=no' '; gpgsign = false' ';	commit.gpgsign = off' \
   '# gpgsign = false # trailing' '# gpgsign = false ; trailing' '# gpgsign =' '; commit.gpgsign =  ' \
-  '# gpgsign = "false"' '# gpgsign = 0 # x' '# gpgsign = 00' '; gpgsign = -0' '# gpgsign = +0'; do
+  '# gpgsign = "false"' '# gpgsign = 0 # x' '# gpgsign = 00' '; gpgsign = -0' '# gpgsign = +0' \
+  '# gpgsign = 0x0' '# gpgsign = 0k' '# gpgsign = 0G' '# gpgsign = 00m' '# gpgsign = ""' \
+  '   # gpgsign = false' '## gpgsign = false' ';; commit.gpgsign = no'; do
+  catch_n=$((catch_n + 1))
   printf '%s\n' "$line" > "$shapes"
   ck "the opt-out matcher catches: $line" "$(optout_count "$shapes")" "1"
+  # Uncomment: drop the comment lead, keep the rest as the value of a real key.
+  printf '[commit]\n\t%s\n' "$(printf '%s' "$line" | sed -E 's/^[[:space:]]*[#;]+[[:space:]]*//; s/^commit\.//; s/[[:space:]]*[#;] .*$//')" > "$shapes.cfg"
+  ck "git reads the uncommented fixture as false: $line" "$(git config --file "$shapes.cfg" --type=bool commit.gpgsign 2>&1 || echo ERR)" "false"
 done
-for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = false' '# Leave gpgsign off'; do
+ck "the must-catch fixtures are all present" "$catch_n" "21"
+ignore_n=0
+for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = false' '# Leave gpgsign off' \
+  '# gpgsign = 1' '# gpgsign = 0x1' '# gpgsign = 10' '# gpgsign = 0k1'; do
+  ignore_n=$((ignore_n + 1))
   printf '%s\n' "$line" > "$shapes"
   ck "the opt-out matcher ignores: $line" "$(optout_count "$shapes")" "0"
 done
+ck "the must-ignore fixtures are all present" "$ignore_n" "8"
 ck "the example carries no commented gpgsign opt-out line" "$(optout_count "$ex")" "0"
 # The example says to uncomment and edit each line: doing exactly that, with
 # the result included after the tracked config the way the link engine writes

@@ -83,7 +83,7 @@ zmodload zsh/zpty    2>/dev/null || { print -r -- "ZPTY_UNAVAILABLE"; exit 0 }
 zmodload zsh/zselect 2>/dev/null || { print -r -- "ZPTY_UNAVAILABLE"; exit 0 }
 # Under the caller's $work (argument 2) so its EXIT trap removes it; a bare
 # mktemp -d here leaked one directory per run.
-dir=$2
+dir=${2:?scratch dir required}
 mkdir -p -- "$dir"
 # Fixture for the no-file assertion: exactly one plain file with a unique name,
 # so a position that must complete nothing is proven to not fall back to files.
