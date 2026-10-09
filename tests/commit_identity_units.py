@@ -71,6 +71,12 @@ def entries_case(what, rc, out, err, want):
 
 entries_case("git config rc > 1 exits 2", 128, b"", b"boom\n",
              "'git config' failed (exit 128): boom")
+# git never prints an entry and exits 1, so only a fake reaches this: the
+# pass arm must stay narrow ("no such key" means no output at all), or an
+# entry printed with that exit would be dropped instead of checked.
+entries_case("git config rc 1 with output exits 2", 1,
+             b"local\0file:/g/config\0user.email\na@b\0", b"",
+             "'git config' failed (exit 1)")
 entries_case("a field count off by one exits 2", 0,
              b"local\0file:/g/config\0user.email\na@b\0local\0",
              b"", "unexpected shape")
