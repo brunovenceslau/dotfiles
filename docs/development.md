@@ -532,16 +532,17 @@ scope and the file, and the command that removes it, then one line pointing
 at `git -c`:
 
 ```text
-commit-identity: check: refusing: user.email 'a@b' is set at scope local in /path/.git/config; fix: git config --file /path/.git/config --unset-all user.email
+commit-identity: check: refusing: user.email 'a@b' is set at scope local in '/path/.git/config'; fix: git config --file '/path/.git/config' --unset-all user.email
 ```
 
 Control characters, bidi and zero-width characters, and the code points a
 terminal shows as blank (a Hangul filler, the braille blank), in a value or
 a path print as `\xHH`, `\uHHHH` or `\UHHHHHHHH`, and a backslash as `\\`,
-so a value cannot forge a line. The file is shell-quoted wherever it is
-printed, so a path holding its own `; fix:` cannot pass for a second fix.
-When the escaping changes a path, the fix names the key to remove from that
-file instead of a command, which would name another file. It exits 2 when it
+so a value cannot forge a line. A value and a file print the same way: in
+single quotes, with a quote inside spelled `\x27`, so a path holding its own
+`; fix:` stays inside its quotes and cannot pass for a second fix. When that
+spelling changes a path, the fix names the key to remove from that file
+instead of a command, which would name another file. It exits 2 when it
 cannot answer: outside a repository, on a config git refuses to parse, or on
 a wrong argument.
 
@@ -563,8 +564,8 @@ commit-identity: pre-push: refusing: commit <oid> has committer email 'a@b', not
 This catches an identity removed from the config before the push: the
 commits made under it still carry it. Emails are compared exactly, case
 included, so a case-only difference refuses: that fails closed. The first 20
-offending commits in `git rev-list` order (newest first) are named, then one
-line counts the rest.
+offending commits in `git rev-list` order (by commit date, newest first) are
+named, then one line counts the rest.
 
 The commits compared are those a pushed tip reaches and no remote-tracking
 ref and no remote oid on git's stdin reaches. Any ref under `refs/remotes/`
@@ -576,8 +577,13 @@ GitHub's own merge commits; one the remote holds under a ref never fetched
 here is still compared. A replace ref (`refs/replace/`) is not followed,
 since the push sends the original commit. A deletion sends no commit and
 passes without an identity; a push with commits to compare and no effective
-identity exits 2. While a config refusal stands, the commits are not
-compared, since the effective identity is then the one being refused.
+identity exits 2. A push with nothing left to send passes: git still runs
+the hook, with an empty pipe on stdin. A stdin that is not a pipe (closed,
+or `/dev/null`), which git never gives, and a pushed object this repository
+lacks (a full object name as the source, which git hands the hook before it
+looks it up) exit 2. While a config
+refusal stands, the commits are not compared, since the effective identity
+is then the one being refused.
 
 A foreign author is refused on purpose: a cherry-pick that keeps someone
 else's authorship, or their merge, does not match the effective identity.
@@ -597,9 +603,13 @@ its repository, so the gate passes there.
 The guard catches accidents. It is not an enforcement boundary: a merge, a
 rebase or a cherry-pick skips `pre-commit`, a commit already on any remote
 this repository tracks is not compared again, and `--no-verify` or a
-repository `core.hooksPath` skips both hooks. The backstop on GitHub is the
-signed-commits rule of the `main-protection` branch ruleset (see
-[Repository settings](#repository-settings)).
+repository `core.hooksPath` skips both hooks. Two crafted pushes pass too,
+each harder than `--no-verify`: a refspec source holding an LF splits its
+line on the hook's stdin, so its first half can name any commit as one the
+remote holds, and a commit built by hand with two `author` headers is read
+by its last one (`git fsck` reports it as `multipleAuthors`). The backstop on
+GitHub is the signed-commits rule of the `main-protection` branch ruleset
+(see [Repository settings](#repository-settings)).
 
 ## CI
 

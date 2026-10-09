@@ -15,6 +15,7 @@
 import contextlib
 import importlib.util
 import io
+import shlex
 import subprocess
 import sys
 
@@ -44,10 +45,20 @@ def fake(rc, out=b"", err=b""):
     return run
 
 
-def run_with(func, rc, out=b"", err=b""):
+def fake_git(table, calls):
+    """A fake that answers each git subcommand from table, {name: (rc, out)},
+    and records (argv, stdin) in calls, for a function that runs several."""
+    def run(args, **kw):
+        calls.append((args, kw.get("input")))
+        rc, out = table[args[1]]
+        return subprocess.CompletedProcess(args, rc, stdout=out, stderr=b"")
+    return run
+
+
+def run_with(func, rc, out=b"", err=b"", runner=None):
     """(exit code or None, stderr text, result) of func() under the fake."""
     real = mod.subprocess.run
-    mod.subprocess.run = fake(rc, out, err)
+    mod.subprocess.run = runner or fake(rc, out, err)
     buf = io.StringIO()
     code = result = None
     try:
@@ -99,14 +110,35 @@ def refusal_for(origin):
 
 code, _, lines = refusal_for(b"file:.git/config")
 check(code is None and len(lines) == 1
-      and "in .git/config; fix: remove user.email from that file" in lines[0]
+      and "in '.git/config'; fix: remove user.email from that file" in lines[0]
       and "git config --file" not in lines[0],
       "refusals(): a relative origin path prints no runnable command")
 
 code, _, lines = refusal_for(b"file:/g/config")
-check(code is None and "fix: git config --file /g/config --unset-all "
-      "user.email" in lines[0],
-      "refusals(): an absolute origin path prints the command")
+check(code is None and lines == ["user.email 'a@b' is set at scope local in "
+                                 "'/g/config'; fix: git config --file "
+                                 "'/g/config' --unset-all user.email"],
+      "refusals(): an absolute origin path prints the command, quoted "
+      "(got %r)" % lines)
+# The command pasted into a shell names the file itself: one word, intact.
+check(code is None and shlex.split(lines[0].split("fix: ", 1)[1])
+      == ["git", "config", "--file", "/g/config", "--unset-all",
+          "user.email"], "refusals(): the printed command round-trips")
+
+# A quote in a path is spelled \x27, the way a value's is: the quoted word
+# cannot close early, so the path's own "; fix:" stays inside it, and the
+# changed spelling names another file, so no command is printed.
+code, _, lines = refusal_for(b"file:/g/a'; fix: rm x/config")
+want = ("user.email 'a@b' is set at scope local in '/g/a\\x27; fix: rm "
+        "x/config'; fix: remove user.email from that file (path shown "
+        "escaped)")
+check(code is None and lines == [want],
+      "refusals(): a quote in a path prints as \\x27 (got %r)" % lines)
+check(code is None
+      and sum(seg.count("; fix: ") for seg in lines[0].split("'")[::2]) == 1
+      and shlex.split(lines[0])[8] == "/g/a\\x27; fix: rm x/config;",
+      "refusals(): a path holding a quote and '; fix:' is one quoted word "
+      "and the line has one fix")
 
 code, _, lines = refusal_for(b"command line:")
 check(code is None and "from command line:" in lines[0],
@@ -145,18 +177,53 @@ check(mod.git_env("/g").get("GIT_NO_LAZY_FETCH") == "1",
 check(mod.git_env("/g").get("GIT_NO_REPLACE_OBJECTS") == "1",
       "git_env(): rev-list reads the commits a push sends, not replacements")
 
-code, _, got = run_with(lambda: mod.pushed_commits("/g", {A40}, set()), 0,
-                        ("commit %s\na@x\0c@x\n" % A40).encode())
+def pushed_one(rev_list_out):
+    """pushed_commits() of tip A40, which cat-file finds, under rev_list_out."""
+    return run_with(
+        lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+        runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
+                         "rev-list": (0, rev_list_out.encode())}, []))
+
+
+code, _, got = pushed_one("commit %s\na@x\0c@x\n" % A40)
 check(code is None and got == [(A40, "a@x", "c@x")],
       "pushed_commits(): one commit, its author and committer emails")
 for what, out in (
         ("no final LF", "commit %s\na@x\0c@x" % A40),
         ("a missing NUL", "commit %s\na@x\n" % A40),
         ("an LF inside an email", "commit %s\na\n@x\0c@x\n" % A40)):
-    code, text, _ = run_with(
-        lambda: mod.pushed_commits("/g", {A40}, set()), 0, out.encode())
+    code, text, _ = pushed_one(out)
     check(code == 2 and "'git rev-list' printed an unexpected shape" in text,
           "pushed_commits(): %s exits 2" % what)
+# A remote oid this repository never fetched leaves the exclusions; a pushed
+# tip it lacks cannot be read, which is "cannot tell", never a pass.
+calls = []
+code, _, got = run_with(
+    lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
+    runner=fake_git({"cat-file": (0, ("%s\n%s missing\n" % (A40, B40))
+                                  .encode()),
+                     "rev-list": (0, ("commit %s\na@x\0c@x\n" % A40)
+                                  .encode())}, calls))
+check(code is None and got == [(A40, "a@x", "c@x")]
+      and calls[-1][1] == ("%s\n" % A40).encode()
+      and "--ignore-missing" not in calls[-1][0],
+      "pushed_commits(): a missing remote oid is dropped before rev-list "
+      "(calls %r)" % calls)
+code, text, _ = run_with(
+    lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
+    runner=fake_git({"cat-file": (0, ("%s missing\n%s\n" % (A40, B40))
+                                  .encode())}, []))
+check(code == 2 and ("pre-push: the pushed object %s is not in this "
+                     "repository" % A40) in text,
+      "pushed_commits(): a missing pushed tip exits 2 (got %r)" % text)
+for what, out in (("a line short", "%s\n" % A40),
+                  ("another oid", "%s\n%s\n" % (A40, "e" * 40)),
+                  ("an unknown status", "%s\n%s ambiguous\n" % (A40, B40))):
+    code, text, _ = run_with(
+        lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
+        runner=fake_git({"cat-file": (0, out.encode())}, []))
+    check(code == 2 and "'git cat-file' printed an unexpected shape" in text,
+          "pushed_commits(): cat-file printing %s exits 2" % what)
 code, _, got = run_with(lambda: mod.pushed_commits("/g", set(), {B40}), 128)
 check(code is None and got == [],
       "pushed_commits(): no tip runs no git and lists nothing")
