@@ -384,6 +384,11 @@ _scan_roots() {
 #     file from the gate there that CI would still flag. ACCEPTED RESIDUAL: an
 #     uncommitted edit of a .gitignore hides what it names until that edit is
 #     committed; the .gitignore is a tracked file and is reviewed as one.
+#     `--exclude-per-directory` is NOT deprecated as of git 2.53 (the
+#     git-ls-files documentation at v2.53.0 still lists it and shows it as
+#     the way to emulate `--exclude-standard`). Should a git remove it, the
+#     listing fails, and the gate scans whole directories (more, never less);
+#     revisit when a git release note deprecates it or that fallback fires.
 #     `-c core.excludesFile=/dev/null` is belt and braces for the same.
 #     `-c core.fsmonitor=false` and the unset of git's local env vars are the
 #     same hardening _git_symlink_pass documents below (that pass stays the
@@ -491,7 +496,14 @@ fi
 _scan_roots install.sh lib bin zsh config packages security home
 scan=(${roots[@]+"${roots[@]}"})
 scan_links+=(${zsh_links[@]+"${zsh_links[@]}"})
+# Defined here, not at arm 12: a checkout whose only scanned file has a bad
+# name leaves `scan` empty (_add_root dropped it), and that name is the finding.
+names_msg="check-patterns: a file name holding ':', a newline or a CR - every arm reads a hit as PATH:NN:, so such a name can hide a violation; rename it"
 if [ "${#scan[@]}" -eq 0 ]; then
+  if [ -n "$listed_names" ]; then
+    _err "${listed_names%$'\n'}" "$names_msg"
+    exit 2
+  fi
   _err "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan"
   exit 2
 fi
@@ -1373,7 +1385,6 @@ fi
 # CR in one shows as `$'...'`, not as a broken line.
 nl=$'\n'
 cr=$'\r'
-names_msg="check-patterns: a file name holding ':', a newline or a CR - every arm reads a hit as PATH:NN:, so such a name can hide a violation; rename it"
 stray_msg="check-patterns: a file named check-patterns outside bin/ - every recursive arm excludes that base name, so nothing in it is scanned; rename or remove it"
 # _quote_nul EXCEPT - NUL-separated paths on stdin -> each one but EXCEPT,
 # `%q`-quoted, one per line.

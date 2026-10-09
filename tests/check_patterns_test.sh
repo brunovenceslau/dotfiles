@@ -1883,6 +1883,13 @@ fails_with_rc 2 "$r" "$names_msg" "an untracked file under a directory named wit
 r="$work/lst-nlname"; _lst_repo "$r"
 printf 'x\n' > "$r/lib/lst-nl-head"$'\n'"lst-nl-tail.sh"
 fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a newline must fail closed with exit 2" only
+r="$work/lst-crname"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/lst-cr"$'\r'"name.sh"
+fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a carriage return must fail closed with exit 2" only
+# the only scanned file has a bad name: scan ends up empty, the name is reported
+r="$work/lst-onlybad"; _git_repo "$r"; mkdir -p "$r/lib"; printf 'x\n' > "$r/lib/a:b.sh"
+git -C "$r" add -A; git -C "$r" commit -qm init
+fails_with_rc 2 "$r" "$names_msg" "a checkout whose only scanned file has a bad name reports the name" only
 
 # every grep arm that walks file operands names the file in its hits (-H):
 # with ONE file operand GNU grep drops the PATH: prefix, and an anchor on it
