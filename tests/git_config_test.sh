@@ -166,10 +166,26 @@ fi
 # example does not suggest it, not even commented (git reads names in any case).
 ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignannotated "$ex" || :)" "0"
 # Style-independent twin of the uncommenting below: whatever indentation a
-# commented line takes, no line of the example may read as a gpgsign opt-out
-# (false, no, off or 0), with or without the commit. prefix.
-ck "the example carries no commented gpgsign opt-out line" \
-  "$(grep -ciE '^#[[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*(false|no|off|0)[[:space:]]*$' "$ex" || :)" "0"
+# commented line takes, no line of the example may read as a gpgsign opt-out,
+# with or without the commit. prefix. git reads `false`, `no`, `off`, `0` and an
+# EMPTY value as false; `#` and `;` both start a comment; a trailing comment may
+# follow the value, and the value may be quoted.
+optout_re='^[#;][[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*("?(false|no|off|0)"?)?[[:space:]]*([#;].*)?$'
+optout_count() { grep -ciE "$optout_re" "$1" || :; }
+# The matcher itself is proven on one line per shape, so it cannot go blind to
+# one of them while the example stays clean.
+shapes="$work/optout_shapes"
+for line in '# gpgsign = false' '#commit.gpgsign=no' '; gpgsign = false' ';	commit.gpgsign = off' \
+  '# gpgsign = false # trailing' '# gpgsign = false ; trailing' '# gpgsign =' '; commit.gpgsign =  ' \
+  '# gpgsign = "false"' '# gpgsign = 0 # x'; do
+  printf '%s\n' "$line" > "$shapes"
+  ck "the opt-out matcher catches: $line" "$(optout_count "$shapes")" "1"
+done
+for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = false' '# Leave gpgsign off'; do
+  printf '%s\n' "$line" > "$shapes"
+  ck "the opt-out matcher ignores: $line" "$(optout_count "$shapes")" "0"
+done
+ck "the example carries no commented gpgsign opt-out line" "$(optout_count "$ex")" "0"
 # The example says to uncomment and edit each line: doing exactly that, with
 # the result included after the tracked config the way the link engine writes
 # ~/.config/git/config (lib/link.sh's _write_git_local_config), must leave
