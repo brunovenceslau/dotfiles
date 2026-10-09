@@ -17,6 +17,7 @@ import errno
 import io
 import importlib.util
 import os
+import re
 import shlex
 import signal
 import stat
@@ -878,46 +879,126 @@ def killed_units(mod, scratch):
 #
 # The escaping rule of lib/host_identity.py (_shown(), quoted(),
 # shell_word()) holds only where each call site applies it, and the end-to-end
-# checks reach only the branches a test stages. So every operand put into a
-# string by `%`, by an f-string, or by `+` next to a literal holding a space,
-# and every message handed whole to a printer (SINKS), must be one of these,
-# checked over the whole file:
-#   a constant; a call to an escaper or to a function whose result is safe
-#   (SAFE_CALLS); str(), _bare(), a slice or a join of operands that are
-#   themselves safe; a conditional whose two branches are; or a name or
-#   attribute in
-#   LITERAL_NAMES / LITERAL_ATTRS, each of which only ever holds text this
-#   module wrote or a number.
-# A new name is added here only with the reason it can hold nothing else.
+# checks reach only the branches a test stages. So, over the whole file:
+#
+# 1. Every operand put into a string by `%`, by an f-string, or by `+` next
+#    to a literal holding a space, and every argument handed to a printer
+#    (SINKS), is safe: a constant; an operand a numeric `%` conversion
+#    formats (a string there raises, it never prints); a call to an escaper
+#    (SAFE_CALLS) or to a message function (MESSAGE_FUNCS); str(), _bare(),
+#    _untailed(), sorted(), a slice, a join or a container of safe operands;
+#    a conditional or an `or` whose branches are; or a name in LITERAL_NAMES
+#    or an attribute in LITERAL_ATTRS.
+# 2. Those names are trusted for the data they hold, not their spelling:
+#    every binding of one (an assignment, `+=`, a loop or comprehension
+#    target, an append) is given a safe value by rule 1, or the message part
+#    of what a message function returns. A parameter with such a name is
+#    given a safe value at every call of its function, which is only ever
+#    called by its name. A `with` target or an import never binds one, and an
+#    `except` binds one only for Refusal, whose message is a printer's
+#    argument. A template name (TEMPLATES) is only ever bound to a literal.
+# 3. Every value a message function returns (its message part) is safe; an
+#    attribute it returns counts when every value ever stored in it is one.
+# 4. A printer is only ever called by its name, never aliased, passed on or
+#    looked up by a string.
+#
+# A name or a function joins a list here only with the reason it holds
+# message text, and the rules above then hold every binding of it to that.
+
+# Escapers, and calls whose result is safe by what it computes. Matched by
+# a bare name only: `re.escape(path)` is not escape(path).
 SAFE_CALLS = {
     "_shown", "quoted", "shell_word", "escape",
-    "fingerprint",      # SHA256:<base64>, computed here
-    "missing_name_line",  # one line, its own formats checked here
+    "fingerprint",  # SHA256:<base64>, computed here
     "len", "int",
-    "python_version",   # platform.python_version(): digits and dots
+}
+SAFE_DOTTED = {"platform.python_version"}  # digits and dots
+# Functions whose return value is message text this module built: None for
+# the whole value, else the indexes of the message parts of the tuple they
+# return. Each return of each def of that name is checked; a method is
+# matched by its attribute name (host.agent()), so these names stay
+# distinctive.
+MESSAGE_FUNCS = {
+    "missing_name_line": None,
+    "headline": None,  # one of the captured warn() lines
+    "_grouped": None,  # the captured warn() lines, each hint joined to its line
+    "_capture": (1,),  # (result, the warn() lines it collected)
+    "git_isolate": None, "_isolate": None,  # why git cannot be isolated
+    "overridden_line": None,
+    "why_no_candidate": None, "why_invalid": None,
+    "entry_usable_now": (1,),  # (usable, why not)
+    "stale_reason": (2,),  # (email, path, why)
+    "gitconfig_finding": (1,),  # (level, text)
+    "auto": (1,), "run": (1,),  # (exit status, the one line's suffix)
+    "select": (1,),  # (chosen, the lines that say why none was)
+    "read_small_file": (1,), "load_revocation": (1,),  # (data, why not)
+    "agent": (1,), "_read_agent": (1,),  # (keys, why not)
+    "revocation": (1,), "_read_revocation": (1,),  # (path, why not)
+    "locate_signers": (1, 2),  # (path, which config named it, why not)
+    "signers": (1, 3), "_read_signers": (1, 3),  # (path, source, entries, why not)
 }
 LITERAL_NAMES = {
-    # Numbers.
-    "n", "rc", "problems", "MAX_FILE", "AGENT_TIMEOUT",
-    # Config key names from this module's own lists, or a key parsed by
-    # parse_key(), whose type is in KEY_TYPES and whose blob is base64.
-    "key", "k", "sigkey", "new",
+    # A message, or a list of messages, this module built: a reason, a
+    # refusal, a joined override list, an already-shell_word() installer, a
+    # doctor finding, a captured warning, the one line's suffix.
+    "why", "reason", "reasons", "what", "inst", "finding", "said", "lines", "consequence",
+    "_captured", "outer", "folded", "kept", "tag_kept", "refusal",
     # Words from this module's literals.
-    "source", "tail", "how", "verb", "check", "env_name", "nums",
-    # Whole message text this module built, every value in it escaped
-    # where it was put in: a reason, a refusal, a joined override list,
-    # an already-shell_word() installer, a doctor finding, a message line
-    # (`said`: a refusal line, a captured warning, a kept-exception line).
-    "why", "reason", "what", "inst", "finding", "said",
+    "UNDECIDED", "source", "tail", "how", "verb", "env_name", "nums",
 }
-LITERAL_ATTRS = {"strerror", "lineno", "returncode", "pathsep"}
+# os.strerror() text and os.pathsep come from the C library, not a value; a
+# Doctor's found list holds what its printers were handed; a GitPlace's
+# refusal is what _isolate() returned.
+LITERAL_ATTRS = {"strerror", "pathsep", "found", "refusal"}
 # Not checked inside: the escapers format characters, not values, and the
 # printers print the message they are handed, checked where it is built.
-SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log"}
-# What prints a message: warn(), note(), log(), and a doctor finding.
-SINKS = {"warn", "note", "log", "ok", "info", "problem"}
+SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log", "ok", "info", "problem"}
+# What prints a message: warn(), note(), log(), print(), a doctor finding,
+# and a Refusal, whose text is shown later through str().
+SINK_FUNCS = {"warn", "note", "log", "print", "Refusal"}
+SINK_METHODS = {"ok", "info", "problem"}
+SINK_STREAMS = {"sys.stderr", "sys.stdout"}
+NOT_MESSAGE_KEYWORDS = {"signing"}  # Doctor.problem(signing=...) is a flag
 # Message templates held in a name and filled with `%` later.
-TEMPLATES = {"msg", "FAIL_CLOSED", "name_local", "name_step", "email_local", "email_step"}
+TEMPLATES = {"form", "FAIL_CLOSED", "name_local", "name_step", "email_local", "email_step"}
+# A conversion that only formats a number: a string given to it raises.
+_NUMERIC = set("diouxXeEfFgG")
+_SPEC = re.compile(r"%(?:\([^)]*\))?[-#0 +]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[hlL]?(.)")
+
+
+def _conversions(template):
+    """The conversion letter of each operand TEMPLATE takes, in order."""
+    return [m.group(1) for m in _SPEC.finditer(template) if m.group(1) != "%"]
+
+
+def _dotted(node):
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        head = _dotted(node.value)
+        return head and head + "." + node.attr
+    return None
+
+
+def _callee(node):
+    """The name a call is made by: a bare name, or a method's attribute."""
+    f = node.func
+    return f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
+
+
+def _message_call(node, index):
+    """Whether NODE calls a message function whose message is INDEX of what
+    it returns (None: the whole value)."""
+    if not (isinstance(node, ast.Call) and _callee(node) in MESSAGE_FUNCS):
+        return False
+    parts = MESSAGE_FUNCS[_callee(node)]
+    return parts is None if index is None else parts is not None and index in parts
+
+
+def _str_literal(node):
+    if isinstance(node, ast.IfExp):
+        return _str_literal(node.body) and _str_literal(node.orelse)
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
 
 
 def _safe(node):
@@ -929,57 +1010,106 @@ def _safe(node):
         return node.attr in LITERAL_ATTRS
     if isinstance(node, ast.IfExp):
         return _safe(node.body) and _safe(node.orelse)
+    if isinstance(node, ast.BoolOp):
+        return all(_safe(v) for v in node.values)
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return all(_safe(e) for e in node.elts)
     if isinstance(node, ast.Subscript):
         return _safe(node.value)  # a part of a safe value
+    if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+        return _safe(node.elt)  # its targets are bindings, checked as such
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
         # Checked as a format of its own.
-        return isinstance(node.left, ast.Constant) or isinstance(node.left, ast.Name) and node.left.id in TEMPLATES
+        return _str_literal(node.left) or isinstance(node.left, ast.Name) and node.left.id in TEMPLATES
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _safe(node.left) and _safe(node.right)
     if isinstance(node, ast.Call):
-        f = node.func
-        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None
-        if name in SAFE_CALLS:
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+            if name in SAFE_CALLS:
+                return True
+            if name in ("str", "_bare", "_untailed", "sorted") and len(node.args) == 1:
+                return _safe(node.args[0])
+        elif _dotted(node.func) in SAFE_DOTTED:
             return True
-        if name == "str" and len(node.args) == 1:
+        elif (isinstance(node.func, ast.Attribute) and node.func.attr == "join" and len(node.args) == 1
+              and isinstance(node.func.value, ast.Constant)):
             return _safe(node.args[0])
-        if name in ("_bare", "_untailed") and len(node.args) == 1:
-            return _safe(node.args[0])
-        if name == "join" and len(node.args) == 1:
-            arg = node.args[0]
-            if isinstance(arg, (ast.GeneratorExp, ast.ListComp)):
-                return _safe(arg.elt)
-            return _safe(arg)
+        return _message_call(node, None)
     return False
 
 
+def _formatted(node):
+    """The operands a `%` format puts in that may be text: those a numeric
+    conversion takes are left out."""
+    right = node.right
+    ops = list(right.elts) if isinstance(right, ast.Tuple) else [right]
+    if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+        kinds = _conversions(node.left.value)
+        if len(kinds) == len(ops):
+            return [op for op, kind in zip(ops, kinds) if kind not in _NUMERIC]
+    return ops
+
+
+def _is_sink(node):
+    """A call that prints its arguments, or records them to print."""
+    if not isinstance(node, ast.Call):
+        return False
+    f = node.func
+    return (isinstance(f, ast.Name) and f.id in SINK_FUNCS
+            or isinstance(f, ast.Attribute) and (f.attr in SINK_METHODS | SINK_FUNCS
+                                                 or f.attr == "write" and _dotted(f.value) in SINK_STREAMS))
+
+
 def unescaped_values(source):
-    """[(line, operand source)] of every operand that may put an unescaped
-    value into a string, by the rule above."""
+    """[(line, what)] for every operand that may put an unescaped value into
+    a string or a printer, and every binding, return or printer reference
+    that breaks the rules above."""
     tree = ast.parse(source)
     found = []
+    defs = {}  # name: [FunctionDef]
+    stored = {}  # attribute name: [values stored in it]
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.setdefault(n.name, []).append(n)
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Attribute):
+                    stored.setdefault(t.attr, []).append(n.value)
+                elif isinstance(t, ast.Tuple):  # a, self.x = ...: not a memo
+                    for e in t.elts:
+                        if isinstance(e, ast.Attribute):
+                            stored.setdefault(e.attr, []).append(None)
+    # Functions with a parameter that carries a trusted name: checked at
+    # every call (rule 2).
+    trusted_params = {}
+    for name, fns in defs.items():
+        for fn in fns:
+            a = fn.args
+            params = [x.arg for x in a.posonlyargs + a.args]
+            if any(p in LITERAL_NAMES for p in params + [x.arg for x in a.kwonlyargs]):
+                trusted_params[name] = fn
+
+    def bad(node, what=None):
+        found.append((getattr(node, "lineno", 0), what or ast.get_source_segment(source, node)))
+
+    def seg(node):
+        return ast.get_source_segment(source, node)
 
     def operands(node):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
             left = node.left
-            if isinstance(left, ast.Constant) and isinstance(left.value, str):
-                pass
-            elif isinstance(left, ast.Name) and left.id in TEMPLATES:
-                pass
-            else:
+            if not (_str_literal(left) or isinstance(left, ast.Name) and left.id in TEMPLATES):
                 return [left]  # a format whose template this check cannot see
-            right = node.right
-            return list(right.elts) if isinstance(right, ast.Tuple) else [right]
+            return _formatted(node)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             sides = (node.left, node.right)
             if any(isinstance(x, ast.Constant) and isinstance(x.value, str) and len(x.value) > 1 and " " in x.value
                    for x in sides):
                 return [x for x in sides if not isinstance(x, ast.Constant)]
             return []
-        if isinstance(node, ast.Call) and node.args:
-            f = node.func
-            if (f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else None) in SINKS:
-                return [node.args[0]]
+        if _is_sink(node):
+            return list(node.args) + [k.value for k in node.keywords if k.arg not in NOT_MESSAGE_KEYWORDS]
         if isinstance(node, ast.JoinedStr):
             return [v.value for v in node.values if isinstance(v, ast.FormattedValue)]
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format" \
@@ -987,39 +1117,247 @@ def unescaped_values(source):
             return [node.func.value]  # str.format() is not used: say so if it ever is
         return []
 
-    def visit(node, skip):
+    def literal(target):
+        """Whether TARGET binds a trusted name (or a part of one)."""
+        if isinstance(target, ast.Name):
+            return target.id in LITERAL_NAMES
+        if isinstance(target, ast.Attribute):
+            return target.attr in LITERAL_ATTRS
+        if isinstance(target, (ast.Subscript, ast.Starred)):
+            return literal(target.value)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return any(literal(e) for e in target.elts)
+        return False
+
+    def bind(target, value, at):
+        if isinstance(target, ast.Name) and target.id in TEMPLATES:
+            if not _str_literal(value):
+                bad(at, "template %s = %s" % (target.id, seg(value)))
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            for e in target.elts:
+                if isinstance(e, ast.Name) and e.id in TEMPLATES:
+                    bad(at, "template %s from %s" % (e.id, seg(value)))
+        if not literal(target):
+            return
+        if isinstance(value, ast.IfExp):
+            bind(target, value.body, at)
+            bind(target, value.orelse, at)
+            return
+        if isinstance(target, (ast.Name, ast.Attribute, ast.Subscript)):
+            if not (_safe(value) or memo(value, None)):
+                bad(at, "%s = %s" % (seg(target), seg(value)))
+            return
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if isinstance(value, (ast.Tuple, ast.List)) and len(value.elts) == len(target.elts):
+                for t, v in zip(target.elts, value.elts):
+                    bind(t, v, at)
+                return
+            for i, t in enumerate(target.elts):
+                if literal(t) and not (isinstance(t, ast.Name) and _message_call(value, i)):
+                    bad(at, "%s from %s" % (seg(t), seg(value)))
+            return
+        bad(at)  # a starred target
+
+    def bind_each(target, iterable, at):
+        """TARGET bound to each element of ITERABLE in turn."""
+        if isinstance(iterable, (ast.Tuple, ast.List)):
+            for e in iterable.elts:
+                bind(target, e, at)
+        elif literal(target) and not _safe(iterable):
+            bad(at, "%s in %s" % (seg(target), seg(iterable)))
+
+    def memo(value, index):
+        """Whether VALUE is an attribute that only ever holds None or what a
+        message function returns (at INDEX)."""
+        if not isinstance(value, ast.Attribute) or value.attr not in stored:
+            return False
+        return all(v is not None and (isinstance(v, ast.Constant) and v.value is None or _message_call(v, index))
+                   for v in stored[value.attr])
+
+    def returned_ok(v, index):
+        if isinstance(v, ast.IfExp):
+            return returned_ok(v.body, index) and returned_ok(v.orelse, index)
+        if memo(v, index) or _message_call(v, index):
+            return True
+        if index is None:
+            return _safe(v)
+        if isinstance(v, ast.Constant) and v.value is None:
+            return True
+        return isinstance(v, ast.Tuple) and len(v.elts) > index and _safe(v.elts[index])
+
+    def returns(fn, parts):
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Return) and node.value is not None:
+                if not all(returned_ok(node.value, i) for i in (parts if parts is not None else (None,))):
+                    bad(node, "%s returns %s" % (fn.name, seg(node.value)))
+
+    def call_args(call, fn):
+        """[(parameter, value)] a call passes to FN, or None when it cannot
+        be told (a *args or **kwargs at the call)."""
+        a = fn.args
+        params = [x.arg for x in a.posonlyargs + a.args]
+        if params[:1] == ["self"] and isinstance(call.func, ast.Attribute):
+            params = params[1:]
+        if any(isinstance(x, ast.Starred) for x in call.args) or any(k.arg is None for k in call.keywords):
+            return None
+        given = dict(zip(params, call.args))
+        given.update((k.arg, k.value) for k in call.keywords)
+        defaults = dict(zip(params[len(params) - len(a.defaults):], a.defaults))
+        defaults.update((x.arg, d) for x, d in zip(a.kwonlyargs, a.kw_defaults) if d is not None)
+        return [(p, given.get(p, defaults.get(p))) for p in params + [x.arg for x in a.kwonlyargs]]
+
+    def visit(node, skip, called):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             skip = skip or node.name in SKIPPED
+            if node.name in MESSAGE_FUNCS:
+                returns(node, MESSAGE_FUNCS[node.name])
+        if isinstance(node, ast.Lambda) or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name not in trusted_params:
+            a = node.args
+            for arg in a.posonlyargs + a.args + a.kwonlyargs + [x for x in (a.vararg, a.kwarg) if x]:
+                if arg.arg in LITERAL_NAMES or arg.arg in TEMPLATES:
+                    bad(node, "parameter %s" % arg.arg)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in trusted_params:
+            a = node.args
+            for arg in [x for x in (a.vararg, a.kwarg) if x]:
+                if arg.arg in LITERAL_NAMES:
+                    bad(node, "parameter %s" % arg.arg)
+        if isinstance(node, ast.Call) and _callee(node) in trusted_params:
+            fn = trusted_params[_callee(node)]
+            pairs = call_args(node, fn)
+            if pairs is None:
+                bad(node, "%s called with arguments this check cannot match" % fn.name)
+            else:
+                for p, v in pairs:
+                    if p in LITERAL_NAMES and (v is None or not _safe(v)):
+                        bad(node, "%s(%s=%s)" % (fn.name, p, v is not None and seg(v)))
+        # Rule 4, checked even in SKIPPED bodies: a printer, or a function
+        # with a trusted parameter, used other than by a call to its name.
+        if node not in called:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+                    node.id in SINK_FUNCS or node.id in trusted_params):
+                bad(node, "%s used, not called" % node.id)
+            if isinstance(node, ast.Attribute) and (node.attr in SINK_METHODS | SINK_FUNCS
+                                                    or node.attr in trusted_params
+                                                    or node.attr == "write" and _dotted(node.value) in SINK_STREAMS):
+                bad(node, "%s used, not called" % seg(node))
+        if isinstance(node, ast.Call) and _callee(node) == "getattr" and any(
+                isinstance(x, ast.Constant) and (x.value in SINK_FUNCS | SINK_METHODS or x.value == "write")
+                for x in node.args):
+            bad(node, "a printer looked up by name")
+        if isinstance(node, ast.Call):
+            called = called | {node.func}
+        if isinstance(node, ast.ExceptHandler) and node.type is not None:
+            # Caught, not raised: naming the class there prints nothing.
+            called = called | {node.type} | set(getattr(node.type, "elts", ()))
         if not skip:
             for op in operands(node):
                 if not _safe(op):
-                    found.append((op.lineno, ast.get_source_segment(source, op)))
+                    bad(op)
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    bind(t, node.value, node)
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                bind(node.target, node.value, node)
+            elif isinstance(node, ast.AugAssign):
+                if isinstance(node.target, ast.Name) and node.target.id in TEMPLATES:
+                    bad(node, "template %s changed" % node.target.id)
+                bind(node.target, node.value, node)
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                bind_each(node.target, node.iter, node)
+            elif isinstance(node, ast.comprehension):
+                bind_each(node.target, node.iter, node.target)
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None and literal(node.optional_vars):
+                bad(node.optional_vars)
+            elif isinstance(node, ast.ExceptHandler) and node.name in LITERAL_NAMES | TEMPLATES:
+                if not (isinstance(node.type, ast.Name) and node.type.id == "Refusal"):
+                    bad(node, "except ... as %s" % node.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if (alias.asname or alias.name) in LITERAL_NAMES | TEMPLATES:
+                        bad(node)
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr in ("append", "extend", "insert") and literal(node.func.value)):
+                for arg in node.args[-1:]:
+                    if node.func.attr == "extend":
+                        bind_each(node.func.value, arg, node)
+                    else:
+                        bind(node.func.value, arg, node)
         for child in ast.iter_child_nodes(node):
-            visit(child, skip)
+            visit(child, skip, called)
 
-    visit(tree, False)
+    visit(tree, False, frozenset())
     return found
+
+
+# Code that breaks the rules above and must be found, each appended to the
+# module as a function of its own: a value given a trusted name, joined to
+# one, or returned by a function the check does not trust; a printer
+# aliased, written to directly, named by keyword, or reached as a Refusal;
+# and a call that only looks like an escaper.
+EVASIONS = (
+    "def _x(path):\n    why = path\n    warn('x %s' % why)\n",
+    "def _x(path):\n    said = 'x:' + path\n    warn(said)\n",
+    "def _g(p):\n    return p\n\ndef _x(p):\n    reason = _g(p)\n    warn(reason)\n",
+    "def _x(p):\n    said = p.strip()\n    warn(said)\n",
+    "def _x(p):\n    lines = []\n    lines.append(p)\n    warn(lines[0])\n",
+    "def _x(p):\n    for why in (p, 'x'):\n        warn(why)\n",
+    "def _x(p):\n    why, reason = p, 'x'\n    warn(why)\n",
+    "def _x(why):\n    warn(why)\n\ndef _y(p):\n    _x(p)\n",
+    "def _x(why):\n    warn(why)\n\ndef _y(p):\n    _x(why=p)\n",
+    "def _x(why):\n    warn(why)\n\ndef _y(p):\n    _capture(_x, p)\n",
+    "def _x(p):\n    form = p\n    warn(form % 1)\n",
+    "def _x(p):\n    if p:\n        refusal = p\n    warn(refusal)\n",
+    "def _x(p):\n    w = warn\n    w(p)\n",
+    "def _x(p):\n    sys.stderr.write(p)\n",
+    "def _x(p):\n    print(p)\n",
+    "def _x(self, p):\n    self.problem(line=p)\n",
+    "def _x(p):\n    raise Refusal('bad %s' % p)\n",
+    "def _x(p):\n    warn('x %s' % re.escape(p))\n",
+    "def _x(p):\n    warn('x %d %s' % (1, p))\n",
+    "def _x(p):\n    try:\n        pass\n    except OSError as why:\n        warn(why)\n",
+    "def _x(p):\n    getattr(sys.modules[__name__], 'warn')(p)\n",
+)
 
 
 def static_units(source):
     found = unescaped_values(source)
     check(not found, "every value lib/host_identity.py puts into a string is escaped (unescaped: %r)" % found)
-    # The check cannot pass by checking nothing: an escaper turned into
-    # str() at each call site, one at a time, is found.
+    # The check cannot pass by checking nothing: each evasion is found, and
+    # so is a message function made to return a raw value.
+    missed = [e for e in EVASIONS if not unescaped_values(source + "\n\n" + e)]
+    check(not missed, "each of the %d evasions of the escaping rule is found (missed: %r)" % (len(EVASIONS), missed))
+    with_raw = source + "\n\ndef _g(p):\n    return p\n"
+    MESSAGE_FUNCS["_g"] = None
+    try:
+        check(unescaped_values(with_raw), "a message function that returns its raw argument is found")
+    finally:
+        del MESSAGE_FUNCS["_g"]
+    # Each escaper call site outside the escapers and printers, turned into
+    # str() one at a time, is found; a call whose value is only compared
+    # (suggested_name()'s test that a name prints bare) prints nothing.
     lines = source.splitlines(True)
     starts = [0]
     for line in lines:
         starts.append(starts[-1] + len(line))
-    sites = [starts[n.lineno - 1] + n.col_offset for n in ast.walk(ast.parse(source))
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_shown"]
+    tree = ast.parse(source)
+    compared = set(c for n in ast.walk(tree) if isinstance(n, ast.Compare) for c in [n.left] + n.comparators)
+    skipped = [(n.lineno, n.end_lineno) for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name in SKIPPED]
+    sites = [(starts[n.lineno - 1] + n.col_offset, n.func.id) for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id in ("_shown", "quoted", "shell_word", "escape")
+             and not any(lo <= n.lineno <= hi for lo, hi in skipped) and n not in compared]
     missed = []
-    for i in sites:
+    for i, name in sites:
         # Byte and character offsets agree: the file's code is ASCII.
-        mutant = source[:i] + "str(" + source[i + len("_shown("):]
+        mutant = source[:i] + "str(" + source[i + len(name) + 1:]
         if not unescaped_values(mutant):
-            missed.append(source.count("\n", 0, i) + 1)
-    check(sites and not missed, "each of the %d _shown() call sites turned into str() is found (missed lines %r)"
-          % (len(sites), missed))
+            missed.append("%s:%d" % (name, source.count("\n", 0, i) + 1))
+    counts = dict((name, sum(1 for _, n in sites if n == name)) for name in ("_shown", "quoted", "shell_word"))
+    check(all(counts.values()) and not missed,
+          "each escaper call site turned into str() is found (%r; missed %r)" % (counts, missed))
 
 
 def main(argv):
