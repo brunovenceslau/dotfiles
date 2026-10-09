@@ -3457,6 +3457,45 @@ fail|stale-bracket
 fail|stale-backtick
 SHAPES
 
+# an escaped backtick makes its WHOLE run literal (bin/check-patterns, pairs):
+# the walk steps over the run so it never lands inside one, and skipcode is a
+# lookup keyed by a run's first backtick. Reverting that branch to a plain
+# two-character skip lands the walk mid-run on a run of two or more, where
+# skipcode returns its own index and the gate loops forever (measured: no exit
+# in 15 s on a one-line file, 0.1 s with the branch). Each shape is one link
+# over the limit, exempt only as ONE whole link, so the verdict is checked
+# beside the bound: a bound alone would pass a gate that exits early and wrong.
+# A `\\` before the run is an escaped backslash, so that run is real; an
+# unclosed run is literal text.
+i=0
+while IFS='|' read -r want shape; do
+  i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"
+  f="$r/docs/x.md"
+  case "$shape" in
+    run) printf '[%s \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    several) printf '[%s \\` \\``` \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    backslash-pair) printf '[%s \\\\`x` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    unclosed) printf '[%s ``` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    eol) printf '[%s](%s) \\``\n' "$md81" "$_md_long_token" > "$f" ;;
+    *) fail "arm 15: unknown escaped-backtick shape $shape" ;;
+  esac
+  bounded_run 20 "$work/mdw-esc-$i.out" env STRICT= "$cp" "$r" \
+    || fail "arm 15 escaped backtick $shape: bounded_run could not turn job control on"
+  [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+    || fail "arm 15: an escaped backtick run ($shape) outlived 20 s (hung $br_hung, stuck $br_stuck)"
+  if [ "$want" = pass ]; then
+    [ "$br_rc" = 0 ] && ok || fail "arm 15 escaped backtick must exempt: $shape (exit $br_rc)"
+  else
+    [ "$br_rc" = 1 ] && ok || fail "arm 15 escaped backtick must fail: $shape (exit $br_rc)"
+  fi
+done <<'SHAPES'
+pass|run
+pass|several
+pass|backslash-pair
+pass|unclosed
+fail|eol
+SHAPES
+
 # front matter that never closes is not front matter: GitHub renders the
 # `---` as a rule and the rest as prose, so its lines are held to the limit
 # at their own line numbers.
