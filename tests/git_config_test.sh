@@ -172,7 +172,8 @@ ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignanno
 # false. Any lead (`#`, `;`, repeated, indented) and any trailing comment are
 # handled by the same two steps. A value git rejects (`0k1`) is no opt-out.
 # The one-line section form (`[commit] gpgsign = ...`) is not matched here: it
-# is left to the whole-file check below, which uncomments every line.
+# is left to the whole-file check below, which uncomments every `# [` and
+# `# <TAB>` line.
 shapes="$work/optout_shapes"
 optout_reads_false() { # $1 = one commented line; 0 when git would read it as false
   local body
@@ -209,16 +210,29 @@ for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = 
 done
 ck "the must-ignore fixtures are all present" "$ignore_n" "10"
 # The example itself: every line that mentions gpgsign (and at least one does).
-mention_n=0; optout_n=0
-while IFS= read -r line; do
-  # MUST come first: with no match the here-doc still feeds one empty line,
-  # which would count as a mention and keep the guard below from firing.
-  [ -n "$line" ] || continue
-  mention_n=$((mention_n + 1))
-  if optout_reads_false "$line"; then optout_n=$((optout_n + 1)); fi
-done <<EOF
-$(grep -i gpgsign "$ex" || :)
+gpgsign_scan() { # $1 = file; prints "<mentions> <opt-outs>"; 2 when grep cannot read it
+  local lines rc=0 m=0 o=0 line
+  lines="$(grep -i gpgsign "$1")" || rc=$?
+  [ "$rc" -le 1 ] || return 2
+  while IFS= read -r line; do
+    # MUST come first: with no match the here-doc still feeds one empty line,
+    # which would count as a mention and keep the "proved nothing" guard quiet.
+    [ -n "$line" ] || continue
+    m=$((m + 1))
+    if optout_reads_false "$line"; then o=$((o + 1)); fi
+  done <<EOF
+$lines
 EOF
+  echo "$m $o"
+}
+# The guard below must be able to fire: a copy with every gpgsign line removed
+# reads as zero mentions, and an unreadable file is an error, not "no mention".
+grep -vi gpgsign "$ex" > "$work/no_gpgsign.example" || :
+ck "a copy with no gpgsign line reads as zero mentions" "$(gpgsign_scan "$work/no_gpgsign.example")" "0 0"
+gpgsign_scan "$work/absent.example" >/dev/null 2>&1 && r=0 || r=$?
+ck "an unreadable example is an error, not zero mentions" "$r" "2"
+scan="$(gpgsign_scan "$ex")" || fail "grep could not read config.local.example"
+read -r mention_n optout_n <<<"$scan"
 [ "$mention_n" -gt 0 ] || fail "the example mentions no gpgsign line, so the opt-out scan proved nothing"
 ck "the example carries no commented gpgsign opt-out line" "$optout_n" "0"
 # The example says to uncomment and edit each line: doing exactly that, with
