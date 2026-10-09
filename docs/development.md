@@ -887,13 +887,15 @@ later change can drop.
 
 A guard that must parse the language it guards pins a literal or executes the
 code under a stub: `tests/troubleshooting_messages_test.sh` checks that every
-literal fragment of 8 or more characters in the framework messages that
-[troubleshooting.md](troubleshooting.md) and [signing-key.md](signing-key.md)
-quote appears verbatim in the code that prints them, and the "A tar that only
-WARNS must still fail the staging" case of `tests/smoke_stage_test.sh` puts
-a stub `tar` first on `PATH` instead of reasoning about what tar would do.
-Never strip comments before a security grep unless the stripper tokenizes the
-language (quotes, heredocs, `$#`/`${#v}`, a `#` inside a word).
+literal fragment of 8 or more characters in the `install:` and `dotfiles:`
+lines both [troubleshooting.md](troubleshooting.md) and
+[signing-key.md](signing-key.md) quote, and in the prefixed message spans
+troubleshooting.md quotes, appears verbatim in the code that prints them. The
+"A tar that only WARNS must still fail the staging" case of
+`tests/smoke_stage_test.sh` puts a stub `tar` first on `PATH` instead of
+reasoning about what tar would do. Never strip comments before a security
+grep unless the stripper tokenizes the language (quotes, heredocs, `$#`/`${#v}`,
+a `#` inside a word).
 
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack

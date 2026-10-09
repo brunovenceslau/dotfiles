@@ -59,7 +59,8 @@ awk '/^```/ { inblock = !inblock; next }
 # 2. Backtick spans with a message prefix. Today exactly one `install: ` span
 # exists (the root refusal in the symptom table) and it is also a prefix of a
 # fenced line, so dropping `install: ` from this rule would leave the suite
-# green; it is kept for the next span that stands alone.
+# green; it is kept for the next span that stands alone. `uninstall: ` matches
+# no span today and is kept for the same reason.
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
   | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
   | sed 's/^install: //' > "$work/spans" || true
