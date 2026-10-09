@@ -391,7 +391,28 @@ if git -C "$r" push -q origin "$ghost:refs/heads/ghost" 2>"$work/err"; then
 fi
 grep -qxF "commit-identity: pre-push: the pushed object $ghost is not in this repository" \
   "$work/err" || fail "pre-push must exit 2 on a pushed object it lacks: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/ghost >/dev/null; then
+  fail "a push of an object the guard could not read must not create the remote branch"
+fi
 ok "pre-push refuses a pushed object this repository does not hold"
+
+# A commit built by hand with two author headers: %ae reads the last (the
+# effective identity here), `git show` the first (a foreign one), so the
+# guard cannot tell who made it, and refuses.
+dup="$(printf 'tree %s\nparent %s\nauthor E <e@x> 1 +0000\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\n\ndup\n' \
+  "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" \
+  | git -C "$r" hash-object -t commit -w --literally --stdin)"
+[ "$(git -C "$r" log -1 --format=%ae "$dup")" = g@x ] \
+  || fail "fixture: %ae should read the last author header of $dup"
+if git -C "$r" push -q origin "$dup:refs/heads/dup" 2>"$work/err"; then
+  fail "pre-push must refuse a commit with two author headers"
+fi
+grep -qxF "commit-identity: pre-push: commit $dup has 2 author headers, so who made it is unclear" \
+  "$work/err" || fail "pre-push must exit 2 on two author headers: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/dup >/dev/null; then
+  fail "a refused push must not create the remote branch"
+fi
+ok "pre-push refuses a pushed commit with two author headers"
 
 # git always writes the ref lines on a pipe. A dispatcher that closes stdin
 # hides what is pushed, so the guard cannot answer, and refuses: a foreign

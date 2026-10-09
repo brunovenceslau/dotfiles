@@ -36,12 +36,10 @@ the effective identity is then the polluted one.
 
 A guardrail against accidents, not an enforcement boundary: merge, rebase
 and cherry-pick skip pre-commit, and `--no-verify` or a repository
-core.hooksPath skips both hooks. Two crafted pushes pass as well, each
-harder than `--no-verify`: a refspec source holding an LF (`HEAD^{/...}`
-matching a message written for it) splits its ref line in two, and the
-first half can name any oid as one the remote holds; a commit built by
-hand with two author headers is read by its last one (`%ae`), which
-`git fsck` reports as multipleAuthors.
+core.hooksPath skips both hooks. A crafted push passes as well, harder
+than `--no-verify`: a refspec source holding an LF (`HEAD^{/...}` matching
+a message written for it) splits its ref line in two, and the first half
+can name any oid as one the remote holds.
 
 Allowed, by design: `git -c user.email=...` per command (scope `command`,
 GIT_CONFIG_COUNT included; the recipe for a scratch commit), the
@@ -55,7 +53,8 @@ pipe on a large push. A deletion pushes no commit and needs no identity.
 
 Exits 2 when it cannot answer (not a repository, git failing, a ref line of
 an unexpected shape, a `pre-push` stdin that is not a pipe, a pushed object
-the repository lacks, no effective identity while there are commits to
+the repository lacks, a pushed commit without exactly one author and one
+committer header, no effective identity while there are commits to
 compare), never 0. An empty pipe is git saying nothing is left to push, and
 passes.
 
@@ -330,27 +329,55 @@ def pushed_commits(gdir, tips, known):
     # MUST stay in this order: git reads stdin where `--stdin` stands, and
     # `--not` turns every revision after it into an exclusion, so the tips
     # come before it and the remote-tracking refs after it.
+    # --header, not --format=%ae: a commit built by hand can carry two
+    # author headers, and git's own readers disagree on it (%ae reads the
+    # last, `git show --format=fuller` the first), so the headers are read
+    # here and anything but exactly one of each is "cannot tell".
     p = subprocess.run(
-        ["git", "rev-list", "--format=%ae%x00%ce",
+        ["git", "rev-list", "--header",
          "--stdin", "--not", "--remotes"],
         input=revs.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=git_env(gdir))
     if p.returncode != 0:
         git_failed("'git rev-list'", p)
-    # Two lines per commit: `commit OID`, then AUTHOR NUL COMMITTER. git
-    # takes LF and NUL out of an identity it writes, so any other shape is
-    # a commit object built by hand, and the answer is "cannot tell".
-    lines = p.stdout.split(b"\n")
-    if lines[-1] != b"" or (len(lines) - 1) % 2:
+    # One record per commit, each ending in NUL: OID LF, the raw headers
+    # up to a blank line, then the message, every line of it indented by
+    # four spaces, so a message line never reads as a header. A NUL inside
+    # a hand-built message splits its record, and the piece after it
+    # carries no header of its own, so it fails the count below.
+    records = p.stdout.split(b"\0")
+    if records[-1] != b"":
         fail("'git rev-list' printed an unexpected shape")
     out = []
-    for i in range(0, len(lines) - 1, 2):
-        head, emails = lines[i], lines[i + 1].split(b"\0")
-        if not head.startswith(b"commit ") or not is_oid(head[7:]) \
-                or len(emails) != 2:
+    for record in records[:-1]:
+        oid, _, raw = record.partition(b"\n")
+        if not is_oid(oid):
             fail("'git rev-list' printed an unexpected shape")
-        out.append((head[7:].decode(), decode(emails[0]), decode(emails[1])))
+        oid = oid.decode()
+        # A continuation line (inside gpgsig or mergetag) starts with a
+        # space, so it never matches a header name.
+        headers = raw.split(b"\n\n", 1)[0].split(b"\n")
+        emails = []
+        for name in (b"author ", b"committer "):
+            found = [h for h in headers if h.startswith(name)]
+            if len(found) != 1:
+                fail("pre-push: commit %s has %d %sheaders, so who made it "
+                     "is unclear" % (oid, len(found), name.decode()))
+            emails.append(header_email(oid, found[0]))
+        out.append((oid, emails[0], emails[1]))
     return out
+
+
+def header_email(oid, header):
+    """The email in an author or committer header (NAME <EMAIL> TIME TZ),
+    read the way git's split_ident_line() reads it: from the first `<` to
+    the first `>` after it."""
+    lt = header.find(b"<")
+    gt = header.find(b">", lt + 1)
+    if lt < 0 or gt < 0:
+        fail("pre-push: commit %s has no <email> in its %s header"
+             % (oid, header.split(b" ", 1)[0].decode()))
+    return decode(header[lt + 1:gt])
 
 
 def ident_email(gdir, var):
@@ -407,7 +434,9 @@ def main(argv):
         # hook dropped them: "cannot tell", never a pass. That covers a
         # closed stdin (None in Python) and /dev/null, which is what a
         # closed stdin becomes once `#!/usr/bin/env bash` runs the wrapper
-        # (measured on Linux), and which would read as an empty pipe.
+        # (measured on Linux), and which would read as an empty pipe. A
+        # runner that hands its hooks a socketpair is refused too; none is
+        # wired here, and wiring one reopens accepting S_ISSOCK.
         if sys.stdin is None \
                 or not stat.S_ISFIFO(os.fstat(sys.stdin.fileno()).st_mode):
             fail("pre-push: stdin is not git's pipe, so what is pushed is "

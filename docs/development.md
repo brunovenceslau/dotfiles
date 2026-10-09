@@ -579,11 +579,12 @@ since the push sends the original commit. A deletion sends no commit and
 passes without an identity; a push with commits to compare and no effective
 identity exits 2. A push with nothing left to send passes: git still runs
 the hook, with an empty pipe on stdin. A stdin that is not a pipe (closed,
-or `/dev/null`), which git never gives, and a pushed object this repository
-lacks (a full object name as the source, which git hands the hook before it
-looks it up) exit 2. While a config
-refusal stands, the commits are not compared, since the effective identity
-is then the one being refused.
+or `/dev/null`), which `git push` never gives, a pushed object this
+repository lacks (a full object name as the source, which git hands the hook
+before it looks it up), and a pushed commit without exactly one `author` and
+one `committer` header (built by hand: git's own readers disagree on which
+one counts) exit 2. While a config refusal stands, the commits are not
+compared, since the effective identity is then the one being refused.
 
 A foreign author is refused on purpose: a cherry-pick that keeps someone
 else's authorship, or their merge, does not match the effective identity.
@@ -603,13 +604,12 @@ its repository, so the gate passes there.
 The guard catches accidents. It is not an enforcement boundary: a merge, a
 rebase or a cherry-pick skips `pre-commit`, a commit already on any remote
 this repository tracks is not compared again, and `--no-verify` or a
-repository `core.hooksPath` skips both hooks. Two crafted pushes pass too,
-each harder than `--no-verify`: a refspec source holding an LF splits its
-line on the hook's stdin, so its first half can name any commit as one the
-remote holds, and a commit built by hand with two `author` headers is read
-by its last one (`git fsck` reports it as `multipleAuthors`). The backstop on
-GitHub is the signed-commits rule of the `main-protection` branch ruleset
-(see [Repository settings](#repository-settings)).
+repository `core.hooksPath` skips both hooks. A crafted push passes too,
+harder than `--no-verify`: a refspec source holding an LF splits its line on
+the hook's stdin, so its first half can name any commit as one the remote
+holds. The backstop on GitHub is the signed-commits rule of the
+`main-protection` branch ruleset (see
+[Repository settings](#repository-settings)).
 
 ## CI
 

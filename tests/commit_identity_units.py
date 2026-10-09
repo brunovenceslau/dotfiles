@@ -140,6 +140,16 @@ check(code is None
       "refusals(): a path holding a quote and '; fix:' is one quoted word "
       "and the line has one fix")
 
+# A space and a `$` stay literal inside single quotes: the command still
+# prints, and pasted into a shell it names the file itself.
+for path in ("/g/a b/config", "/g/$HOME/config"):
+    code, _, lines = refusal_for(b"file:" + path.encode())
+    check(code is None and len(lines) == 1
+          and shlex.split(lines[0].split("fix: ", 1)[1])
+          == ["git", "config", "--file", path, "--unset-all", "user.email"],
+          "refusals(): the command for %r round-trips (got %r)"
+          % (path, lines))
+
 code, _, lines = refusal_for(b"command line:")
 check(code is None and "from command line:" in lines[0],
       "refusals(): a non-file origin names the source")
@@ -178,23 +188,54 @@ check(mod.git_env("/g").get("GIT_NO_REPLACE_OBJECTS") == "1",
       "git_env(): rev-list reads the commits a push sends, not replacements")
 
 def pushed_one(rev_list_out):
-    """pushed_commits() of tip A40, which cat-file finds, under rev_list_out."""
+    """pushed_commits() of tip A40, which cat-file finds, with rev-list
+    printing rev_list_out."""
     return run_with(
         lambda: mod.pushed_commits("/g", {A40}, set()), 0,
         runner=fake_git({"cat-file": (0, ("%s\n" % A40).encode()),
                          "rev-list": (0, rev_list_out.encode())}, []))
 
 
-code, _, got = pushed_one("commit %s\na@x\0c@x\n" % A40)
-check(code is None and got == [(A40, "a@x", "c@x")],
-      "pushed_commits(): one commit, its author and committer emails")
+def record(oid, *headers, msg="    m\n"):
+    """One `git rev-list --header` record: OID, headers, blank, message."""
+    return "%s\ntree %s\n%s\n\n%s\0" % (oid, "t" * 40,
+                                       "".join(h + "\n" for h in headers),
+                                       msg)
+
+
+AU, CO = "author A <a@x> 1 +0000", "committer C <c@x> 1 +0000"
+code, _, got = pushed_one(record(A40, AU, CO) + record(B40, AU, CO))
+check(code is None and got == [(A40, "a@x", "c@x"), (B40, "a@x", "c@x")],
+      "pushed_commits(): each commit, its author and committer emails")
+code, _, got = pushed_one(record(A40, "author <B> x <a@x> 1 +0000", CO,
+                                 " author Z <z@x> 1 +0000",
+                                 msg="    author Z <z@x>\n"))
+check(code is None and got == [(A40, "B", "c@x")],
+      "pushed_commits(): the email is read from the first < to the next >, "
+      "and a continuation or message line is no header (got %r)" % got)
 for what, out in (
-        ("no final LF", "commit %s\na@x\0c@x" % A40),
-        ("a missing NUL", "commit %s\na@x\n" % A40),
-        ("an LF inside an email", "commit %s\na\n@x\0c@x\n" % A40)):
+        ("no final NUL", record(A40, AU, CO)[:-1]),
+        ("a record with no oid", "tree x\n" + AU + "\0")):
     code, text, _ = pushed_one(out)
     check(code == 2 and "'git rev-list' printed an unexpected shape" in text,
           "pushed_commits(): %s exits 2" % what)
+# git's readers disagree on a commit with two author headers (%ae reads the
+# last, `git show` the first), so anything but one of each is "cannot tell".
+for what, out, want in (
+        ("two author headers", record(A40, AU, "author G <g@x> 1 +0000", CO),
+         "has 2 author headers"),
+        ("two committer headers", record(A40, AU, CO, CO),
+         "has 2 committer headers"),
+        ("no author header", record(A40, CO), "has 0 author headers"),
+        ("a NUL inside a message", record(A40, AU, CO, msg="    a\0" + A40
+                                          + "\n    " + AU + "\n"),
+         "has 0 author headers"),
+        ("a header with no <email>", record(A40, "author A a@x 1 +0000", CO),
+         "has no <email> in its author header")):
+    code, text, _ = pushed_one(out)
+    check(code == 2 and ("pre-push: commit %s " % A40) in text
+          and want in text,
+          "pushed_commits(): %s exits 2 (got %r)" % (what, text))
 # A remote oid this repository never fetched leaves the exclusions; a pushed
 # tip it lacks cannot be read, which is "cannot tell", never a pass.
 calls = []
@@ -202,8 +243,8 @@ code, _, got = run_with(
     lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
     runner=fake_git({"cat-file": (0, ("%s\n%s missing\n" % (A40, B40))
                                   .encode()),
-                     "rev-list": (0, ("commit %s\na@x\0c@x\n" % A40)
-                                  .encode())}, calls))
+                     "rev-list": (0, record(A40, AU, CO).encode())},
+                    calls))
 check(code is None and got == [(A40, "a@x", "c@x")]
       and calls[-1][1] == ("%s\n" % A40).encode()
       and "--ignore-missing" not in calls[-1][0],
@@ -218,12 +259,19 @@ check(code == 2 and ("pre-push: the pushed object %s is not in this "
       "pushed_commits(): a missing pushed tip exits 2 (got %r)" % text)
 for what, out in (("a line short", "%s\n" % A40),
                   ("another oid", "%s\n%s\n" % (A40, "e" * 40)),
+                  ("another oid missing",
+                   "%s\n%s missing\n" % (A40, "e" * 40)),
                   ("an unknown status", "%s\n%s ambiguous\n" % (A40, B40))):
     code, text, _ = run_with(
         lambda: mod.pushed_commits("/g", {A40}, {B40}), 0,
         runner=fake_git({"cat-file": (0, out.encode())}, []))
     check(code == 2 and "'git cat-file' printed an unexpected shape" in text,
           "pushed_commits(): cat-file printing %s exits 2" % what)
+code, text, _ = run_with(
+    lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+    runner=fake_git({"cat-file": (128, b"")}, []))
+check(code == 2 and "'git cat-file' failed (exit 128)" in text,
+      "pushed_commits(): a failing cat-file exits 2 (got %r)" % text)
 code, _, got = run_with(lambda: mod.pushed_commits("/g", set(), {B40}), 128)
 check(code is None and got == [],
       "pushed_commits(): no tip runs no git and lists nothing")
