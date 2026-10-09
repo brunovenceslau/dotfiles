@@ -534,9 +534,27 @@ argument.
 The same rule runs as two git hooks, `.githooks/pre-commit` and
 `.githooks/pre-push`, which run `.githooks/commit_identity.py`. `pre-push`
 matters because a rebase or a cherry-pick commits without running
-`pre-commit`. It drains the ref lines git writes on its stdin and ignores
-them, so a new branch, a deletion, a tag or a remote commit missing locally
-pushes the same way. The hooks run only where something points git at
+`pre-commit`.
+
+`pre-push` also compares each commit the push sends with the effective
+identity, the one `git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT`
+print at push time (so a `git -c user.email=...` on the push counts). A
+commit whose author or committer email differs is refused, one line per
+email, naming the commit:
+
+```text
+commit-identity: pre-push: refusing: commit <oid> has committer email 'a@b', not the effective 'g@x'
+```
+
+This catches an identity removed from the config before the push: the
+commits made under it still carry it. Only the commits the remote lacks are
+compared: those a pushed tip reaches and no remote-tracking ref and no remote
+oid on git's stdin reaches. A commit already on a remote passes whoever made
+it, so merging the default branch never trips on GitHub's own merge commits.
+A deletion sends no commit and passes without an identity; a push with
+commits to compare and no effective identity exits 2. While a config refusal
+stands, the commits are not compared, since the effective identity is then
+the one being refused. The hooks run only where something points git at
 `.githooks/`: the development sandbox's system dispatcher, which runs
 `<toplevel>/.githooks/<hook>` when it is executable. Nothing in this
 repository sets `core.hooksPath`, and the installer does not, so on the Mac
@@ -546,11 +564,10 @@ its repository, so the gate passes there.
 `tests/commit_identity_test.sh` proves each rule in scratch repositories.
 
 The guard catches accidents. It is not an enforcement boundary: a merge, a
-rebase or a cherry-pick skips `pre-commit`; `pre-push` reads config at push
-time only, so an identity removed before the push lets the commits made under
-it through; and `--no-verify` or a repository `core.hooksPath` skips both
-hooks. The backstop on GitHub is the signed-commits rule of the
-`main-protection` branch ruleset (see
+rebase or a cherry-pick skips `pre-commit`, a commit already on any remote
+this repository tracks is not compared again, and `--no-verify` or a
+repository `core.hooksPath` skips both hooks. The backstop on GitHub is the
+signed-commits rule of the `main-protection` branch ruleset (see
 [Repository settings](#repository-settings)).
 
 ## CI

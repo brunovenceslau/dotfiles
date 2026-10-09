@@ -5,8 +5,9 @@
 #
 # Unit checks for .githooks/commit_identity.py that the end-to-end cases in
 # tests/commit_identity_test.sh cannot stage with a real git: the error arms
-# of entries() (git config failing, an unexpected shape) and the refusal
-# text for an origin that is not an absolute path. subprocess.run is replaced
+# of entries() (git config failing, an unexpected shape), the refusal text
+# for an origin that is not an absolute path, and pre-push's parsing of the
+# ref lines, `git rev-list` and `git var`. subprocess.run is replaced
 # by a fake that prints canned bytes. Called as
 #   python3 -I -B tests/commit_identity_units.py MODULE
 # Each check prints one line; any failure exits 1.
@@ -110,6 +111,51 @@ check(code is None and "fix: git config --file /g/config --unset-all "
 code, _, lines = refusal_for(b"command line:")
 check(code is None and "from command line:" in lines[0],
       "refusals(): a non-file origin names the source")
+
+# pre-push: the ref lines on stdin, rev-list's output and `git var`'s.
+Z40, A40, B40 = "0" * 40, "a" * 40, "b" * 40
+tips, known = mod.ref_lines(
+    ("refs/heads/n %s refs/heads/n %s\n"
+     "(delete) %s refs/heads/d %s\n"
+     "refs/heads/s %s refs/heads/s %s\n" % (A40, Z40, Z40, B40, "c" * 64,
+                                            "d" * 64)).encode())
+check(tips == {A40, "c" * 64} and known == {B40, "d" * 64},
+      "ref_lines(): a new ref, a deletion and SHA-256 oids")
+check(mod.ref_lines(b"") == (set(), set()),
+      "ref_lines(): no input pushes nothing")
+for what, data in (
+        ("three fields", "refs/heads/x %s refs/heads/x\n" % A40),
+        ("a short oid", "refs/heads/x abc refs/heads/x %s\n" % Z40),
+        ("an upper-case oid", "refs/heads/x %s refs/heads/x %s\n"
+         % ("A" * 40, Z40))):
+    code, text, _ = run_with(lambda: mod.ref_lines(data.encode()), 0)
+    check(code == 2 and "ref line on stdin has an unexpected shape" in text,
+          "ref_lines(): %s exits 2" % what)
+
+code, _, got = run_with(lambda: mod.pushed_commits("/g", {A40}, set()), 0,
+                        ("commit %s\na@x\0c@x\n" % A40).encode())
+check(code is None and got == [(A40, "a@x", "c@x")],
+      "pushed_commits(): one commit, its author and committer emails")
+for what, out in (
+        ("no final LF", "commit %s\na@x\0c@x" % A40),
+        ("a missing NUL", "commit %s\na@x\n" % A40),
+        ("an LF inside an email", "commit %s\na\n@x\0c@x\n" % A40)):
+    code, text, _ = run_with(
+        lambda: mod.pushed_commits("/g", {A40}, set()), 0, out.encode())
+    check(code == 2 and "'git rev-list' printed an unexpected shape" in text,
+          "pushed_commits(): %s exits 2" % what)
+code, _, got = run_with(lambda: mod.pushed_commits("/g", set(), {B40}), 128)
+check(code is None and got == [],
+      "pushed_commits(): no tip runs no git and lists nothing")
+
+code, _, got = run_with(lambda: mod.ident_email("/g", "GIT_AUTHOR_IDENT"), 0,
+                        b"A <B> <a@x> 1791515801 -0300\n")
+check(code is None and got == "a@x",
+      "ident_email(): the email in the last <...> of the ident")
+code, text, _ = run_with(lambda: mod.ident_email("/g", "GIT_AUTHOR_IDENT"),
+                         128, b"", b"Author identity unknown\n\nfatal: no\n")
+check(code == 2 and text.rstrip().endswith("exit 128): fatal: no"),
+      "ident_email(): a failing git var exits 2 with its last line")
 
 print("commit_identity_units: %d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)

@@ -16,9 +16,21 @@ identity, signed by the right key but authored by the wrong person.
 `author.*` and `committer.*` count too: they set the identity as well, and a
 repository-scoped `author.email` even wins over `git -c user.email=...`.
 
+`pre-push` also refuses a pushed commit whose author or committer email
+differs from the effective identity (`git var GIT_AUTHOR_IDENT` and
+`GIT_COMMITTER_IDENT` at push time, so a `git -c user.email=...` on the push
+counts). This is what catches an identity removed from the config before the
+push: the commits made under it still carry it. Only commits the remote
+lacks are compared: those reachable from a pushed tip but from no
+remote-tracking ref and from no remote oid git names on stdin. A commit
+already on a remote passes whoever made it, so a merge of the default
+branch never trips on GitHub's own merge commits. While a config refusal
+stands the commits are not compared: the effective identity is then the
+polluted one.
+
 A guardrail against accidents, not an enforcement boundary: merge, rebase
-and cherry-pick skip pre-commit, pre-push reads config at push time only,
-and `--no-verify` or a repository core.hooksPath skips both hooks.
+and cherry-pick skip pre-commit, and `--no-verify` or a repository
+core.hooksPath skips both hooks.
 
 Allowed, by design: `git -c user.email=...` per command (scope `command`,
 GIT_CONFIG_COUNT included; the recipe for a scratch commit), the
@@ -26,13 +38,13 @@ GIT_AUTHOR_* and GIT_COMMITTER_* variables (not config at all), and the
 global and system scopes. Nothing else is checked: no trust root, no
 signature, no allowed-signers lookup.
 
-The argument names the caller, for the message. `pre-push` also drains stdin:
-git writes one line per pushed ref there, and the answer never depends on
-them (the rule reads config only), so a ref shape such as a deletion or a
-missing remote oid cannot change the result. Draining instead of ignoring
-keeps git from meeting a closed pipe on a large push.
+The argument names the caller, for the message. `pre-push` reads every ref
+line git writes on stdin before anything else, so git never meets a closed
+pipe on a large push. A deletion pushes no commit and needs no identity.
 
-Exits 2 when it cannot answer (not a repository, git failing), never 0.
+Exits 2 when it cannot answer (not a repository, git failing, a ref line of
+an unexpected shape, no effective identity while there are commits to
+compare), never 0.
 
 Self-contained on purpose: it runs from a git hook in any checkout of this
 repository, so it imports nothing from lib/ and only the standard library,
@@ -48,6 +60,8 @@ SECTIONS = ("user", "author", "committer")
 KEYS = tuple("%s.%s" % (s, k) for s in SECTIONS for k in ("email", "name"))
 KEYS_REGEXP = r"^(%s)\.(email|name)$" % "|".join(SECTIONS)
 REFUSED_SCOPES = ("local", "worktree")
+IDENTS = (("author", "GIT_AUTHOR_IDENT"), ("committer", "GIT_COMMITTER_IDENT"))
+HEX = frozenset("0123456789abcdef")
 CALLERS = ("pre-commit", "pre-push", "check")
 PREFIX = "commit-identity"
 
@@ -173,24 +187,134 @@ def refusals(gdir):
     return lines
 
 
+def git_env(gdir):
+    # The absolute git dir, for the same reason as in entries().
+    return dict(os.environ, GIT_DIR=gdir)
+
+
+def is_oid(b):
+    # 40 hex digits for SHA-1, 64 for SHA-256.
+    return len(b) in (40, 64) and set(b.decode("ascii", "replace")) <= HEX
+
+
+def ref_lines(data):
+    """(tips, known) from git's pre-push stdin: the local oids pushed, and
+    the remote oids the remote already holds. Each line is
+    LOCAL_REF SP LOCAL_OID SP REMOTE_REF SP REMOTE_OID; an all-zero local oid
+    is a deletion (nothing pushed) and an all-zero remote oid a new ref."""
+    tips, known = set(), set()
+    lines = data.split(b"\n")
+    if lines[-1] == b"":
+        lines.pop()
+    for line in lines:
+        fields = line.split(b" ")
+        if len(fields) != 4 or not (is_oid(fields[1]) and is_oid(fields[3])):
+            fail("pre-push: a ref line on stdin has an unexpected shape")
+        local, remote = fields[1].decode(), fields[3].decode()
+        if local.strip("0"):
+            tips.add(local)
+        if remote.strip("0"):
+            known.add(remote)
+    return tips, known
+
+
+def pushed_commits(gdir, tips, known):
+    """(oid, author email, committer email) of each commit the push sends.
+
+    Reachable from a pushed tip, minus what any remote-tracking ref or a
+    remote oid already reaches. The revisions go on stdin (`^` for an
+    exclusion, which every git reads there), so a push of many refs cannot
+    outgrow the argument list. --ignore-missing drops a remote oid this
+    repository has never fetched; a local oid always exists, since git
+    just read it to push it. A tree or blob tip lists no commit."""
+    if not tips:
+        return []
+    revs = "".join("%s\n" % t for t in sorted(tips))
+    revs += "".join("^%s\n" % k for k in sorted(known))
+    # MUST stay in this order: git reads stdin where `--stdin` stands, and
+    # `--not` turns every revision after it into an exclusion, so the tips
+    # come before it and the remote-tracking refs after it.
+    p = subprocess.run(
+        ["git", "rev-list", "--ignore-missing", "--format=%ae%x00%ce",
+         "--stdin", "--not", "--remotes"],
+        input=revs.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=git_env(gdir))
+    if p.returncode != 0:
+        fail("'git rev-list' failed (exit %d): %s"
+             % (p.returncode, decode(p.stderr).strip()))
+    # Two lines per commit: `commit OID`, then AUTHOR NUL COMMITTER. git
+    # takes LF and NUL out of an identity it writes, so any other shape is
+    # a commit object built by hand, and the answer is "cannot tell".
+    lines = p.stdout.split(b"\n")
+    if lines[-1] != b"" or (len(lines) - 1) % 2:
+        fail("'git rev-list' printed an unexpected shape")
+    out = []
+    for i in range(0, len(lines) - 1, 2):
+        head, emails = lines[i], lines[i + 1].split(b"\0")
+        if not head.startswith(b"commit ") or not is_oid(head[7:]) \
+                or len(emails) != 2:
+            fail("'git rev-list' printed an unexpected shape")
+        out.append((head[7:].decode(), decode(emails[0]), decode(emails[1])))
+    return out
+
+
+def ident_email(gdir, var):
+    """The email of `git var VAR` (NAME SP <EMAIL> SP TIME SP TZ)."""
+    p = subprocess.run(["git", "var", var], stdout=subprocess.PIPE,
+                       stderr=subprocess.PIPE, env=git_env(gdir))
+    out = decode(p.stdout)
+    lt, gt = out.rfind(" <"), out.rfind("> ")
+    if p.returncode != 0 or lt < 0 or gt < lt:
+        # git explains itself over several lines; the last one says why.
+        why = (decode(p.stderr).strip().splitlines() or [""])[-1]
+        fail("cannot read the effective identity ('git var %s' failed, "
+             "exit %d): %s" % (var, p.returncode, why))
+    return out[lt + 2:gt]
+
+
+def commit_refusals(gdir, stdin):
+    commits = pushed_commits(gdir, *ref_lines(stdin))
+    if not commits:
+        return []
+    want = [(role, ident_email(gdir, var)) for role, var in IDENTS]
+    lines = []
+    for oid, *got in commits:
+        for (role, effective), email in zip(want, got):
+            if email != effective:
+                lines.append("commit %s has %s email '%s', not the effective "
+                             "'%s'" % (oid, role, escape(email),
+                                       escape(effective)))
+    return lines
+
+
 def main(argv):
     if len(argv) != 2 or argv[1] not in CALLERS:
         print("usage: commit_identity.py %s" % "|".join(CALLERS),
               file=sys.stderr)
         return 2
     caller = argv[1]
+    stdin = b""
     if caller == "pre-push" and sys.stdin is not None:
-        sys.stdin.buffer.read()
+        stdin = sys.stdin.buffer.read()
     gdir = git_dir()
-    lines = refusals(gdir)
+    lines, pointer = refusals(gdir), None
+    if lines:
+        pointer = ("a commit identity belongs in the global config; for a "
+                   "one-off identity use 'git -c user.email=... -c "
+                   "user.name=...' per command instead")
+    elif caller == "pre-push":
+        lines = commit_refusals(gdir, stdin)
+        pointer = ("a pushed commit must carry the effective identity; "
+                   "re-make it under that identity (for the tip: 'git "
+                   "commit --amend --no-edit --reset-author'), or push "
+                   "with 'git -c user.email=... -c user.name=...' when "
+                   "the commit's identity is the one intended")
     if not lines:
         return 0
     for line in lines:
         print("%s: %s: refusing: %s" % (PREFIX, caller, line),
               file=sys.stderr)
-    print("%s: %s: a commit identity belongs in the global config; for a "
-          "one-off identity use 'git -c user.email=... -c user.name=...' "
-          "per command instead" % (PREFIX, caller), file=sys.stderr)
+    print("%s: %s: %s" % (PREFIX, caller, pointer), file=sys.stderr)
     return 1
 
 

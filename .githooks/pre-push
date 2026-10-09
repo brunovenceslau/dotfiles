@@ -10,8 +10,10 @@
 # system dispatcher, /etc/git/hooks, execs <toplevel>/.githooks/<hook> with
 # git's args and stdin). Nothing wires it on the Mac on purpose: see "Deferred
 # decisions" in docs/development.md. The rule lives in commit_identity.py;
-# this wrapper only names the caller. git's args are not passed on: the rule
-# reads config only, and the script drains a pre-push stdin itself.
+# this wrapper only names the caller. git's args (the remote's name and URL)
+# are not passed on: the rule excludes what every remote-tracking ref
+# reaches, whichever remote is pushed to, and the script reads git's ref
+# lines on stdin itself.
 set -euo pipefail
 
 exec python3 -I "$(dirname -- "$0")/commit_identity.py" pre-push
