@@ -74,6 +74,27 @@ def use_tmpdir(mod, path):
     mod.tempfile.tempdir = None
 
 
+# The full name of the account every unit runs as (see PinnedPwd).
+ACCOUNT_NAME = "Units Account"
+
+
+class PinnedPwd(object):
+    """The pwd module as the module under test sees it in this run: one
+    account whose GECOS names it ACCOUNT_NAME. The missing-name line
+    suggests the account's full name, and whether the host's own account
+    has one is an accident of the host (a macOS runner's does, a Linux
+    container's often does not), so a check that read it would pass on one
+    platform and fail on the other. The pinned name is never the
+    placeholder, so a check that assumes the placeholder fails on every
+    host, not only where the account happens to have a name."""
+
+    class _Entry(object):
+        pw_name, pw_gecos = "units", ACCOUNT_NAME + ",Room 1"
+
+    def getpwuid(self, uid):
+        return self._Entry()
+
+
 def git_units(mod, scratch):
     os.environ.update({
         "GIT_DIR": "/some/repo/.git",
@@ -741,11 +762,11 @@ def command_word_units(mod, scratch):
           == [inst, "identity", "--name", "Full Name"],
           "doctor's user.name fix names the installer as one shell word (%r)" % text)
     rc, text = h.said("identity", installer=inst)
-    check(command(text, "user.name is not set - run: ") == [inst, "identity", "--name", "Full Name"],
+    check(command(text, "user.name is not set - run: ") == [inst, "identity", "--name", ACCOUNT_NAME],
           "identity's missing-name line names the installer as one shell word (%r)" % text)
     slashed = os.path.join(h.home, "dot\\files", "install.sh")
     rc, text = h.said("identity", installer=slashed)
-    check(command(text, "user.name is not set - run: ") == [slashed, "identity", "--name", "Full Name"],
+    check(command(text, "user.name is not set - run: ") == [slashed, "identity", "--name", ACCOUNT_NAME],
           "a printable installer path holding a backslash runs as printed (%r)" % text)
     # Two identities for the agent's key: the fix sets user.email first.
     with open(h.signers, "w") as fh:
@@ -1631,6 +1652,8 @@ def main(argv):
         check(False, "lib/host_identity.py parses as Python 3.9: %s" % e)
     static_units(source)
     mod = load(module)
+    mod.pwd = PinnedPwd()
+    check(mod.account_name() == ACCOUNT_NAME, "the units run as the pinned account, never the host's")
 
     # --- the git environment: what is scrubbed, what survives ---------------
     saved = dict(os.environ)
@@ -1864,7 +1887,7 @@ def main(argv):
         check(got == good, "a full name %r is suggested as it is (got %r)" % (good, got))
     # account_name(): an account the password database cannot name (KeyError)
     # or a failed lookup (OSError) has no full name, never a traceback.
-    real_getpwuid = mod.pwd.getpwuid
+    saved_getpwuid = mod.pwd.getpwuid
     for exc in (KeyError("getpwuid(): uid not found: 4242"), OSError(errno.EIO, "I/O error")):
         def raising(uid, exc=exc):
             raise exc
@@ -1872,7 +1895,7 @@ def main(argv):
         try:
             got = mod.account_name()
         finally:
-            mod.pwd.getpwuid = real_getpwuid
+            mod.pwd.getpwuid = saved_getpwuid
         check(got == "", "account_name() is empty when getpwuid() raises %s (got %r)" % (type(exc).__name__, got))
 
     # --- a configured host: signing_configured() and already_configured() ---
