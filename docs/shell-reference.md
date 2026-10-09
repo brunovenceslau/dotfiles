@@ -391,8 +391,13 @@ the automatic step stays quiet and writes nothing`.
 
 It prints no file's contents. A `user.signingkey` that names a private key
 file is recognised by its first line and judged by the `.pub` beside it.
-Config values print as git returns them, with a control or invisible
-character escaped, and agent keys print as `SHA256:` fingerprints.
+Agent keys print as `SHA256:` fingerprints. Each value a line puts in (a
+config value, an origin, a path, a tool's message) prints bare when it
+holds only printable characters and no backslash. Otherwise it prints in
+single quotes, with each control, bidi or invisible character, backslash,
+quote and byte that is not UTF-8 escaped (`\x1b`, `\u202e`), so it
+cannot rewrite the terminal or pass for message text. The words around it
+print as written. The identity step's own lines follow the same rule.
 
 `install.sh doctor` exits `0` when it found no problem (a host that opted out
 included), `1` when it found one (a `python3` that does not run included),

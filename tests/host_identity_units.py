@@ -472,6 +472,158 @@ def main_twice_units(mod, scratch):
               "--mode %s after a fail-closed auto run does not repeat its suffix (%r)" % (mode, text))
 
 
+# A hostile value: an OSC sequence that retitles the terminal, then BEL.
+OSC = "\x1b]0;PWNED\x07"
+OSC_SHOWN = "\\x1b]0;PWNED\\x07"
+K1 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIE7ZriufNPIzaGKLCOFNHpr6/MYnrT97GT7G1THBmdJR"
+
+
+def printable(text):
+    """Nothing in TEXT a terminal acts on: every character printable but the
+    newlines between lines."""
+    return all(c == "\n" or c.isprintable() for c in text)
+
+
+class HostileHost(object):
+    """A HOME shaped like the link engine's, a fake ssh-add holding K1, and
+    main() run in this process with its output captured. Each value the
+    module reads from the host can be set to one a terminal would act on."""
+
+    def __init__(self, mod, scratch, name):
+        self.mod = mod
+        module_dir = os.path.dirname(os.path.abspath(mod.__file__))
+        self.home = os.path.join(scratch, name)
+        self.gitdir = os.path.join(self.home, ".config", "git")
+        os.makedirs(self.gitdir)
+        tracked = os.path.join(self.home, "tracked")
+        with open(os.path.join(module_dir, os.pardir, "config", "git", "config")) as fh:
+            body = fh.read()
+        with open(tracked, "w") as fh:
+            fh.write(body)
+        with open(os.path.join(self.gitdir, "config"), "w") as fh:
+            fh.write("[include]\n\tpath = %s\n[include]\n\tpath = config.local\n" % tracked)
+        self.local = os.path.join(self.gitdir, "config.local")
+        self.signers = os.path.join(self.gitdir, "allowed_signers")
+        with open(self.signers, "w") as fh:
+            fh.write("me@example.com %s\n" % K1)
+        bindir = os.path.join(self.home, "bin")
+        os.mkdir(bindir)
+        stub(bindir, "ssh-add", 'printf "%%s\\n" "%s agent-comment"\n' % K1)
+        for k in [k for k in os.environ if k.startswith("GIT_")]:
+            del os.environ[k]
+        for k in ("SSH_CONNECTION", "CANGA_HOST_ALLOWED_SIGNERS", "SSH_AUTH_SOCK", "SSH_AGENT_PID"):
+            os.environ.pop(k, None)
+        os.environ.update({"HOME": self.home, "XDG_CONFIG_HOME": os.path.join(self.home, ".config"),
+                           "GIT_CONFIG_SYSTEM": os.devnull,
+                           "PATH": bindir + os.pathsep + os.environ["PATH"]})
+
+    def set(self, **values):
+        """config.local holding VALUES, a key's dots spelled as `__`
+        (`gpg__ssh__revocationFile`: the middle part is a subsection)."""
+        with open(self.local, "w") as fh:
+            for key, value in values.items():
+                parts = key.split("__")
+                section, name = " ".join(parts[:1] + ['"%s"' % p for p in parts[1:-1]]), parts[-1]
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                fh.write('[%s]\n\t%s = "%s"\n' % (section, name, escaped))
+
+    def said(self, mode, *extra, **kw):
+        out = io.StringIO()
+        args = ["--config-local", kw.get("local", self.local), "--installer", kw.get("installer", "INST"),
+                "--mode", mode] + list(extra)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            rc = self.mod.main(args)
+        return rc, out.getvalue()
+
+
+def escaping_units(mod, scratch):
+    """Each value a message interpolates is escaped where it is put in, and
+    only it: the literal text around it prints as written."""
+    check(mod.escape("a\\b\x1b\r\u202e\u200b\udcff\U000e0001 \u00e9") == "a\\\\b\\x1b\\x0d\\u202e\\u200b\\xff\\U000e0001 \u00e9",
+          "escape() doubles a backslash and spells out controls, bidi and zero-width characters, and non-UTF-8 bytes")
+    check(mod.quoted("it's") == "'it\\x27s'", "quoted() spells a quote inside the value as \\x27")
+    check(mod._shown("Jane O Doe") == "Jane O Doe" and mod._shown("a\\b") == "'a\\\\b'"
+          and mod._shown(OSError(2, "x" + OSC)) == "'[Errno 2] x%s'" % OSC_SHOWN,
+          "_shown() keeps a plain value bare and quotes one escape() changes, an exception's text included")
+    h = HostileHost(mod, scratch, "hostile")
+
+    # identity: a config value the step leaves as it is.
+    h.set(user__email="me@example.com", user__signingkey="key::ssh-ed25519 AAAA" + OSC)
+    rc, text = h.said("identity")
+    check(rc == 1 and printable(text)
+          and "identity: user.signingkey is already set to a different value - leaving it: 'key::ssh-ed25519 AAAA%s'"
+          % OSC_SHOWN in text,
+          "identity quotes a kept value holding a control character, and only it (%r)" % text)
+
+    # identity: a user.email no agent key is listed for.
+    h.set(user__email="me‮@example.com")
+    rc, text = h.said("identity")
+    check(rc == 1 and printable(text)
+          and "identity: no ssh-agent key is listed for user.email 'me\\u202e@example.com' - writing nothing" in text,
+          "identity quotes a user.email holding a bidi character (%r)" % text)
+
+    # rotate: a user.signingkey path that names nothing.
+    h.set(user__email="me@example.com", user__signingkey="~/x" + OSC)
+    rc, text = h.said("rotate")
+    check(rc == 1 and printable(text)
+          and "identity: --rotate: user.signingkey ('~/x%s') names no readable public key - refusing" % OSC_SHOWN
+          in text, "rotate quotes the user.signingkey it cannot read (%r)" % text)
+
+    # doctor: the literal head stays bare, the value is quoted.
+    h.set(user__email="me@example.com", user__name="Jane" + OSC + "Doe")
+    rc, text = h.said("doctor", "--verbose")
+    check(printable(text) and "install: doctor: values: user.name = 'Jane%sDoe' (file:%s)" % (OSC_SHOWN, h.local)
+          in text, "doctor quotes a value, not its whole line (%r)" % text)
+
+    # A config.local path holding a control character: the refusal before
+    # any git read, in identity and in doctor.
+    odd = os.path.join(scratch, "dir" + OSC)
+    os.makedirs(os.path.join(odd, "config.local"))
+    odd_shown = "'%s'" % os.path.join(scratch, "dir" + OSC_SHOWN)
+    for mode, want in (("identity", "install: identity: %s/config.local' is not a regular file - writing nothing"),
+                       ("doctor", "install: doctor: git: %s/config.local' is not a regular file - git opens it")):
+        rc, text = h.said(mode, local=os.path.join(odd, "config.local"))
+        check(rc == 1 and printable(text) and want % odd_shown[:-1] in text,
+              "%s quotes a config.local path holding a control character (%r)" % (mode, text))
+
+    # Environment values: a GIT_CONFIG_GLOBAL and a CANGA_HOST_ALLOWED_SIGNERS.
+    h.set(user__email="me@example.com")
+    os.environ["GIT_CONFIG_GLOBAL"] = os.path.join(scratch, "global" + OSC)
+    rc, text = h.said("identity")
+    del os.environ["GIT_CONFIG_GLOBAL"]
+    check(rc == 1 and printable(text) and "identity: GIT_CONFIG_GLOBAL='%s' is not " % os.path.join(scratch, "global" + OSC_SHOWN)
+          in text, "identity quotes a GIT_CONFIG_GLOBAL holding a control character (%r)" % text)
+    os.environ["CANGA_HOST_ALLOWED_SIGNERS"] = os.path.join(scratch, "signers" + OSC)
+    for mode in ("identity", "doctor"):
+        rc, text = h.said(mode)
+        check(rc == 1 and printable(text) and "the allowed-signers file '%s' (from CANGA_HOST_ALLOWED_SIGNERS)"
+              % os.path.join(scratch, "signers" + OSC_SHOWN) in text,
+              "%s quotes a CANGA_HOST_ALLOWED_SIGNERS holding a control character (%r)" % (mode, text))
+    del os.environ["CANGA_HOST_ALLOWED_SIGNERS"]
+
+    # The sweep: every mode on a host whose every value holds one, nothing
+    # printed raw.
+    revocation = os.path.join(scratch, "revoked" + OSC)
+    with open(revocation, "w") as fh:
+        fh.write("not a key\n")
+    hostile = dict(user__name="Jane" + OSC, user__email="me" + OSC + "@example.com",
+                   user__signingkey="~/.ssh/" + OSC, gpg__format="ssh" + OSC,
+                   gpg__ssh__revocationFile=revocation)
+    sweeps = [hostile, dict(hostile, gpg__format="ssh"), dict(hostile, gpg__format="ssh", user__email="me@example.com"),
+              dict(user__email="me@example.com", user__signingkey="key::" + K1, commit__gpgsign="false" + OSC),
+              dict(user__email="me@example.com", user__signingkey="key::" + K1, user__name="Jane",
+                   gpg__ssh__revocationFile=revocation),
+              dict(user__email="me@example.com", user__signingkey="key::" + K1, user__name="Jane",
+                   gpg__ssh__allowedSignersFile=os.path.join(scratch, "nowhere" + OSC))]
+    for n, values in enumerate(sweeps):
+        h.set(**values)
+        for mode, extra in (("identity", ()), ("auto", ("--report-stale",)), ("check", ()), ("rotate", ()),
+                            ("doctor", ("--verbose",))):
+            rc, text = h.said(mode, *extra)
+            check(printable(text) and "Traceback" not in text,
+                  "sweep %d, %s: nothing printed raw (%r)" % (n, mode, text))
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -843,6 +995,13 @@ def main(argv):
 
     try:
         main_twice_units(mod, scratch)
+    finally:
+        mod.git_release()
+        os.environ.clear()
+        os.environ.update(saved)
+
+    try:
+        escaping_units(mod, scratch)
     finally:
         mod.git_release()
         os.environ.clear()
