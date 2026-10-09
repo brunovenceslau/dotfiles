@@ -877,6 +877,94 @@ def killed_units(mod, scratch):
                   "a %s during the cleanup after a %s is ignored: the key file is removed (rc %d, left %r, %r)"
                   % (signal.Signals(second).name, signal.Signals(first).name, p.returncode, left, p.stderr))
 
+    # A signal that lands while a cleanup already runs on a normal way out
+    # (no signal before it) waits for that cleanup to finish: the remover,
+    # patched, signals the process first and only then removes. The process
+    # still dies of the signal, after the file is gone.
+    cleaning = (
+        "import importlib.util, os, shutil, signal, subprocess, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "real = {'unlink': os.unlink, 'rmtree': shutil.rmtree}\n"
+        "sent = []\n"
+        "def killing(name):\n"
+        "    def remove(path, *a, **k):\n"
+        "        if not sent and os.path.basename(path).startswith(sys.argv[4]):\n"
+        "            sent.append(path)\n"
+        "            os.kill(os.getpid(), signal.SIGTERM)\n"
+        "            (lambda: None)()  # a Python call: a pending handler runs here\n"
+        "        return real[name](path, *a, **k)\n"
+        "    return remove\n"
+        "os.unlink, m.shutil.rmtree = killing('unlink'), killing('rmtree')\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    if sys.argv[3] == 'krl':\n"
+        "        m.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 0)\n"
+        "        m.krl_revokes(os.devnull, m.parse_key(sys.argv[5]))\n"
+        "    elif sys.argv[3] == 'git':\n"
+        "        m.git(['--version'])\n"
+        "    elif sys.argv[3] == 'write':\n"
+        "        m.git = lambda args: (1, '', 'refused')  # the staged file is then removed\n"
+        "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
+        "    else:\n"
+        "        m.write_keys(sys.argv[2], [('user.name', 'Jane')])\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for what, prefix in (("krl", "host_identity."), ("git", "host_identity.git."),
+                         ("write", ".config.local."), ("backup", ".config.local.bak.")):
+        tmpdir = os.path.join(scratch, "cleaning-tmp-" + what)
+        confdir = os.path.join(scratch, "cleaning-conf-" + what)
+        os.mkdir(tmpdir, 0o700)
+        os.mkdir(confdir, 0o700)
+        local = os.path.join(confdir, "config.local")
+        with open(local, "w") as fh:
+            fh.write("[user]\n\temail = a@x\n")
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", cleaning, mod.__file__, local, what, prefix, K1],
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        # The backup case finishes its .bak before the signal: that one stays.
+        left = os.listdir(tmpdir) + [n for n in os.listdir(confdir) if n not in ("config.local", "config.local.bak")]
+        check(p.returncode == -signal.SIGTERM and left == [] and b"Traceback" not in p.stderr,
+              "a SIGTERM while %s's cleanup runs on a normal way out waits for it (rc %d, left %r, %r)"
+              % (what, p.returncode, left, p.stderr))
+
+    # Two different signals pending at once: the first unwinds, the second is
+    # ignored quietly, with no "Exception ignored" report of a race. Both are
+    # sent while blocked, so both are pending when they are let through.
+    both = (
+        "import importlib.util, os, signal, sys\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "def run(host, mode, name, report_stale, verbose=False):\n"
+        "    m.git(['--version'])\n"
+        "    old = signal.pthread_sigmask(signal.SIG_BLOCK, m.UNWINDING)\n"
+        "    os.kill(os.getpid(), int(sys.argv[3]))\n"
+        "    os.kill(os.getpid(), int(sys.argv[4]))\n"
+        "    signal.pthread_sigmask(signal.SIG_SETMASK, old)\n"
+        "    (lambda: None)()  # a Python call: the pending handlers run here\n"
+        "    return 0, None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    for first, second in ((signal.SIGHUP, signal.SIGTERM), (signal.SIGINT, signal.SIGTERM),
+                          (signal.SIGHUP, signal.SIGINT)):
+        tmpdir = os.path.join(scratch, "both-%d-%d" % (first, second))
+        os.mkdir(tmpdir, 0o700)
+        p = subprocess.run([sys.executable, "-I", "-B", "-c", both, mod.__file__, os.path.join(scratch, "c.local"),
+                            str(int(first)), str(int(second))],
+                           env=dict(os.environ, HOME=scratch, TMPDIR=tmpdir), stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        # The lower-numbered signal is handled first.
+        check(p.returncode == -min(first, second) and os.listdir(tmpdir) == [] and p.stderr == b"",
+              "a %s and a %s pending at once: the run unwinds by one, cleans up, and says nothing (rc %d, %r)"
+              % (signal.Signals(first).name, signal.Signals(second).name, p.returncode, p.stderr))
+
+    # A termination is a BaseException, as KeyboardInterrupt is: no `except
+    # Exception` on the way out swallows it.
+    check(issubclass(mod.Terminated, BaseException) and not issubclass(mod.Terminated, Exception),
+          "Terminated is a BaseException and not an Exception")
+
     # A SIGTERM the caller ignores (nohup does that for SIGHUP) stays ignored.
     ignored = (
         "import importlib.util, signal, sys\n"

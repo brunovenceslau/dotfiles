@@ -938,9 +938,11 @@ def git_release():
     """Remove the empty directory and forget the decision. Explicit, not a
     finalizer's: the directory is gone when this returns."""
     global _git_place
-    if _git_place is not None and _git_place.made is not None:
-        shutil.rmtree(_git_place.made, ignore_errors=True)
-    _git_place = None
+    # Held: a signal that lands mid-removal waits for it to finish.
+    with _Held():
+        if _git_place is not None and _git_place.made is not None:
+            shutil.rmtree(_git_place.made, ignore_errors=True)
+        _git_place = None
 
 
 def git(args):
@@ -1078,7 +1080,8 @@ class _Held(object):
     delivered when the block ends. Wraps the creation of a temporary file or
     directory AND the assignment that records it, inside the try whose
     finally removes it, so no signal can unwind between the two and leave
-    one nobody removes."""
+    one nobody removes; and wraps that finally's removal, so a signal that
+    lands while it runs on a normal way out cannot cut it short."""
 
     def __enter__(self):
         self.old = signal.pthread_sigmask(signal.SIG_BLOCK, UNWINDING)
@@ -1110,11 +1113,13 @@ def krl_revokes(path, key):
     except (OSError, subprocess.TimeoutExpired):
         return None
     finally:
-        if pub is not None:
-            try:
-                os.unlink(pub)
-            except OSError:
-                pass
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if pub is not None:
+                try:
+                    os.unlink(pub)
+                except OSError:
+                    pass
     return {0: False, 1: True}.get(p.returncode)
 
 
@@ -1416,8 +1421,10 @@ def backup_once(path, src_fd, mode):
             with os.fdopen(out, "wb") as dst, open(tmp, "rb") as src:
                 shutil.copyfileobj(src, dst)
     finally:
-        if tmp is not None:
-            os.unlink(tmp)
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if tmp is not None:
+                os.unlink(tmp)
     log("identity: backed up %s -> %s" % (_shown(path), _shown(bak)))
 
 
@@ -1475,10 +1482,12 @@ def write_keys(path, items):
             warn("identity: cannot write %s: %s" % (_shown(path), e.strerror))
             return False
     finally:
-        if src is not None:
-            os.close(src)
-        if tmp is not None and os.path.lexists(tmp):
-            os.unlink(tmp)
+        # Held: a signal that lands mid-cleanup waits for it to finish.
+        with _Held():
+            if src is not None:
+                os.close(src)
+            if tmp is not None and os.path.lexists(tmp):
+                os.unlink(tmp)
     return True
 
 
@@ -2641,6 +2650,10 @@ def main(argv):
     return rc
 
 
+# Set by the first UNWINDING signal, so the ones after it are ignored.
+_unwinding = False
+
+
 class Terminated(BaseException):
     """A SIGTERM or SIGHUP, raised where the process is, as ^C raises
     KeyboardInterrupt, so every finally on the way out runs (the KRL key
@@ -2653,12 +2666,18 @@ class Terminated(BaseException):
 
 
 def _unwind(signum, frame):
-    """The handler entry() installs for the UNWINDING signals: from here on
-    each of them is ignored, so a second one cannot cut short the cleanup
-    the first one starts (_die_of() restores the one it ends the process
-    with); then unwind, as KeyboardInterrupt for ^C, else Terminated."""
-    for each in UNWINDING:
-        signal.signal(each, signal.SIG_IGN)
+    """The handler entry() installs for the UNWINDING signals. The first
+    one unwinds, as KeyboardInterrupt for ^C, else Terminated; any one after
+    it returns at once, so it cannot cut short the cleanup the first one
+    starts. The handler stays installed rather than being swapped for
+    SIG_IGN: Python may already hold a second signal it has not handled
+    yet, and one whose handler became SIG_IGN meanwhile is reported as
+    "ignored due to race condition" on stderr. _die_of() then ends the
+    process by the first signal itself."""
+    global _unwinding
+    if _unwinding:
+        return
+    _unwinding = True
     if signum == signal.SIGINT:
         raise KeyboardInterrupt
     raise Terminated(signum)
@@ -2679,6 +2698,8 @@ def entry(argv):
     left at its default unwinds like ^C (Terminated), and ^C keeps its
     KeyboardInterrupt, all three through _unwind(); one the caller ignores
     (nohup) stays ignored."""
+    global _unwinding
+    _unwinding = False
     for signum in UNWINDING:
         default = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
         if signal.getsignal(signum) == default:
