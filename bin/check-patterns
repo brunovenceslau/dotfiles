@@ -1923,10 +1923,29 @@ fi
 # inside a multi-line HTML block that does not itself open with a tag, and an
 # indented (4-space) code block.
 md_width=80
+# TEST SEAM for the awk that counts: CHECK_PATTERNS_AWK names the awk program
+# (default `awk`) and CHECK_PATTERNS_AWK_LC_ALL the locale it runs under
+# (default C, the script's own). Only this arm reads them. Both are needed
+# because the character-counting path runs only on an awk that decodes UTF-8,
+# and gawk does so only under a UTF-8 locale: `make check-patterns-gawk` sets
+# the pair, so the path that macOS's byte-counting awk never takes runs on a
+# real awk in CI. A named awk the shell cannot find is exit 2, never a silent
+# fallback to the default awk, which would make that leg vacuous.
+md_awk="${CHECK_PATTERNS_AWK:-awk}"
+md_awk_lc="${CHECK_PATTERNS_AWK_LC_ALL:-C}"
+if [ -n "${CHECK_PATTERNS_AWK:-}" ] && ! command -v "$md_awk" >/dev/null 2>&1; then
+  _err "check-patterns: CHECK_PATTERNS_AWK names '$md_awk', which is not an executable on PATH"
+  exit 2
+fi
 # shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
 md_width_awk='
 BEGIN {
   u8 = (length("\303\251") == 1)
+  # The continuation-byte class is a STRING, compiled when gsub first uses it,
+  # never a /regex/ literal: gawk compiles a literal at parse time, and in a
+  # UTF-8 locale it rejects [\200-\277] as an invalid collation range, which
+  # would fail the gate on the very awk that takes the character path.
+  cont = "[\200-\277]"
   # Self-test of the probe: an e acute, a micro and a degree sign are three
   # characters. Any awk and locale that the probe misreads fails closed.
   if (cols("\303\251\302\265\302\260") != 3) {
@@ -1936,7 +1955,7 @@ BEGIN {
 }
 function cols(s,   t) {
   if (u8) return length(s)
-  t = s; gsub(/[\200-\277]/, "", t); return length(t)
+  t = s; gsub(cont, "", t); return length(t)
 }
 # Every walk below reads the line from ch[], split into one character per
 # element ONCE per line (tokens), never with substr(s, i, 1): the onetrue
@@ -2094,7 +2113,7 @@ fm {
 END { flush() }
 '
 if out=$(find "${prose[@]}" -type f -name '*.md' \
-    -exec awk -v W="$md_width" "$md_width_awk" {} + 2>&1); then
+    -exec env LC_ALL="$md_awk_lc" "$md_awk" -v W="$md_width" "$md_width_awk" {} + 2>&1); then
   if [ -n "$out" ]; then
     _err "$out" \
       "check-patterns: a Markdown prose line over $md_width columns - rewrap the paragraph (a table row, heading, fenced block, HTML line, or a line holding one unbreakable URL, code span or link is exempt)"

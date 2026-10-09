@@ -37,11 +37,12 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
+.PHONY: help lint check-patterns check-patterns-gawk py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
 	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns + python3 -I syntax check"
+	@echo "  make check-patterns-gawk  the static patterns again, under gawk counting characters (a UTF-8 locale)"
 	@echo "  make test                 unit tests for the repo tooling (tests/*.sh), git's local env vars unset"
 	@echo "  make test-env-scrub       static check: test and py-syntax unset git's local env vars first"
 	@echo "  make reuse                REUSE 3.3 compliance: every file states its copyright and licence"
@@ -103,6 +104,37 @@ lint: check-patterns py-syntax
 #   silently disabled both checks. Kept a make target so lint/CI wire it unchanged.
 check-patterns:
 	@bin/check-patterns
+
+# The static patterns again, under a CHARACTER-counting awk. arm 15's width
+#   check picks its counting path by probing the awk it runs under, and the
+#   awks the other legs use (macOS's byte-counting onetrue awk, mawk on Linux)
+#   all take the byte path, so the character path would never run in CI. gawk
+#   decodes UTF-8 under a UTF-8 locale, so it takes it. The locale is probed
+#   rather than assumed (macOS ships en_US.UTF-8, many Linux images only
+#   C.UTF-8): a gawk that still counts bytes would make this leg a second run
+#   of the first, so no locale that makes length("\303\251") 1 is the same
+#   outcome as no gawk. STRICT semantics match the shellcheck block in lint.
+#   tests/check_patterns_gawk_test.sh holds the fixtures that tell the paths
+#   apart; `make test` runs it. Wired into local-ci below.
+check-patterns-gawk:
+	@if ! command -v gawk >/dev/null 2>&1; then \
+	  if [ -n "$(STRICT)" ]; then \
+	    echo "ERROR: gawk not installed and STRICT=1 - failing closed" >&2; exit 1; \
+	  fi; \
+	  echo "WARN: gawk not installed - skipping (set STRICT=1 to fail; CI enforces it)"; exit 0; \
+	fi; \
+	loc=''; \
+	for l in en_US.UTF-8 C.UTF-8; do \
+	  if [ "$$(LC_ALL=$$l gawk 'BEGIN { print length("\303\251") }' 2>/dev/null)" = 1 ]; then loc=$$l; break; fi; \
+	done; \
+	if [ -z "$$loc" ]; then \
+	  if [ -n "$(STRICT)" ]; then \
+	    echo "ERROR: gawk counts bytes under en_US.UTF-8 and C.UTF-8 and STRICT=1 - failing closed" >&2; exit 1; \
+	  fi; \
+	  echo "WARN: no UTF-8 locale makes gawk count characters - skipping (set STRICT=1 to fail; CI enforces it)"; exit 0; \
+	fi; \
+	echo "CHECK_PATTERNS_AWK=gawk CHECK_PATTERNS_AWK_LC_ALL=$$loc bin/check-patterns"; \
+	CHECK_PATTERNS_AWK=gawk CHECK_PATTERNS_AWK_LC_ALL=$$loc bin/check-patterns
 
 # Syntax-only gate over the repo's .py files. Tracked AND untracked-but-not-
 #   ignored files count (--others --exclude-standard): the other lint passes
@@ -471,12 +503,12 @@ commit-identity:
 # Run every locally-runnable CI gate and report which OS-specific
 #   or not-yet-implemented legs were skipped. `smoke` runs a full scratch-HOME
 #   install + interactive zsh, so it is locally runnable and gates here.
-local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck commit-identity
+local-ci: lint check-patterns-gawk test-env-scrub test reuse gitleaks secret-scan smoke forkgate linkcheck commit-identity
 	@echo "----------------------------------------------------------------"
 	@if command -v shellcheck >/dev/null 2>&1; then \
-	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
+	  echo "local-ci: PASS lint (shellcheck + zsh -n + patterns + py-syntax) + check-patterns-gawk + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	else \
-	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
+	  echo "local-ci: PASS lint (zsh -n + patterns + py-syntax) + check-patterns-gawk + test-env-scrub + test + secret-scan + smoke + forkgate + linkcheck + commit-identity"; \
 	  echo "local-ci: SKIP shellcheck (not installed locally; enforced in CI)"; \
 	fi
 	@# reuse reports on its own line, for the reason shellcheck does: without
@@ -486,6 +518,11 @@ local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate lin
 	  echo "local-ci: PASS reuse (REUSE 3.3 compliance)"; \
 	else \
 	  echo "local-ci: SKIP reuse (not installed locally; enforced in CI)"; \
+	fi
+	@if command -v gawk >/dev/null 2>&1; then \
+	  echo "local-ci: PASS check-patterns-gawk (patterns under a character-counting awk)"; \
+	else \
+	  echo "local-ci: SKIP check-patterns-gawk (gawk not installed locally; enforced in CI)"; \
 	fi
 	@if command -v gitleaks >/dev/null 2>&1; then \
 	  echo "local-ci: PASS gitleaks (maintained secret rule set)"; \

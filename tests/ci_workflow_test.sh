@@ -71,6 +71,7 @@ done <<'PATS'
 zsh[[:space:]]+-n
 (/bin/)?bash[[:space:]]+-n
 bin/(check-patterns|secret-scan|smoke|startup-fork-gate|repo-settings-check)
+CHECK_PATTERNS_AWK
 reuse[[:space:]]+lint
 gitleaks[[:space:]]+(dir|git|file|directory|stdin|detect|protect)
 PATS

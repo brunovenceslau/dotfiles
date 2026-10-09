@@ -5,8 +5,8 @@
 # CI - the verification gate.
 #
 # Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint +
-# test-env-scrub + test + reuse + gitleaks + secret-scan + smoke + forkgate +
-# linkcheck) - on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS
+# check-patterns-gawk + test-env-scrub + test + reuse + gitleaks + secret-scan
+# + smoke + forkgate + linkcheck + commit-identity) - on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS
 # arm64 + Intel. macOS is the only platform the framework installs on, so
 # there is no leg for any other OS. There is deliberately NO QEMU/container
 # emulation: each leg is real hardware of its own architecture, which is what
@@ -71,7 +71,11 @@ jobs:
       # `brew install` would re-link the image's preinstalled python3 and fail
       # the step. `reuse` and `gitleaks` are homebrew-core formulae; the reuse
       # one installs the reuse[charset-normalizer] extra the tool needs to
-      # detect file encodings. This loop is the single list of what CI
+      # detect file encodings. `gawk` (homebrew-core formula `gawk`,
+      # https://formulae.brew.sh/formula/gawk) is the character-counting awk
+      # that `make check-patterns-gawk` runs bin/check-patterns under: macOS's
+      # own awk counts bytes. It is a CI and contributor tool, not a
+      # dependency of the framework. This loop is the single list of what CI
       # provisions: tests/dev_docs_prereqs_test.sh holds docs/development.md's
       # Prerequisites section to it, so a tool added here without a docs entry
       # fails the gate rather than stranding a contributor.
@@ -79,7 +83,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           missing=''
-          for tool in make shellcheck zsh tmux fzf jq xz reuse gitleaks; do
+          for tool in make shellcheck zsh tmux fzf jq xz reuse gitleaks gawk; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
@@ -110,6 +114,7 @@ jobs:
           jq --version
           xz --version | sed -n 1p
           reuse --version | sed -n 1p
+          gawk --version | sed -n 1p
           gitleaks version
           python3 -I -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
           # Two interpreters, printed, never compared: bin/ runs under the first
