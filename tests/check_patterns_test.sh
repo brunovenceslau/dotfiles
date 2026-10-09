@@ -1293,6 +1293,22 @@ mkdir -p "$work/sym-probe-worktree-elsewhere"
 git -C "$r" config core.worktree "$work/sym-probe-worktree-elsewhere"
 fails_with_rc 2 "$r" "$sym_top_msg" "a .git whose core.worktree points away from \$root must fail closed" only
 
+# --- the surface of a checkout is what git lists: an IGNORED file (a stray
+# tests/__pycache__/*.pyc: NUL bytes, bytes that read as an em dash) is not
+# scanned, while an untracked file that is NOT ignored still is, and a tree
+# without .git has no ignore information so it is read whole ----------------
+_ign_em=$'\xe2\x80\x94'
+r="$work/ignored-pyc"; _git_repo "$r"; seed "$r"; mkdir -p "$r/tests/__pycache__"
+printf '__pycache__/\n*.pyc\n' > "$r/.gitignore"
+printf 'a %s b\n\0\n' "$_ign_em" > "$r/tests/__pycache__/x.pyc"
+git -C "$r" add -A && git -C "$r" commit -qm init
+[ "$(run "$r")" = "0" ] && ok || fail "an ignored tests/__pycache__/x.pyc must not be scanned"
+printf 'a %s b\n' "$_ign_em" > "$r/tests/new.txt"
+fails_with_rc 1 "$r" "check-patterns: an em dash (U+2014) in repo prose" "an untracked, NOT ignored file must still be scanned" only
+r="$work/ignored-pyc-nogit"; seed "$r"; mkdir -p "$r/tests/__pycache__"
+printf 'a %s b\n' "$_ign_em" > "$r/tests/__pycache__/x.pyc"
+fails_with_rc 1 "$r" "check-patterns: an em dash (U+2014) in repo prose" "a tree without .git has no ignore list: the file is read" only
+
 # --- a .git at $root with git absent from PATH fails CLOSED -----------------
 # PATH is an explicit allowlist: every external tool bin/check-patterns runs
 # on any path (bash for its shebang via env), resolved from the real PATH, and
@@ -3469,9 +3485,13 @@ SHAPES
 # other_arm FILE - succeeds when FILE holds a check-patterns line that is
 # neither arm 15's message nor a SKIP. Prefix tests on fixed strings: a grep
 # -v on the message hid any other arm's line that merely CONTAINED $md_msg or
-# SKIP, and a final line without a newline is read too.
+# SKIP, and a final line without a newline is read too. The unreadable-file
+# check comes first: callers test this inside `if`, where errexit is
+# suspended, so a failed `< "$1"` redirect would end the loop as "no other
+# arm" and fail OPEN.
 other_arm() {
   local line
+  [ -r "$1" ] || fail "other_arm: $1 unreadable"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "$md_msg"* | "check-patterns: SKIP "*) ;;
@@ -3488,6 +3508,20 @@ printf '%s\n%s' "$md_msg x" "$curl_msg" > "$work/oa2.out"
 if other_arm "$work/oa2.out"; then ok; else fail "other_arm: an unterminated last line of another arm must count"; fi
 printf 'check-patterns: other arm, quoting %s and SKIP \n' "$md_msg" > "$work/oa3.out"
 if other_arm "$work/oa3.out"; then ok; else fail "other_arm: a line quoting the message mid-line must count"; fi
+# a missing file is a test bug, not "no other arm": it must stop the suite
+# (fail exits), inside the `if` too. Run in a subshell so the exit is seen.
+oa_rc=0
+oa_err=$( (if other_arm "$work/oa-missing.out"; then :; fi) 2>&1 ) || oa_rc=$?
+if [ "$oa_rc" = 1 ] && [ "$oa_err" = "FAIL: other_arm: $work/oa-missing.out unreadable" ]; then
+  ok
+else
+  fail "other_arm: a missing file must stop the suite (rc $oa_rc, output: $oa_err)"
+fi
+# the line must START with the arm prefix: a path that merely contains
+# `check-patterns:` (an offending file named so, echoed as PATH:NN:TEXT) is
+# the first arm's own hit, not a second arm.
+printf '%s\n%s\n' "$md_msg x" "./sub/check-patterns:1: offending text" > "$work/oa4.out"
+if other_arm "$work/oa4.out"; then fail "other_arm: a path holding 'check-patterns:' must not read as a second arm"; else ok; fi
 
 # What each shape pins: every shape but backslash-pair and unclosed trips
 # that two-character skip (a hang before skipcode's guard, a fast exit 2
@@ -3496,10 +3530,10 @@ if other_arm "$work/oa3.out"; then ok; else fail "other_arm: a line quoting the 
 # the REST of the run opens a span (the CommonMark reading, length L-1, which
 # pairs with the next run of that length); after-run pins that the walk
 # resumes AT the character after the run (a skip one too far jumps over the
-# `]`); backslash-pair pins that
-# `\\` is consumed as a pair, so the backtick after it is real (a mutant that
-# does not flips it to a fail); unclosed pins skipcode's unclosed-run
-# fallback (`return i + rl[k]`), it stays green under the revert.
+# `]`); backslash-pair pins that `\\` is consumed as a pair, so the backtick
+# after it is real (a mutant that does not flips it to a fail); unclosed pins
+# skipcode's unclosed-run fallback (`return i + rl[k]`), it stays green under
+# the revert.
 i=0
 while IFS='|' read -r want shape; do
   i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"

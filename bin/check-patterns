@@ -353,13 +353,96 @@ _scan_roots() {
         fi
         [ -e "$e" ] || continue  # an unmatched glob stays literal
         [ "$e" = "$root/zsh/plugins" ] && [ -d "$e" ] && continue
-        roots+=("$e")
+        _add_root "$e"
       done
     elif [ -e "$root/$p" ] || [ -L "$root/$p" ]; then
-      roots+=("$root/$p")
+      _add_root "$root/$p"
     fi
   done
 }
+
+# --- the files git lists, when $root is a checkout ---------------------------
+# A recursive scan of a checkout reads what git IGNORES too: a stray
+# tests/__pycache__/*.pyc (binary, NULs, bytes that look like a violation)
+# turned `make local-ci` red, and a hit in a file git will never ship is noise
+# that teaches people to ignore the gate. So when `$root/.git` exists, the
+# surface is what git lists - tracked files plus untracked ones that are not
+# ignored (a new file is checked BEFORE `git add`, not after) - and
+# _add_root hands the arms those FILES instead of the directory.
+#   - Not a checkout (a fixture, an install tree without .git): git has no
+#     ignore information there, so the directory is scanned whole. That
+#     over-reads rather than under-reads, so it stays on the fail-closed side.
+#   - A checkout where git cannot answer (not on PATH, wrong toplevel, an
+#     error, any stderr): the listing is dropped and the directory is scanned
+#     whole, as for a non-checkout. That reads MORE, never less, so a scan can
+#     not pass on the strength of an empty list; and `_git_symlink_pass`
+#     below, which meets the same git trouble, is what reports it and fails
+#     closed (exit 2) with its own message.
+#   - `-c core.excludesFile=/dev/null`: only the repo's own ignore files
+#     decide, never the user's global one, so two machines read one surface.
+#     `-c core.fsmonitor=false` and the unset of git's local env vars are the
+#     same hardening _git_symlink_pass documents below (that pass stays the
+#     one that polices symlinks and gitlinks repo-wide).
+#   - A listed symlink never becomes a grep operand (GNU grep -r follows a
+#     command-line one): it goes to `scan_links`, which only find reads, as a
+#     symlink met while walking a directory always did.
+#   - A listed path that is not a file on disk (deleted but still tracked, a
+#     gitlink, a nested repo) is skipped: there is nothing to read.
+#   - bin/check-patterns itself stays out of the list: every recursive arm
+#     excludes it by base name, which GNU grep applies to a directory walk
+#     and BSD grep may not apply to a file operand.
+has_git=0
+{ [ -e "$root/.git" ] || [ -L "$root/.git" ]; } && has_git=1
+git_listed=0
+git_files=()
+scan_links=()
+_git_listing() {
+  local lev_rc=0 ls_rc=0 top v f
+  local -a env_args=()
+  command -v git >/dev/null 2>&1 || return 1
+  git rev-parse --local-env-vars >"$cp_tmp/ls-env" 2>/dev/null || lev_rc=$?
+  { [ "$lev_rc" -eq 0 ] && grep -qx GIT_DIR "$cp_tmp/ls-env" 2>/dev/null; } || return 1
+  while IFS= read -r v; do
+    [ -z "$v" ] || env_args+=(-u "$v")
+  done <"$cp_tmp/ls-env"
+  top=$(env ${env_args[@]+"${env_args[@]}"} git -C "$root" -c core.fsmonitor=false rev-parse --show-toplevel 2>/dev/null) || return 1
+  [ "$top" -ef "$root" ] || return 1
+  env ${env_args[@]+"${env_args[@]}"} git -C "$root" -c core.fsmonitor=false -c core.excludesFile=/dev/null \
+    ls-files -z --cached --others --exclude-standard >"$cp_tmp/ls-list" 2>"$cp_tmp/ls-list.err" || ls_rc=$?
+  { [ "$ls_rc" -eq 0 ] && [ ! -s "$cp_tmp/ls-list.err" ]; } || return 1
+  while IFS= read -r -d '' f; do
+    git_files+=("$root/$f")
+  done <"$cp_tmp/ls-list"
+  git_listed=1
+}
+# _add_root PATH - append PATH to `roots`. A real directory of a listed
+# checkout is replaced by the listed files under it (see above).
+_add_root() {
+  local d="$1" f l dup
+  if [ "$git_listed" -ne 1 ] || [ ! -d "$d" ] || [ -L "$d" ]; then
+    roots+=("$d")
+    return 0
+  fi
+  for f in ${git_files[@]+"${git_files[@]}"}; do
+    case "$f" in
+      "$root/bin/check-patterns") continue ;;
+      "$d"/*) ;;
+      *) continue ;;
+    esac
+    if [ -L "$f" ]; then
+      dup=0
+      for l in ${scan_links[@]+"${scan_links[@]}"}; do
+        [ "$l" = "$f" ] && { dup=1; break; }
+      done
+      [ "$dup" -eq 1 ] || scan_links+=("$f")
+    elif [ -f "$f" ]; then
+      roots+=("$f")
+    fi
+  done
+}
+if [ "$has_git" -eq 1 ]; then
+  _git_listing || { git_files=(); git_listed=0; }
+fi
 
 # Our own implementing surface, shared by arms 2, 5 and 6 (arm 1 widens it
 # below, arms 7-12 build their own). The Makefile is not on it (its comments
@@ -372,7 +455,7 @@ _scan_roots() {
 # too - and a recursive grep given NO operand would read the cwd or stdin.
 _scan_roots install.sh lib bin zsh config packages security home
 scan=(${roots[@]+"${roots[@]}"})
-scan_links=(${zsh_links[@]+"${zsh_links[@]}"})
+scan_links+=(${zsh_links[@]+"${zsh_links[@]}"})
 if [ "${#scan[@]}" -eq 0 ]; then
   _err "check-patterns: no scan paths exist under '$root' - refusing to pass a no-op scan"
   exit 2
@@ -1171,8 +1254,6 @@ fi
 # FAILS CLOSED on any error from any pass, and when `$root/.git` exists but
 # the git pass cannot run or resolve `$root` as its toplevel.
 plugins_msg="check-patterns: an entry under zsh/plugins/ that is not a pinned plugin - no arm scans zsh/plugins/; move it out, or pin it as submodule.<name>.path = zsh/plugins/<name> in .gitmodules"
-has_git=0
-{ [ -e "$root/.git" ] || [ -L "$root/.git" ]; } && has_git=1
 if out=$(find "${prose[@]}" ${scan_links[@]+"${scan_links[@]}"} -type l -print 2>&1); then
   viol="$out"
 else
