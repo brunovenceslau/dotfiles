@@ -394,10 +394,13 @@ It prints no file's contents. A `user.signingkey` that names a private key
 file is recognised by its first line and judged by the `.pub` beside it.
 Agent keys print as `SHA256:` fingerprints. Each value a line puts in (a
 config value, an origin, a path, a tool's message) prints bare when it
-holds only printable characters and no backslash. Otherwise it prints in
-single quotes, with each control, bidi or invisible character, backslash,
-quote and byte that is not UTF-8 escaped (`\x1b`, `\u202e`), so it
-cannot rewrite the terminal or pass for message text. The words around it
+holds only printable characters and no backslash. An empty value, one with
+a space at either end and one with a run of two spaces print quoted too, so
+a value can neither vanish nor wrap words onto a line of their own. A
+quoted value prints in single quotes, with each control, bidi or invisible
+character (a Hangul filler and the braille blank included), backslash,
+quote and byte that is not UTF-8 escaped (`\x1b`, `\u202e`, `\u3164`), so
+it cannot rewrite the terminal or pass for message text. The words around it
 print as written. A path inside a command a line tells you to run (the
 installer, `config.local`) is quoted for the shell when it needs it, so the
 command runs as printed from a `HOME` that holds a space. The identity

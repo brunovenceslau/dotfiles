@@ -551,6 +551,23 @@ def escaping_units(mod, scratch):
           "_shown() keeps a plain value bare and quotes one escape() changes, an exception's text included")
     check([mod._shown(v) for v in ("", " lead", "trail ", "\tx")] == ["''", "' lead'", "'trail '", "'\\x09x'"],
           "_shown() quotes an empty value and one that starts or ends with a space")
+    check([mod._shown(v) for v in ("a b", "a  b", "me@x.org" + " " * 40 + "fix: run this")]
+          == ["a b", "'a  b'", "'me@x.org%sfix: run this'" % (" " * 40)],
+          "_shown() keeps a single inner space bare and quotes a run of spaces, which could wrap into a line of its own")
+    # The code points a terminal shows as nothing, though Python counts them
+    # printable: escaped, so a value cannot hide text behind them.
+    blanks = "\u3164\u115f\u2800\u034f\ufe0f\U000e0100"
+    check(mod.escape("a" + blanks + "b") == "a\\u3164\\u115f\\u2800\\u034f\\ufe0f\\U000e0100b"
+          and mod._shown("Jane\u3164Doe") == "'Jane\\u3164Doe'",
+          "escape() spells out the Hangul fillers, the braille blank, the CGJ and the variation selectors")
+    # One rule for both printers: .githooks/commit_identity.py keeps its own
+    # escape() (it runs alone), held here to this one over every code point.
+    hook = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, ".githooks", "commit_identity.py")
+    spec = importlib.util.spec_from_file_location("commit_identity", hook)
+    other = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(other)
+    differ = [hex(o) for o in range(0x110000) if mod.escape(chr(o)) != other.escape(chr(o))]
+    check(not differ, "escape() in .githooks/commit_identity.py spells every code point the same (differ: %r)" % differ[:10])
     check(mod._bare("identity: cannot read /a - writing nothing/b: x - writing nothing")
           == "cannot read /a - writing nothing/b: x", "_bare() strips only the trailing ' - writing nothing'")
     h = HostileHost(mod, scratch, "hostile")
@@ -1552,6 +1569,8 @@ def main(argv):
                                ("jdoe", "& Doe", "Jdoe Doe"),
                                ("jdoe", "&,&", "Jdoe"),
                                ("jane", "", ""),
+                               ("jane", "Jane ,Room 1", "Jane"),
+                               ("jane", " Jane Doe ", "Jane Doe"),
                                ("jane", ",Room 1", ""),
                                ("jane", None, "")):
         got = mod.gecos_name(Pw(login, gecos))
@@ -1563,6 +1582,19 @@ def main(argv):
         got = mod.suggested_name(bad)
         check(got == "Full Name", "a full name %r that git, a shell or the terminal would not pass unchanged is not suggested (got %r)"
               % (bad, got))
+    # A name _shown() would quote: pasted from the line, its single quotes
+    # would become part of user.name.
+    for edged in (" Jane", "Jane ", "Jane  Doe"):
+        got = mod.suggested_name(edged)
+        check(got == "Full Name", "a full name %r that would print quoted is not suggested (got %r)" % (edged, got))
+    saved_account = mod.account_name
+    mod.account_name = lambda: "Jane  Doe"
+    try:
+        line = mod.missing_name_line(mod.Host(scratch, os.path.join(scratch, "c"), "INSTALLER"))
+    finally:
+        mod.account_name = saved_account
+    check(line == 'identity: user.name is not set - run: INSTALLER identity --name "Full Name"',
+          "a full name with a run of spaces is never suggested inside quotes of its own (%r)" % line)
     saved_account = mod.account_name
     mod.account_name = lambda: "Jane\x1b[2JDoe"
     try:

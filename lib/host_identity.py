@@ -542,10 +542,13 @@ def _clean(s):
 def escape(s):
     """One printable line: a backslash doubles, and a character that is not
     printable (a control, LF, CR, a bidi or zero-width format character, a
-    byte that was not UTF-8) prints as its escape, so a value cannot forge a
-    second line, rewrite the terminal or hide part of the message. The same
-    rule as .githooks/commit_identity.py's escape(), kept beside it rather
-    than imported: each file runs alone."""
+    byte that was not UTF-8) or that a terminal shows as nothing (the
+    _INVISIBLE code points, which Python counts as printable) prints as its
+    escape, so a value cannot forge a second line, rewrite the terminal or
+    hide part of the message. The same rule as
+    .githooks/commit_identity.py's escape(), kept beside it rather than
+    imported: each file runs alone (tests/host_identity_units.py holds the
+    two to the same output)."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -553,7 +556,7 @@ def escape(s):
             out.append("\\\\")
         elif 0xDC80 <= o <= 0xDCFF:
             out.append("\\x%02x" % (o - 0xDC00))
-        elif ch.isprintable():
+        elif ch.isprintable() and not _invisible(ch):
             out.append(ch)
         elif o <= 0xFF:
             out.append("\\x%02x" % o)
@@ -573,9 +576,12 @@ def quoted(s):
 
 def _shown(value):
     """VALUE (a config value, an origin, a path, a tool's message) as a
-    message prints it: bare when escape() leaves it as it is and it neither
-    is empty nor starts or ends with a space (which would print as nothing,
-    or blur into the words around it), else quoted(). Applied to each
+    message prints it: bare when escape() leaves it as it is and it is not
+    empty, does not start or end with a space and holds no run of two
+    spaces, else quoted(). An empty or edge-spaced value would print as
+    nothing or blur into the words around it, and a run of spaces could
+    push the words after it onto a soft-wrapped line of their own, where
+    they pass for a line this module printed. Applied to each
     interpolated value at its call site, never to a whole line: the line's
     literal text is what docs/troubleshooting.md quotes, and it must print as
     written.
@@ -588,7 +594,7 @@ def _shown(value):
     tests/host_identity_units.py checks statically that every value put into
     a string goes through an escaper."""
     value = str(value)
-    if value and value == value.strip() and escape(value) == value:
+    if value and value == value.strip() and "  " not in value and escape(value) == value:
         return value
     return quoted(value)
 
@@ -676,15 +682,20 @@ def suggested_name(name):
     install.sh identity would accept it, a shell passes it through double
     quotes unchanged, and it reads on screen as what it is (a letter or a
     digit, no space but U+0020, no invisible, unassigned or private-use
-    code point), else the placeholder. missing_name_line() puts it in
-    through _shown() as well, so a control character could never reach the
-    terminal even if valid_name() were loosened."""
+    code point), and it prints bare through _shown(), else the placeholder.
+    That last test keeps the double quotes of the suggested command around
+    the name alone: a name _shown() quotes (a space at an edge, a run of
+    two) would be pasted with its single quotes as part of it.
+    missing_name_line() puts it in through _shown() as well, so a control
+    character could never reach the terminal even if valid_name() were
+    loosened."""
     if (name and valid_name(name)
             and not any(c in _SHELL_ACTIVE for c in name)
             and any(c.isalnum() for c in name)
             and not any(c.isspace() and c != " " for c in name)
             and not any(_invisible(c) for c in name)
-            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)):
+            and not any(unicodedata.category(c) in _UNSHOWN_CATEGORIES for c in name)
+            and _shown(name) == name):
         return name
     return "Full Name"
 
@@ -2072,7 +2083,7 @@ def gitconfig_finding(host):
     names = sorted(set(out.split("\n"))) if rc == 0 and out else []
     if names:
         return "problem", ("~/.gitconfig sets %s, and git reads it after ~/.config/git/config - move its settings into %s and remove it"
-                           % (", ".join(escape(n) for n in names), _shown(host.config_local)))
+                           % (", ".join(_shown(n) for n in names), _shown(host.config_local)))
     return "info", "~/.gitconfig exists (no identity or signing settings); git config --global reads and writes only it"
 
 

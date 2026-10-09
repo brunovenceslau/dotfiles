@@ -75,11 +75,31 @@ CALLERS = ("pre-commit", "pre-push", "check")
 PREFIX = "commit-identity"
 
 
+# Code points a terminal shows as nothing or as a plain space, though Python
+# counts them printable (letters, marks or symbols, not format characters):
+# the Hangul fillers, the combining grapheme joiner, the Khmer and Mongolian
+# invisible vowels and selectors, the variation selectors, the braille blank,
+# the Egyptian hieroglyph blanks and the Khitan small script filler. The same
+# list as lib/host_identity.py's _INVISIBLE.
+_INVISIBLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F),
+              (0x2800, 0x2800), (0x3164, 0x3164), (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0),
+              (0x13441, 0x13442), (0x16FE4, 0x16FE4), (0xE0100, 0xE01EF))
+
+
+def _invisible(c):
+    o = ord(c)
+    return any(lo <= o <= hi for lo, hi in _INVISIBLE)
+
+
 def escape(s):
     """One printable line: a backslash doubles, and a character that is not
     printable (a control, LF, a bidi or zero-width format character, a byte
-    that was not UTF-8) prints as its escape, so a value cannot forge a
-    second line or hide part of the message."""
+    that was not UTF-8) or that a terminal shows as nothing (the _INVISIBLE
+    code points, which Python counts as printable) prints as its escape, so
+    a value cannot forge a second line or hide part of the message. The same
+    rule as lib/host_identity.py's escape(), kept beside it rather than
+    imported: each file runs alone (tests/host_identity_units.py holds the
+    two to the same output)."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -87,7 +107,7 @@ def escape(s):
             out.append("\\\\")
         elif 0xDC80 <= o <= 0xDCFF:
             out.append("\\x%02x" % (o - 0xDC00))
-        elif ch.isprintable():
+        elif ch.isprintable() and not _invisible(ch):
             out.append(ch)
         elif o <= 0xFF:
             out.append("\\x%02x" % o)

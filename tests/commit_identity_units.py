@@ -200,5 +200,12 @@ got = refusals_for([(A40, "G@x", "g@x")])
 check(got == ["commit %s has author email 'G@x', not the effective 'g@x'"
               % A40], "commit_refusals(): a case-only difference refuses")
 
+# Code points a terminal shows as nothing, though Python counts them
+# printable, are spelled out: a value cannot hide text behind them.
+got = mod.quoted("a\u3164b\u115f\u2800\u034f\U000e0100")
+check(got == "'a\\u3164b\\u115f\\u2800\\u034f\\U000e0100'",
+      "quoted(): the Hangul fillers, the braille blank, the CGJ and a "
+      "variation selector are escaped (got %r)" % got)
+
 print("commit_identity_units: %d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)

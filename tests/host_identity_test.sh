@@ -1589,11 +1589,11 @@ advise
 has "user.signingkey ('~/.ssh/x\\x1b[2J') names no readable SSH public key" "the advisory escapes a control character"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw escape byte: $out"
 # A ~/.gitconfig key name with control bytes (ESC and BEL in a subsection) is
-# printed escaped by the advisory too, as doctor prints it.
+# printed escaped and quoted by the advisory too, as doctor prints it.
 printf '[user "\033]0;PWNED\007"]\n\tx = 1\n' > "$HOME/.gitconfig"
 rc=0; out="$(python3 -I -B "$module" --config-local "$local_cfg" --installer "$installer" --mode check 2>&1)" || rc=$?
 expect_rc 0 "advisory, a ~/.gitconfig key with control bytes"
-has "~/.gitconfig sets user.\\x1b]0;PWNED\\x07.x, and git reads it after" "the advisory escapes a ~/.gitconfig key name"
+has "~/.gitconfig sets 'user.\\x1b]0;PWNED\\x07.x', and git reads it after" "the advisory escapes a ~/.gitconfig key name"
 ! grep -q "$(printf '\033')" <<<"$out" || fail "the advisory printed a raw ESC from ~/.gitconfig: $out"
 ! grep -q "$(printf '\007')" <<<"$out" || fail "the advisory printed a raw BEL from ~/.gitconfig: $out"
 rm -f "$HOME/.gitconfig"
