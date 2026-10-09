@@ -6,25 +6,30 @@
 
 #
 # Doc-sync test: docs/troubleshooting.md is keyed to the exact text the
-# framework prints, so a reworded message silently strands its section. Every
-# message the page quotes must still exist in the code that prints it
-# (install.sh, lib/*.sh and lib/*.py, zsh/). docs/signing-key.md quotes the
-# identity step's and doctor's lines the same way, so it is held to the same
-# rule.
+# framework prints, so a reworded message silently strands its section. This
+# test is the one authoritative list of which quoted messages are held to the
+# code; other pages summarize it and point here.
 #
 # What counts as a quoted message:
-#   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
-#     (the `install: ` prefix is added by a helper - install.sh's log/warn and
+#   * a line inside a fenced block that starts with `install: ` or `dotfiles: `,
+#     read from both docs/troubleshooting.md and docs/signing-key.md (the
+#     `install: ` prefix is added by a helper - install.sh's log/warn and
 #     lib/host_identity.py's PREFIX - so the code's literal lacks it and it is
 #     dropped; the few lines install.sh prints with it inline still match as
 #     substrings; a `doctor: <check>: ` head is checked as a CHECKS entry);
-#   * a backtick span that starts with one of the framework's message prefixes
-#     (`install: `, dropped like the fenced form, `upgrade: `, `link: `,
-#     `packages: `, `uninstall: `, `one or more links`, `updates are
-#     available`, `no successful update check`).
+#   * a backtick span that starts with one of the framework's message prefixes,
+#     read from docs/troubleshooting.md only (`install: `, dropped like the
+#     fenced form, `upgrade: `, `link: `, `packages: `, `uninstall: `,
+#     `one or more links`, `updates are available`,
+#     `no successful update check`).
+# Not checked yet: the `identity: ` and `doctor: ` spans, and any fenced line
+# with another prefix (for example `check-patterns: `).
+#
 # Placeholders (`<path>`, `...`, a number such as the 30 in "30 days") stand for
 # values the code interpolates, so each message is split at them and every
-# literal fragment of 8 or more characters must appear verbatim in the code.
+# literal fragment of 8 or more characters must appear verbatim in the code
+# (install.sh, lib/*.sh, lib/*.py, zsh/zshrc and zsh/*.zsh, searched as one
+# flattened file; a shorter fragment is skipped).
 #
 # Bash 3.2 compatible (the macOS CI legs run tests under /bin/bash).
 set -euo pipefail
