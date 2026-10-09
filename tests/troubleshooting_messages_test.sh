@@ -14,8 +14,8 @@
 #
 # What counts as a quoted message:
 #   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
-#     (the `install: ` prefix is added by install.sh's log/warn, so it is
-#     dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
+#     (install.sh prints the `install: ` prefix inline in its `printf`
+#     calls, so it is dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
 #   * a backtick span that starts with one of the framework's message prefixes
 #     (`install: `, dropped like the fenced form, `upgrade: `, `link: `,
 #     `packages: `, `uninstall: `, `one or more links`, `updates are
@@ -54,13 +54,18 @@ awk '/^```/ { inblock = !inblock; next }
        }
        print
      }' "$doc" "$recipes" > "$work/msgs"
-# 2. Backtick spans with a message prefix (one span per line of output).
+# 2. Backtick spans with a message prefix. Today exactly one `install: ` span
+# exists (the root refusal in the symptom table) and it is also a prefix of a
+# fenced line, so dropping `install: ` from this rule would leave the suite
+# green; it is kept for the next span that stands alone.
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
   | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
   | sed 's/^install: //' >> "$work/msgs" || true
 
+# The page yields 191 messages today; 150 leaves room to trim the page while a
+# broken extraction (a few messages left) still trips.
 count="$(grep -c . "$work/msgs" || true)"
-[ "$count" -ge 15 ] || fail "extracted only $count messages from the page (extraction rot?)"
+[ "$count" -ge 150 ] || fail "extracted only $count messages from the page (extraction rot?)"
 
 checked=0
 while IFS= read -r msg; do

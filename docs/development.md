@@ -432,10 +432,13 @@ files among them, so delete `.smoke/run` once you are done debugging.
 6. Pre-seed the completion stamp, then run `zsh -i -c exit` and require exit 0,
    empty stderr, and a `ZDOTDIR` sentinel that proves this config loaded.
 7. Re-run the installer and assert idempotency: a byte-stable manifest, an
-   identical set of links, and no new `.bak`.
-8. Run `dotfiles-uninstall --purge` through the real user-facing path.
-9. Diff the home directory against the pristine snapshot. Any difference fails
-   the gate and is printed.
+   identical set of links, and no new `.bak`. After the first install the only
+   `.bak` is the planted `~/.zshenv.bak`.
+8. Run `dotfiles-uninstall --purge` through the real user-facing path, and
+   require the documented machine-local survivor, `~/.config/git/config`, to be
+   a real file rather than a link into the repository.
+9. Remove that survivor, then diff the home directory against the pristine
+   snapshot. Any difference fails the gate and is printed.
 
 ### What `make forkgate` does
 
@@ -883,8 +886,9 @@ its own fetches, rather than inheriting it from a linked config file that a
 later change can drop.
 
 A guard that must parse the language it guards pins a literal or executes the
-code under a stub: `tests/troubleshooting_messages_test.sh` pins the exact
-lines `install.sh` prints, and the "tar that only WARNS" case of
+code under a stub: `tests/troubleshooting_messages_test.sh` binds each literal
+fragment of 8 or more characters that the page quotes to the code that prints
+it, and the "A tar that only WARNS must still fail the staging" case of
 `tests/smoke_stage_test.sh` puts a stub `tar` first on `PATH` instead of
 reasoning about what tar would do. Never strip comments before a security grep
 unless the stripper tokenizes the language (quotes, heredocs, `$#`/`${#v}`, a
