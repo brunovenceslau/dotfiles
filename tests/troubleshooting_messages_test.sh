@@ -6,22 +6,30 @@
 
 #
 # Doc-sync test: docs/troubleshooting.md is keyed to the exact text the
-# framework prints, so a reworded message silently strands its section. Every
-# message the page quotes must still exist in the code that prints it
-# (install.sh, lib/*.sh and lib/*.py, zsh/). docs/signing-key.md quotes the
-# identity step's and doctor's lines the same way, so it is held to the same
-# rule.
+# framework prints, so a reworded message silently strands its section. This
+# test is the one authoritative list of which quoted messages are held to the
+# code; other pages summarize it and point here.
 #
 # What counts as a quoted message:
-#   * a line inside a fenced block that starts with `install: ` or `dotfiles: `
-#     (the `install: ` prefix is added by install.sh's log/warn, so it is
-#     dropped; a `doctor: <check>: ` head is checked as a CHECKS entry);
-#   * a backtick span that starts with one of the framework's message prefixes
-#     (`upgrade: `, `link: `, `packages: `, `uninstall: `, `one or more links`,
-#     `updates are available`, `no successful update check`).
+#   * a line inside a fenced block that starts with `install: ` or `dotfiles: `,
+#     read from both docs/troubleshooting.md and docs/signing-key.md (the
+#     `install: ` prefix is added by a helper - install.sh's log/warn and
+#     lib/host_identity.py's PREFIX - so the code's literal lacks it and it is
+#     dropped; the few lines install.sh prints with it inline still match as
+#     substrings; a `doctor: <check>: ` head is checked as a CHECKS entry);
+#   * a backtick span that starts with one of the framework's message prefixes,
+#     read from docs/troubleshooting.md only (`install: `, dropped like the
+#     fenced form, `upgrade: `, `link: `, `packages: `, `uninstall: `,
+#     `one or more links`, `updates are available`,
+#     `no successful update check`).
+# Not checked yet: the `identity: ` and `doctor: ` spans, and any fenced line
+# with another prefix (for example `check-patterns: `).
+#
 # Placeholders (`<path>`, `...`, a number such as the 30 in "30 days") stand for
 # values the code interpolates, so each message is split at them and every
-# literal fragment of 8 or more characters must appear verbatim in the code.
+# literal fragment of 8 or more characters must appear verbatim in the code
+# (install.sh, lib/*.sh, lib/*.py, zsh/zshrc and zsh/*.zsh, searched as one
+# flattened file; a shorter fragment is skipped).
 #
 # Bash 3.2 compatible (the macOS CI legs run tests under /bin/bash).
 set -euo pipefail
@@ -53,13 +61,23 @@ awk '/^```/ { inblock = !inblock; next }
        }
        print
      }' "$doc" "$recipes" > "$work/msgs"
-# 2. Backtick spans with a message prefix (one span per line of output).
+# 2. Backtick spans with a message prefix. Today exactly one `install: ` span
+# exists (the root refusal in the symptom table) and it is also a prefix of a
+# fenced line, so dropping `install: ` from this rule would leave the suite
+# green; it is kept for the next span that stands alone. `uninstall: ` matches
+# no span today and is kept for the same reason.
 grep -oE '`[^`]+`' "$doc" | sed 's/^`//; s/`$//' \
-  | grep -E '^(upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
-  >> "$work/msgs" || true
+  | grep -E '^(install: |upgrade: |link: |packages: |uninstall: |one or more links|updates are available|no successful update check)' \
+  | sed 's/^install: //' > "$work/spans" || true
+cat "$work/spans" >> "$work/msgs"
 
+# Two floors, because the span scan is a small share of the total: a broken
+# fenced scan trips the first (about 190 messages today, 150 leaves room to trim
+# the page), a broken span scan only trips the second (about 22 today).
+nspans="$(grep -c . "$work/spans" || true)"
+[ "$nspans" -ge 15 ] || fail "extracted only $nspans backtick-span messages (span scan rot?)"
 count="$(grep -c . "$work/msgs" || true)"
-[ "$count" -ge 15 ] || fail "extracted only $count messages from the page (extraction rot?)"
+[ "$count" -ge 150 ] || fail "extracted only $count messages from the page (extraction rot?)"
 
 checked=0
 while IFS= read -r msg; do
