@@ -37,8 +37,8 @@ same tracked set:
     it cannot be told apart from bracketed prose;
   - an `<a>` or `<img>` tag is read much the way GitHub's HTML5 parser
     reads an HTML block (HTML_OPEN names the known misses): a `>` inside a
-    quoted value does not end it, and one that crosses a blank line is text, so a tag inside
-    it is still found;
+    quoted value does not end it, and one that crosses a blank line is text,
+    so a tag inside it is still found;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
     github-slugger numbers them, or an explicit anchor, an `<a>` tag's
@@ -74,8 +74,8 @@ a second without one. HTML_OPEN says why an open tag's scan stays linear.
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
 run (not a git toplevel, git failed or warned, an unreadable or non-UTF-8
-file, a file reached through a symlink swapped into the working tree, any
-unexpected error). Exit 2 is never a pass. Every printed line goes
+file, one over MAX_FILE_BYTES, a file reached through a symlink swapped into
+the working tree, any unexpected error). Exit 2 is never a pass. Every printed line goes
 through tty_safe, since it echoes names and text from the scanned tree.
 
 Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
@@ -224,18 +224,23 @@ HTML_OPEN = re.compile(r"<(a|img)((?:" + _hattr("(?:") + r")*)" + _WS + r"*/?>",
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
-# Printable, yet they reorder or hide what a terminal shows: the soft
-# hyphen, the Arabic letter mark, the zero-width space and joiners, the LRM
-# and RLM marks, the line and paragraph separators, the bidi embeddings and
-# overrides, the word joiner and the invisible operators, the bidi isolates,
-# the zero-width no-break space (BOM), and the tag characters.
-BIDI_HIDDEN = frozenset(
-    [chr(0x00AD), chr(0x061C), chr(0xFEFF)]
-    + [chr(c) for c in range(0x200B, 0x2010)]
-    + [chr(c) for c in range(0x2028, 0x202F)]
-    + [chr(c) for c in range(0x2060, 0x2065)]
-    + [chr(c) for c in range(0x2066, 0x206A)]
-    + [chr(c) for c in range(0xE0000, 0xE0080)])
+# Escaped by Unicode general category, not by range: Cc (controls), Cf
+# (format: soft hyphen, zero-width space and joiners, bidi marks, embeddings,
+# overrides and isolates, word joiner, BOM, tag characters), Zl and Zp (the
+# line and paragraph separators), Co (private use), Cs (a lone surrogate) and
+# Cn (unassigned). Each reorders, hides or has no fixed shape on a terminal.
+# unicodedata follows the running Python's Unicode version, so Cn is the one
+# category that moves: a code point assigned after this Python's tables
+# prints escaped here and raw on a newer Python. That errs on the safe side,
+# and no category here ever turns printable.
+ESCAPED_CATEGORIES = frozenset(["Cc", "Cf", "Zl", "Zp", "Co", "Cs", "Cn"])
+
+
+# A tracked Markdown file over this is refused (exit 2), never read: the
+# worst-case scan costs about 4 to 5 s per MB (measured on #36), so an
+# unbounded file would stall the gate. 1 MiB is 16 times the largest tracked
+# page (63 KB at the time of writing).
+MAX_FILE_BYTES = 1 << 20
 
 
 class GateError(Exception):
@@ -248,9 +253,10 @@ def tty_safe(s):
     printed as `\\xHH`. LF is escaped too, since each report is one line and
     a name holding one would forge a second. A byte that was not UTF-8
     (decoded with surrogateescape) prints as its `\\xHH` as well. Beyond
-    that rule, the characters that reorder or hide text without being
-    controls (BIDI_HIDDEN) print as `\\uHHHH` (`\\UHHHHHHHH` past U+FFFF),
-    so a report cannot show one target while naming another."""
+    that rule, every other character of ESCAPED_CATEGORIES prints as
+    `\\uHHHH` (`\\UHHHHHHHH` past U+FFFF, so the digits never run
+    together), so a report cannot show one target while naming another.
+    Printable non-ASCII (U+00E9) stays raw."""
     out = []
     for ch in s:
         o = ord(ch)
@@ -258,7 +264,7 @@ def tty_safe(s):
             out.append("\\x%02x" % (o - 0xDC00))
         elif (o < 0x20 and ch != "\t") or 0x7F <= o <= 0x9F:
             out.append("\\x%02x" % o)
-        elif ch in BIDI_HIDDEN:
+        elif o > 0x7F and unicodedata.category(ch) in ESCAPED_CATEGORIES:
             out.append("\\u%04x" % o if o <= 0xFFFF else "\\U%08x" % o)
         else:
             out.append(ch)
@@ -286,9 +292,14 @@ def read_text(root, rel):
         raise GateError("%s: reached through a symlink in the working tree" % rel)
     try:
         with open(path, "rb") as f:
-            data = f.read()
+            # One byte past the cap, so a file that grew after git listed it
+            # is refused too, and an oversized one is never read whole.
+            data = f.read(MAX_FILE_BYTES + 1)
     except OSError as e:
         raise GateError("%s: %s" % (rel, e.strerror))
+    if len(data) > MAX_FILE_BYTES:
+        raise GateError("%s: over %d bytes, too large to check in bounded time"
+                        % (rel, MAX_FILE_BYTES))
     try:
         # One normalization here, so no later reader has to strip a CR.
         return data.decode("utf-8").replace("\r\n", "\n")

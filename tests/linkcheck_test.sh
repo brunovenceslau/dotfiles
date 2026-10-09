@@ -635,14 +635,116 @@ expect_broken README.md "$(printf 'See [z](docs/a\342\200\256b.md).')" \
   'docs/a\\u202eb\.md' \
   "a bidi override in a report prints as \\uHHHH"
 
+# tty_safe escapes by Unicode category (ESCAPED_CATEGORIES in the gate), so the
+# table below holds the boundaries of each range that matters: the last
+# printable and first escaped character on each side. Every code point here
+# keeps its category from Python 3.9 on (unicodedata follows the running
+# Python's Unicode version, and only Cn moves, so the unassigned ones are
+# noncharacters or blocks the standard reserves for good). The expectation is
+# written out, never computed with the gate's own rule.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "tty_safe: the escape table does not hold"
+import sys
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+
+RAW = None
+TABLE = [
+    # C0 and C1: TAB stays, LF and DEL escape, the C1 block ends at U+009F.
+    (0x08, "\\x08"), (0x09, RAW), (0x0A, "\\x0a"), (0x1F, "\\x1f"),
+    (0x20, RAW), (0x7E, RAW), (0x7F, "\\x7f"), (0x80, "\\x80"),
+    (0x9F, "\\x9f"), (0xA0, RAW), (0xA1, RAW),
+    # Cf, with printable neighbours: the soft hyphen, the Arabic letter mark.
+    (0xAC, RAW), (0xAD, "\\u00ad"), (0xAE, RAW), (0xE9, RAW), (0x4E2D, RAW),
+    (0x0301, RAW),
+    (0x061B, RAW), (0x061C, "\\u061c"), (0x0600, "\\u0600"),
+    (0x180E, "\\u180e"),
+    # General punctuation: spaces stay, zero-width and bidi controls escape.
+    (0x200A, RAW), (0x200B, "\\u200b"), (0x200F, "\\u200f"), (0x2010, RAW),
+    (0x2027, RAW), (0x2028, "\\u2028"), (0x2029, "\\u2029"),
+    (0x202A, "\\u202a"), (0x202E, "\\u202e"), (0x202F, RAW), (0x205F, RAW),
+    (0x2060, "\\u2060"), (0x2064, "\\u2064"), (0x2065, "\\u2065"),
+    (0x2066, "\\u2066"), (0x2069, "\\u2069"), (0x206A, "\\u206a"),
+    (0x206F, "\\u206f"), (0x2070, RAW),
+    # Cn, Co and Cs on the BMP (U+FFFF is the last `\u` escape), and the BOM.
+    # A combining mark (Mn, U+0301) is printable and stays raw.
+    (0x0378, "\\u0378"), (0xDFFF, "\\udfff"), (0xE000, "\\ue000"),
+    (0xF8FF, "\\uf8ff"), (0xFEFF, "\\ufeff"), (0xFFF9, "\\ufff9"),
+    (0xFFFE, "\\ufffe"), (0xFFFF, "\\uffff"),
+    # A lone surrogate is Cs, and DC80-DCFF is an undecodable byte, `\xHH`.
+    (0xD800, "\\ud800"), (0xDC7F, "\\udc7f"), (0xDC80, "\\x80"),
+    (0xDCFF, "\\xff"), (0xDD00, "\\udd00"),
+    # Past U+FFFF the escape is `\U` plus eight digits, never `\u` plus five.
+    (0x1D173, "\\U0001d173"), (0x1F600, RAW), (0xE0000, "\\U000e0000"),
+    (0xE0001, "\\U000e0001"), (0xE0020, "\\U000e0020"),
+    (0xE007F, "\\U000e007f"), (0xE0080, "\\U000e0080"),
+    (0xF0000, "\\U000f0000"), (0x10FFFF, "\\U0010ffff"),
+]
+bad = []
+for cp, want in TABLE:
+    got = linkcheck.tty_safe(chr(cp))
+    if got != (chr(cp) if want is RAW else want):
+        bad.append("U+%04X: %r" % (cp, got))
+if bad:
+    sys.exit("; ".join(bad))
+PY
+ok "tty_safe escapes by Unicode category and leaves printable non-ASCII raw, at every range edge"
+
+# A tag whose quote never closes is text, not a link: the same line's other
+# links are still read, and the gate does not read to the end of the file for
+# the quote. A newline right after the opening quote belongs to the value, so
+# a broken target there is still reported.
+new_tree
+printf '%s\n' 'A <a href="docs/gone-unclosed.md and [x](docs/gone-after.md).' \
+  >"$work/r/docs/unclosed.md"
+printf '%s\n' 'A <a href="docs/gone-blank.md' '' 'closes later">x</a>' \
+  >"$work/r/docs/quote-blank.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'docs/unclosed\.md:1: .*docs/gone-after\.md' <<<"$out" \
+  && ! grep -q 'gone-unclosed' <<<"$out" && ! grep -q 'gone-blank' <<<"$out" \
+  || fail "a tag with an unclosed quote, or a quote spanning a blank line, must be text and leave other links read (exit $rc): $out"
+ok "a tag with an unclosed quote, or one crossing a blank line, is text, and the link after it is still checked"
+new_tree
+printf '%s\n' 'A <a href="docs/gone-lf.md' '">x</a>' >"$work/r/docs/quote-lf.md"
+printf '%s\n' 'A <a href="' 'docs/gone-lf2.md">x</a>' >"$work/r/docs/quote-lf2.md"
+printf "%s\n" "A <a href='" "docs/gone-lf3.md'>x</a>" >"$work/r/docs/quote-lf3.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 1 ] && grep -q 'docs/quote-lf\.md:1: .*gone-lf\.md' <<<"$out" \
+  && grep -q 'docs/quote-lf2\.md:1: .*gone-lf2\.md' <<<"$out" \
+  && grep -q 'docs/quote-lf3\.md:1: .*gone-lf3\.md' <<<"$out" \
+  || fail "a newline inside a quoted href must not hide its target (exit $rc): $out"
+ok "a newline inside a quoted href, even right after the opening quote, still reports a broken target"
+
+# A heading's code span is bounded at 2048 characters, for speed: one of
+# exactly that length renders verbatim, one character longer is prose, so
+# its emphasis underscores go (the bound is a deliberate cap, pinned here so
+# a change to it is a decision). The span is `_x..._`: emphasis tells the
+# two readings apart in the slug.
+new_tree
+python3 -I - "$work/r/docs" <<'PY'
+import os, sys
+d = sys.argv[1]
+for name, n in (("span-in.md", 2048), ("span-out.md", 2049)):
+    inner = "_" + "x" * (n - 2) + "_"
+    slug = inner if n == 2048 else "x" * (n - 2)
+    with open(os.path.join(d, name), "w") as f:
+        f.write("# `%s`\n\n[self](#%s)\n" % (inner, slug))
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a heading code span of 2048 characters is verbatim, of 2049 prose (exit $rc): $out"
+ok "a heading's code span is read verbatim up to 2048 characters and as prose past it"
+
 # Hostile input stays near-linear: many unclosed comment openers, tag
 # openers with no `>`, unclosed quotes, backtick runs of every length and
-# unclosed brackets, 100 KB to 2.2 MB each, in prose and in headings (a link
-# with an #anchor into each file makes the heading pass read it too). The
-# previous regexes were quadratic here (measured: one 200 KB line of
-# `[a](b` alone, or of `<a `, outlived 20 s, and a single 200 KB heading of
-# `[` or of `[a](x` did too), while every scan now takes well under a second,
-# so the 30 s bound separates the two with room for a slow runner.
+# unclosed brackets, 100 KB to just under the 1 MiB file cap each, in prose
+# and in headings (a link with an #anchor into each file makes the heading
+# pass read it too). The previous regexes were quadratic here (measured: one
+# 200 KB line of `[a](b` alone, or of `<a `, outlived 20 s, and a single
+# 200 KB heading of `[` or of `[a](x` did too), while every scan now takes
+# well under a second, so the 30 s bound separates the two with room for a
+# slow runner.
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
 new_tree
@@ -653,7 +755,7 @@ shapes = {
     "h1.md": "<!-- x " * 30000,
     "h2.md": '<a title="x ' * 18000,
     "h3.md": "<img href='" * 18000,
-    "h4.md": "".join("`" * k + " x " for k in range(1, 1500)),
+    "h4.md": "".join("`" * k + " x " for k in range(1, 1400)),
     "h5.md": "[" * 100000,
     "h6.md": "<a " * 60000 + ">",
     "h7.md": "[a](b" * (n // 5),
@@ -665,7 +767,7 @@ shapes = {
     "h13.md": "# " + "[a](x" * (n // 5),
     "h14.md": "# " + "[" * n,
     "h15.md": "# " + "<" * (2 * n),
-    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 2100)),
+    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 1400)),
     "h17.md": "[a][" * (n // 4),
     # A heading link or image whose destination is unclosed after a run of
     # spaces and then a character (atx_text strips trailing spaces, so the
@@ -725,6 +827,52 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
+
+# blank_spans must stay linear with no comment in the text: scanning for the
+# next `<!--` again at every code span (it answers -1 once, not once per run)
+# turns a file of many spans quadratic. Compare growth, not wall time: the
+# same text at 4x the size may cost about 4x, and a quadratic one 16x, so a
+# ratio past 10 on the best of three runs separates them on any runner.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "blank_spans must scale linearly with no comment in the text"
+import sys, time
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+
+def best(n):
+    text = "`a` b " * n
+    lo = None
+    for _ in range(3):
+        t = time.perf_counter()
+        linkcheck.blank_spans(text, True)
+        dt = time.perf_counter() - t
+        lo = dt if lo is None else min(lo, dt)
+    return lo
+
+small, big = best(20000), best(80000)
+if big > 10 * max(small, 0.005):
+    sys.exit("4x the spans cost %.1fx (%.3f s -> %.3f s)" % (big / small, small, big))
+PY
+ok "blank_spans grows linearly with the number of code spans when no comment is open"
+
+# A file over MAX_FILE_BYTES is refused, one at the cap is read: the cap is
+# measured in bytes, before decoding, and read from the gate so the test
+# follows it.
+cap="$(python3 -I -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import linkcheck; print(linkcheck.MAX_FILE_BYTES)' "$repo_root/tests")"
+case "$cap" in ''|*[!0-9]*) fail "could not read MAX_FILE_BYTES from the gate: $cap" ;; esac
+new_tree
+python3 -I - "$work/r/docs/big.md" "$cap" <<'PY'
+import sys
+with open(sys.argv[1], "w") as f:
+    f.write("x" * (int(sys.argv[2]) - 1) + "\n")
+PY
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a file of exactly MAX_FILE_BYTES must be read (exit $rc): $out"
+printf 'y' >>"$work/r/docs/big.md"
+run
+[ "$rc" = 2 ] && grep -q 'docs/big\.md: over '"$cap"' bytes' <<<"$out" \
+  || fail "a file one byte over MAX_FILE_BYTES must exit 2 (got $rc): $out"
+ok "a file over the size cap exits 2 and one at the cap is read"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
