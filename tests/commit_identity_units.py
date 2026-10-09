@@ -132,6 +132,17 @@ for what, data in (
     check(code == 2 and "ref line on stdin has an unexpected shape" in text,
           "ref_lines(): %s exits 2" % what)
 
+tips, known = mod.ref_lines(
+    ("HEAD^{/fix bug} %s refs/heads/x %s\n" % (A40, Z40)).encode())
+check(tips == {A40} and known == set(),
+      "ref_lines(): a local ref holding spaces")
+
+code, text, _ = run_with(drain(lambda: mod.entries("/g")), 128)
+check(code == 2 and text.rstrip().endswith("'git config' failed (exit 128)"),
+      "entries(): a git failure with no stderr names no empty reason")
+check(mod.git_env("/g").get("GIT_NO_LAZY_FETCH") == "1",
+      "git_env(): a partial clone never fetches lazily for a hook")
+
 code, _, got = run_with(lambda: mod.pushed_commits("/g", {A40}, set()), 0,
                         ("commit %s\na@x\0c@x\n" % A40).encode())
 check(code is None and got == [(A40, "a@x", "c@x")],

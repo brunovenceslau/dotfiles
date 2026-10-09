@@ -20,13 +20,15 @@ repository-scoped `author.email` even wins over `git -c user.email=...`.
 differs from the effective identity (`git var GIT_AUTHOR_IDENT` and
 `GIT_COMMITTER_IDENT` at push time, so a `git -c user.email=...` on the push
 counts). This is what catches an identity removed from the config before the
-push: the commits made under it still carry it. Only commits the remote
-lacks are compared: those reachable from a pushed tip but from no
-remote-tracking ref and from no remote oid git names on stdin. A commit
-already on a remote passes whoever made it, so a merge of the default
-branch never trips on GitHub's own merge commits. While a config refusal
-stands the commits are not compared: the effective identity is then the
-polluted one.
+push: the commits made under it still carry it. The commits compared are
+those reachable from a pushed tip but from no remote-tracking ref (of any
+remote) and from no remote oid git names on stdin. A commit already fetched
+from a remote passes whoever made it, so merging a fetched default branch
+does not trip on GitHub's own merge commits; one the remote holds under a
+ref never fetched is still compared. A foreign author is refused on
+purpose: `git push --no-verify` is the escape for a reviewed commit made by
+someone else. While a config refusal stands the commits are not compared:
+the effective identity is then the polluted one.
 
 A guardrail against accidents, not an enforcement boundary: merge, rebase
 and cherry-pick skip pre-commit, and `--no-verify` or a repository
@@ -89,6 +91,13 @@ def escape(s):
     return "".join(out)
 
 
+def quoted(s):
+    """s escaped and in single quotes, a quote inside it spelled \\x27, so
+    a value cannot close its quotes and add a "fix:" of its own. The
+    backslash escape() doubles keeps \\x27 from being read back as one."""
+    return "'%s'" % escape(s).replace("'", "\\x27")
+
+
 def decode(b):
     return b.decode("utf-8", "surrogateescape")
 
@@ -98,6 +107,24 @@ def fail(msg):
     sys.exit(2)
 
 
+def git_failed(what, p, why=None):
+    """Exit 2 naming a git command, its exit code and, when it said one,
+    why: `why` when given, else its whole stderr."""
+    if why is None:
+        why = decode(p.stderr).strip()
+    fail("%s failed (exit %d)%s" % (what, p.returncode,
+                                    ": " + why if why else ""))
+
+
+def git_env(gdir):
+    """The environment every git call here runs in. GIT_DIR is the absolute
+    git dir (see entries()). GIT_NO_LAZY_FETCH keeps a partial clone from
+    fetching a missing object over the network to answer a hook: a remote
+    oid it lacks is skipped (--ignore-missing) instead. git 2.45 and later
+    honour it, older ones ignore it."""
+    return dict(os.environ, GIT_DIR=gdir, GIT_NO_LAZY_FETCH="1")
+
+
 def git_dir():
     # Honours a GIT_DIR a hook inherits from git: that names the repository
     # being committed in, which is exactly the one to check.
@@ -105,8 +132,7 @@ def git_dir():
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out = decode(p.stdout)
     if p.returncode != 0 or not out.endswith("\n") or "\n" in out[:-1]:
-        fail("'git rev-parse --absolute-git-dir' failed (exit %d): %s"
-             % (p.returncode, decode(p.stderr).strip()))
+        git_failed("'git rev-parse --absolute-git-dir'", p)
     return out[:-1]
 
 
@@ -117,7 +143,7 @@ def entries(gdir):
     origin relative to its own working directory otherwise (`.git/config`
     from a worktree, `config` from inside the git dir or a bare repository),
     and the fix this prints must name a file that exists from anywhere."""
-    env = dict(os.environ, GIT_DIR=gdir)
+    env = git_env(gdir)
     p = subprocess.run(
         ["git", "config", "--show-scope", "--show-origin", "-z",
          "--get-regexp", KEYS_REGEXP],
@@ -126,8 +152,7 @@ def entries(gdir):
     if p.returncode == 1 and not p.stdout:
         return
     if p.returncode != 0:
-        fail("'git config' failed (exit %d): %s"
-             % (p.returncode, decode(p.stderr).strip()))
+        git_failed("'git config'", p)
     # -z: each entry is SCOPE NUL ORIGIN NUL KEY LF VALUE NUL. A key with no
     # `=` at all (`[user] name`) would print no LF, but git refuses every
     # one of KEYS without a value ("missing value"), so git_dir()'s
@@ -161,7 +186,7 @@ def refusals(gdir):
     for scope, origin, key, value in entries(gdir):
         if scope not in REFUSED_SCOPES or key not in KEYS:
             continue
-        shown = "'%s'" % escape(value)
+        shown = quoted(value)
         path = origin_file(origin)
         if path is None:
             where = "from %s" % escape(origin)
@@ -187,11 +212,6 @@ def refusals(gdir):
     return lines
 
 
-def git_env(gdir):
-    # The absolute git dir, for the same reason as in entries().
-    return dict(os.environ, GIT_DIR=gdir)
-
-
 def is_oid(b):
     # 40 hex digits for SHA-1, 64 for SHA-256.
     return len(b) in (40, 64) and set(b.decode("ascii", "replace")) <= HEX
@@ -207,7 +227,9 @@ def ref_lines(data):
     if lines[-1] == b"":
         lines.pop()
     for line in lines:
-        fields = line.split(b" ")
+        # rsplit: LOCAL_REF is the refspec's source as typed, so it can hold
+        # spaces (`HEAD^{/fix bug}`); the last three fields cannot.
+        fields = line.rsplit(b" ", 3)
         if len(fields) != 4 or not (is_oid(fields[1]) and is_oid(fields[3])):
             fail("pre-push: a ref line on stdin has an unexpected shape")
         local, remote = fields[1].decode(), fields[3].decode()
@@ -240,8 +262,7 @@ def pushed_commits(gdir, tips, known):
         input=revs.encode(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=git_env(gdir))
     if p.returncode != 0:
-        fail("'git rev-list' failed (exit %d): %s"
-             % (p.returncode, decode(p.stderr).strip()))
+        git_failed("'git rev-list'", p)
     # Two lines per commit: `commit OID`, then AUTHOR NUL COMMITTER. git
     # takes LF and NUL out of an identity it writes, so any other shape is
     # a commit object built by hand, and the answer is "cannot tell".
@@ -267,8 +288,8 @@ def ident_email(gdir, var):
     if p.returncode != 0 or lt < 0 or gt < lt:
         # git explains itself over several lines; the last one says why.
         why = (decode(p.stderr).strip().splitlines() or [""])[-1]
-        fail("cannot read the effective identity ('git var %s' failed, "
-             "exit %d): %s" % (var, p.returncode, why))
+        git_failed("cannot read the effective identity: 'git var %s'" % var,
+                   p, why)
     return out[lt + 2:gt]
 
 
@@ -281,9 +302,9 @@ def commit_refusals(gdir, stdin):
     for oid, *got in commits:
         for (role, effective), email in zip(want, got):
             if email != effective:
-                lines.append("commit %s has %s email '%s', not the effective "
-                             "'%s'" % (oid, role, escape(email),
-                                       escape(effective)))
+                lines.append("commit %s has %s email %s, not the effective "
+                             "%s" % (oid, role, quoted(email),
+                                     quoted(effective)))
     return lines
 
 
@@ -305,10 +326,10 @@ def main(argv):
     elif caller == "pre-push":
         lines = commit_refusals(gdir, stdin)
         pointer = ("a pushed commit must carry the effective identity; "
-                   "re-make it under that identity (for the tip: 'git "
-                   "commit --amend --no-edit --reset-author'), or push "
-                   "with 'git -c user.email=... -c user.name=...' when "
-                   "the commit's identity is the one intended")
+                   "re-make a commit of yours under it (for the tip: 'git "
+                   "commit --amend --no-edit --reset-author'); a commit "
+                   "made by someone else, once reviewed, goes through "
+                   "with 'git push --no-verify'")
     if not lines:
         return 0
     for line in lines:
