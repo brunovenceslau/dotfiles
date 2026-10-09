@@ -3461,20 +3461,43 @@ SHAPES
 # the walk steps over the run so it never lands inside one, and skipcode is a
 # lookup keyed by a run's first backtick. Reverting that branch to a plain
 # two-character skip lands the walk mid-run on a run of two or more, where
-# skipcode returns its own index and the gate loops forever (measured: no exit
-# in 15 s on a one-line file, 0.1 s with the branch). Each shape is one link
+# skipcode returns its own index; before skipcode's guard the gate looped
+# forever there (no exit in 15 s on a one-line file), and since it exits 2.
+# With the branch it takes 0.1 s. Each shape is one link
 # over the limit, exempt only as ONE whole link, so the verdict is checked
 # beside the bound: a bound alone would pass a gate that exits early and wrong.
 # What each shape pins: every shape but backslash-pair and unclosed trips
 # that two-character skip (a hang before skipcode's guard, a fast exit 2
-# since; the guard case below pins that); run-literal catches a mutant where the escaped run still opens
-# its own span; run-rest catches a mutant where the REST of the run opens a
+# since; the guard case below pins that); run-literal catches a mutant where
+# the escaped run still opens its own span; run-rest catches a mutant where the REST of the run opens a
 # span (the CommonMark reading, length L-1, which pairs with the next run of
 # that length); after-run pins that the walk resumes AT the character after
 # the run (a skip one too far jumps over the `]`); backslash-pair pins that
 # `\\` is consumed as a pair, so the backtick after it is real (a mutant that
 # does not flips it to a fail); unclosed pins skipcode's unclosed-run
 # fallback (`return i + rl[k]`), it stays green under the revert.
+# other_arm FILE - sets other=1 when FILE holds a check-patterns line that is
+# neither arm 15's message nor a SKIP. Prefix tests on fixed strings: a grep
+# -v on the message hid any other arm's line that merely CONTAINED $md_msg or
+# SKIP, and a final line without a newline is read too.
+other_arm() {
+  local line
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      "$md_msg"* | "check-patterns: SKIP "*) ;;
+      "check-patterns:"*) other=1 ;;
+    esac
+  done < "$1"
+}
+# the check itself, red-green: a second arm's line (even last, unterminated,
+# or quoting arm 15's message) is seen; arm 15's own lines and SKIPs are not.
+printf '%s\n%s\n' "$md_msg x" "check-patterns: SKIP y" > "$work/oa1.out"
+other=0; other_arm "$work/oa1.out"; [ "$other" = 0 ] && ok || fail "other_arm: arm 15 and SKIP lines alone must not count"
+printf '%s\n%s' "$md_msg x" "$curl_msg" > "$work/oa2.out"
+other=0; other_arm "$work/oa2.out"; [ "$other" = 1 ] && ok || fail "other_arm: an unterminated last line of another arm must count"
+printf 'check-patterns: other arm, quoting %s and SKIP \n' "$md_msg" > "$work/oa3.out"
+other=0; other_arm "$work/oa3.out"; [ "$other" = 1 ] && ok || fail "other_arm: a line quoting the message mid-line must count"
+
 i=0
 while IFS='|' read -r want shape; do
   i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"
@@ -3502,15 +3525,7 @@ while IFS='|' read -r want shape; do
     grep -qF "$md_msg" "$work/mdw-esc-$i.out" && ok \
       || fail "arm 15 escaped backtick: $shape failed without the arm 15 message"
     # and no other arm fired beside it
-    # Prefix tests on fixed strings, not grep: a message quoted mid-line
-    # (or a regex metacharacter in $md_msg) must not hide another arm.
-    other=0
-    while IFS= read -r line; do
-      case "$line" in
-        "$md_msg"* | "check-patterns: SKIP "*) ;;
-        "check-patterns:"*) other=1 ;;
-      esac
-    done < "$work/mdw-esc-$i.out"
+    other=0; other_arm "$work/mdw-esc-$i.out"
     [ "$other" = 0 ] && ok || fail "arm 15 escaped backtick: $shape tripped another arm"
   fi
 done <<'SHAPES'
@@ -3533,10 +3548,13 @@ SHAPES
 # closed, inside the bound, with the guard's message beside arm 15's
 # scan-error line.
 mut="$work/check-patterns-mutant"
-sed 's/^      while (i <= n \&\& ch\[i\] == "`") i++$/      i++/' "$cp" > "$mut"
+sed 's/^      while (i <= n [&][&] ch\[i\] == "`") i++$/      i++/' "$cp" > "$mut"
 chmod u+x "$mut"
-if cmp -s "$cp" "$mut"; then
-  fail "arm 15 skipcode guard: the two-character-skip mutant did not apply"
+# exactly one line must differ, or a sed that misfired would pass as a mutant
+if [ "$(diff "$cp" "$mut" | grep -c '^>')" = 1 ] && [ "$(diff "$cp" "$mut" | grep -c '^<')" = 1 ]; then
+  ok
+else
+  fail "arm 15 skipcode guard: the two-character-skip mutant must change exactly one line"
 fi
 for shape in run several run-literal run-rest after-run eol; do
   r="$work/mdw-guard-$shape"; seed "$r"; mkdir -p "$r/docs"
@@ -3560,6 +3578,21 @@ for shape in run several run-literal run-rest after-run eol; do
     *) fail "arm 15 skipcode guard: $shape lacks the guard message and the scan-error line: $guard_out" ;;
   esac
 done
+
+# The guard names the line being checked, also when flush() checks held
+# front matter of an earlier file as the next one starts (docs/ is scanned
+# before README.md): docs/a.md line 3 below, never README.md:1.
+r="$work/mdw-guard-flush"; seed "$r"; mkdir -p "$r/docs"
+printf -- '---\nshort\n[%s \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$r/docs/a.md"
+printf 'short\n' > "$r/README.md"
+bounded_run 20 "$work/mdw-guard-flush.out" env STRICT= "$mut" "$r" \
+  || fail "arm 15 guard flush: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && [ "$br_rc" = 2 ] && ok \
+  || fail "arm 15 guard flush: expected exit 2 inside the bound (rc $br_rc, hung $br_hung)"
+case "$(cat "$work/mdw-guard-flush.out")" in
+  *"(${r}/docs/a.md:3, "*) ok ;;
+  *) fail "arm 15 guard flush: the message must name docs/a.md:3: $(cat "$work/mdw-guard-flush.out")" ;;
+esac
 
 # runs() clears lastrun on every line. A stale entry names a run index of an
 # EARLIER line: line 1 below is a link over the limit (a short line is never
