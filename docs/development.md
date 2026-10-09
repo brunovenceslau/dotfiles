@@ -478,9 +478,8 @@ link-convention change.
   turned into `-`. Text inside a code span is kept as written, so
   `` `_link_bin_tree` `` keeps its underscores. A repeated heading is numbered
   `-1`, `-2` in order, the way github-slugger numbers it. An explicit
-  anchor counts too: the `id` of an `<a>` or `<img>` tag, or an `<a>`'s
-  `name`. An anchor into any other file, such as a `#L10`
-  line anchor, is not checked.
+  anchor counts too: the `id` or `name` of an `<a>` tag. An anchor into any
+  other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
 - Front matter, fenced code blocks and HTML comments (both running to the end
@@ -488,12 +487,14 @@ link-convention change.
   and inline code spans are not prose, so a link inside one is ignored. Front
   matter that never closes is prose, since GitHub renders its `---` as a rule.
   An HTML `href` or `src` may be double-quoted, single-quoted or bare. A
-  tag is read the lenient way GitHub's HTML5 parser reads an HTML block,
-  since a link it renders is live: a `>` inside a quoted attribute value
-  does not end the tag, and one that crosses a blank line is text. A link
-  whose
-  text wraps across lines is still found, and a CRLF file reads exactly like
-  its LF twin. A link destination ends at ASCII whitespace only, may hold
+  tag is read much the way GitHub's HTML5 parser reads an HTML block, since
+  a link it renders is live: an attribute may follow a quoted value with no
+  space, a name may open with a digit, a `>` inside a quoted attribute value
+  does not end the tag, and one that crosses a blank line is text. Three
+  shapes HTML5 reads as live links are known misses: `<a/href="t.md">`,
+  `<a =x href="t.md">` and `<a x<y href="t.md">`. A link whose text wraps
+  across lines is still found, and a CRLF file reads exactly like its LF
+  twin. A link destination ends at ASCII whitespace only, may hold
   balanced parentheses (up to 3 levels deep), backslash escapes and
   character references such as `&amp;`, or be written `<...>` with spaces,
   and its title may be double- or single-quoted or in parentheses, holding
@@ -502,7 +503,8 @@ link-convention change.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target` with control
 bytes escaped as `\xHH` and the characters that reorder or hide text (bidi
-controls, zero-width and tag characters, the soft hyphen) as `\uHHHH`. It
+controls, zero-width characters, the soft hyphen) as `\uHHHH`, and the tag
+characters (U+E0000 to U+E007F) as `\UHHHHHHHH`. It
 exits 2 when it cannot run: the root is not a checkout's toplevel, git fails
 or warns, or a file is unreadable, not UTF-8, or reached through a symlink
 swapped into the working tree.

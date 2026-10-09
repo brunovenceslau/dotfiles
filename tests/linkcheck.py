@@ -35,15 +35,15 @@ same tracked set:
     text or a label, and an escaped quote or paren does not end a title;
     none of them crosses a blank line. A shortcut `[ref]` is not checked:
     it cannot be told apart from bracketed prose;
-  - an `<a>` or `<img>` tag is read the lenient way GitHub's HTML5 parser
-    reads an HTML block (see HTML_OPEN): a `>` inside a quoted value does
-    not end it, and one that crosses a blank line is text, so a tag inside
+  - an `<a>` or `<img>` tag is read much the way GitHub's HTML5 parser
+    reads an HTML block (HTML_OPEN names the known misses): a `>` inside a
+    quoted value does not end it, and one that crosses a blank line is text, so a tag inside
     it is still found;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
-    github-slugger numbers them, or an explicit anchor: any such tag's
-    `id`, or an `<a>`'s `name`. An anchor into any other file (a `#L10` line anchor), or
-    into a tracked symlink, is not checked;
+    github-slugger numbers them, or an explicit anchor, an `<a>` tag's
+    `id` or `name`. An anchor into any other file (a `#L10` line anchor),
+    or into a tracked symlink, is not checked;
   - an absolute `https://github.com/brunovenceslau/dotfiles/(blob|tree)/main/`
     link is resolved against the local tree the same way, in the YAML too.
 
@@ -83,6 +83,7 @@ Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
 
 import bisect
 import html
+import html.entities
 import os
 import re
 import subprocess
@@ -135,7 +136,12 @@ _DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
 # left-to-right pass as CommonMark does: a backslash escape is undone, and
 # an entity or numeric character reference (CommonMark 2.5: always closed by
 # `;`) is decoded, so `a\(b.md` names `a(b.md` and `a&amp;b.md` names
-# `a&b.md`, while `\&amp;` stays the literal text `&amp;`.
+# `a&b.md`, while `\&amp;` stays the literal text `&amp;`. md_ref decodes
+# the CommonMark way, not html.unescape's: a name must match an HTML5 entity
+# exactly (`&ampx;` stays literal, where HTML's legacy rule reads `&amp`
+# then `x;`), a reference with no `;` is never decoded in Markdown, and a
+# number is its code point, U+FFFD only for 0, a surrogate or past
+# U+10FFFF (HTML maps the C0 and C1 controls instead).
 _ENTITY = r"&(?:#[0-9]{1,7}|#[xX][0-9A-Fa-f]{1,6}|[A-Za-z][A-Za-z0-9]{0,31});"
 MD_DECODE = re.compile(r"\\(" + _PUNCT + ")|(" + _ENTITY + ")")
 ENTITY = re.compile(_ENTITY)
@@ -191,6 +197,10 @@ REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*
 # live link is the costly mistake. It keeps two rules both readings share:
 # a `>` inside a quoted value does not end the tag, and no tag crosses a
 # blank line. Anything else is text, so a tag inside it is still found.
+# The reading is lenient only in part, so the one-parse rule below holds:
+# HTML5 also reads `<a/href="t.md">`, `<a =x href="t.md">` and
+# `<a x<y href="t.md">` as live links, and the gate finds no attribute in
+# any of them (known misses).
 # html_attrs walks the attributes of a matched tag with HTML_ATTR.
 # Linear: a name, a bare value and a quoted value start on different
 # characters, and a name follows whitespace or a closing quote only, so a
@@ -497,12 +507,21 @@ class Slugger:
         return result
 
 
+def md_ref(ref):
+    """The text a CommonMark entity or numeric reference (`&...;`) stands for."""
+    if ref[1] == "#":
+        n = int(ref[3:-1], 16) if ref[2] in "xX" else int(ref[2:-1])
+        return chr(0xFFFD) if n == 0 or 0xD800 <= n < 0xE000 or n > 0x10FFFF else chr(n)
+    return html.entities.html5.get(ref[1:], ref)
+
+
 def md_dest(s):
-    return MD_DECODE.sub(lambda m: m.group(1) or html.unescape(m.group(2)), s)
+    return MD_DECODE.sub(lambda m: m.group(1) or md_ref(m.group(2)), s)
 
 
 def html_value(s):
-    """An HTML attribute value as the browser reads it: references decoded."""
+    """An HTML attribute value as the browser reads it: references decoded
+    by HTML's own rules (html.unescape), not CommonMark's."""
     return ENTITY.sub(lambda m: html.unescape(m.group()), s)
 
 
@@ -551,9 +570,11 @@ class Tree:
             text = strip_code(read_text(self.root, rel), spans=False)
             lines = text.split("\n")
             slugger, res = Slugger(), set()
-            # An explicit anchor: any tag's id, or an `<a>`'s name.
+            # An explicit anchor: an `<a>`'s id or name, the set the gate
+            # has always read. Whether GitHub keeps an id on other tags is
+            # unverified, and counting one it drops would hide a broken link.
             for tag, name, _, value in html_attrs(text):
-                if name == "id" or (name == "name" and tag == "a"):
+                if tag == "a" and name in ("id", "name"):
                     res.add(html_value(value))
             for i, ln in enumerate(lines):
                 heading = None

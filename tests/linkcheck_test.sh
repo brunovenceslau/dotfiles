@@ -566,6 +566,27 @@ git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a blank line ends a link; references decode; a backslash before a letter is literal (exit $rc): $out"
 ok "a blank line ends a link, '&amp;' and '&#38;' decode, and a backslash before a letter is literal"
+# References decode the CommonMark way: a name must match exactly, a
+# numeric reference is its code point (a control included), and an escaped
+# `&` keeps the reference literal, in one pass.
+new_tree
+printf '# Ampx\n' >"$work/r/docs/a&ampx;b.md"
+printf '# Esc\n' >"$work/r/docs/c$(printf '\033')d.md"
+printf '# Lit\n' >"$work/r/docs/a&amp;b.md"
+printf '[1](a&ampx;b.md#ampx) [2](c&#27;d.md#esc) [3](a\134&amp;b.md#lit)\n' \
+  >"$work/r/docs/refs.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "'&ampx;' must stay literal, '&#27;' must be ESC, and '\\&amp;' must stay literal (exit $rc): $out"
+ok "'&ampx;' stays literal, '&#27;' decodes to its control, and an escaped '&amp;' stays literal"
+expect_broken README.md "$(printf 'See [x](docs/gone\363\240\201\201.md).')" \
+  'docs/gone\\U000e0041\.md$' \
+  "a tag character in a report prints as \\UHHHHHHHH"
+expect_broken README.md '<img id="imgid" src="docs/guide.md">
+
+See [x](#imgid).' \
+  'no such anchor in README\.md: #imgid' \
+  "an <img> id is not an anchor: only an <a> id or name is"
 expect_broken README.md "$(printf 'See [x](docs/gone\342\201\240.md).')" \
   'docs/gone\\u2060\.md$' \
   "a word joiner in a report prints as \\uHHHH"
