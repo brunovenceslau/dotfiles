@@ -81,7 +81,10 @@ emulate -L zsh
 FUNCS=$1
 zmodload zsh/zpty    2>/dev/null || { print -r -- "ZPTY_UNAVAILABLE"; exit 0 }
 zmodload zsh/zselect 2>/dev/null || { print -r -- "ZPTY_UNAVAILABLE"; exit 0 }
-dir=$(mktemp -d)
+# Under the caller's $work (argument 2) so its EXIT trap removes it; a bare
+# mktemp -d here leaked one directory per run.
+dir=${2:?scratch dir required}
+mkdir -p -- "$dir"
 # Fixture for the no-file assertion: exactly one plain file with a unique name,
 # so a position that must complete nothing is proven to not fall back to files.
 : > "$dir/zzfile"
@@ -139,7 +142,7 @@ expect_absent upgrade_nofile "dotfiles-upgrade "   "zzfile"     # empty _argumen
 zpty -d CT
 ZSH_ZPTY_EOF
 
-zpty_out="$(zsh "$work/zpty.zsh" "$FUNCS" || true)"
+zpty_out="$(zsh "$work/zpty.zsh" "$FUNCS" "$work/pty" || true)"
 if grep -q ZPTY_UNAVAILABLE <<<"$zpty_out"; then
   if [ -n "${STRICT:-}" ]; then fail "zsh/zpty unavailable and STRICT=1 - dotfiles-* completion e2e not run"; fi
   echo "SKIP: zsh/zpty unavailable - dotfiles-* completion end-to-end (PART 2) not run"

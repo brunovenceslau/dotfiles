@@ -165,11 +165,57 @@ fi
 # tag.forceSignAnnotated defeats `git tag --no-sign` and the opt-out, so the
 # example does not suggest it, not even commented (git reads names in any case).
 ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignannotated "$ex" || :)" "0"
-# Style-independent twin of the uncommenting below: whatever indentation a
-# commented line takes, no line of the example may read as a gpgsign opt-out
-# (false, no, off or 0), with or without the commit. prefix.
-ck "the example carries no commented gpgsign opt-out line" \
-  "$(grep -ciE '^#[[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*(false|no|off|0)[[:space:]]*$' "$ex" || :)" "0"
+# Style-independent twin of the uncommenting below, with git itself as the
+# oracle: no spelling list can keep up with what git reads as false (`no`, `off`,
+# `0x0`, `0b0`, `fal"se"`, `" 0"`, a trailing `\`, an empty value ...). A commented
+# line is an opt-out when, uncommented as a commit.gpgsign line, git reads it as
+# false. Any lead (`#`, `;`, repeated, indented) and any trailing comment are
+# handled by the same two steps. A value git rejects (`0k1`) is no opt-out.
+shapes="$work/optout_shapes"
+optout_reads_false() { # $1 = one commented line; 0 when git would read it as false
+  local body
+  body="$(printf '%s\n' "$1" | sed -E -n 's/^[[:space:]]*[#;]+[[:space:]]*([Cc][Oo][Mm][Mm][Ii][Tt]\.)?([Gg][Pp][Gg][Ss][Ii][Gg][Nn][[:space:]]*=.*)$/\2/p')"
+  [ -n "$body" ] || return 1
+  printf '[commit]\n\t%s\n' "$body" > "$shapes"
+  [ "$(git config --file "$shapes" --type=bool commit.gpgsign 2>/dev/null)" = false ]
+}
+# No fixture may pin a spelling whose meaning varies by platform: the oracle
+# follows the HOST's git, and git parses an integer with strtoimax (base 0) plus
+# its own k/m/g suffix and quote handling. Base-0 hex and octal (0x0, 00), signs
+# and leading blanks are C89 and portable; the suffixes and quotes are git's own
+# code. A binary prefix (0b0) is C23 only (glibc reads it, macOS libc does not),
+# so it is deliberately absent.
+catch_n=0
+for line in '# gpgsign = false' '#commit.gpgsign=no' '; gpgsign = false' ';	commit.gpgsign = off' \
+  '# gpgsign = false # trailing' '# gpgsign = false ; trailing' '# gpgsign =' '; commit.gpgsign =  ' \
+  '# gpgsign = "false"' '# gpgsign = 0 # x' '# gpgsign = 00' '; gpgsign = -0' '# gpgsign = +0' \
+  '# gpgsign = 0x0' '# gpgsign = 0k' '# gpgsign = 0G' '# gpgsign = 00m' '# gpgsign = ""' \
+  '   # gpgsign = false' '## gpgsign = false' ';; commit.gpgsign = no' \
+  '# gpgsign = fal"se"' '# gpgsign = n"o"' '# gpgsign = " 0"' '# gpgsign = false\' \
+  '# GpgSign = FALSE' '# Commit.GPGSign = Off'; do
+  catch_n=$((catch_n + 1))
+  optout_reads_false "$line" && r=1 || r=0
+  ck "the oracle flags the opt-out: $line" "$r" "1"
+done
+ck "the must-catch fixtures are all present" "$catch_n" "27"
+ignore_n=0
+for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = false' '# Leave gpgsign off' \
+  '# gpgsign = 1' '# gpgsign = 0x1' '# gpgsign = 10' '# gpgsign = 0k1' '# gpgsign' '# gpgsign = yes'; do
+  ignore_n=$((ignore_n + 1))
+  optout_reads_false "$line" && r=1 || r=0
+  ck "the oracle ignores: $line" "$r" "0"
+done
+ck "the must-ignore fixtures are all present" "$ignore_n" "10"
+# The example itself: every line that mentions gpgsign (and at least one does).
+mention_n=0; optout_n=0
+while IFS= read -r line; do
+  mention_n=$((mention_n + 1))
+  if optout_reads_false "$line"; then optout_n=$((optout_n + 1)); fi
+done <<EOF
+$(grep -i gpgsign "$ex" || :)
+EOF
+[ "$mention_n" -gt 0 ] || fail "the example mentions no gpgsign line, so the opt-out scan proved nothing"
+ck "the example carries no commented gpgsign opt-out line" "$optout_n" "0"
 # The example says to uncomment and edit each line: doing exactly that, with
 # the result included after the tracked config the way the link engine writes
 # ~/.config/git/config (lib/link.sh's _write_git_local_config), must leave

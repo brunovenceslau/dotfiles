@@ -25,7 +25,7 @@ pass=0
 # silently-skipped mandatory block trips the final `pass -eq expected` guard.
 # Includes 3 for the stubbed-sysctl load block below, which is NOT tool-gated and
 # so never subtracts: it must run and assert on every platform, CI leg included.
-expected=29
+expected=30
 
 # Glyph constants shared by the stubbed load block below and the _bar unit block
 # further down - defined once here so neither one silently drifts from the other.
@@ -211,14 +211,22 @@ pass=$((pass + 2))
 # error (the fetch-then-`git -C` path cannot execute it). run-shell is deterministic:
 # no attached client, no async render capture.
 if command -v tmux >/dev/null 2>&1; then
-  sock="$work/tmux.sock"
-  tmux -L cl24test-$$ kill-server 2>/dev/null || true
+  # The socket lives in its own short directory, not under $work: a unix socket
+  # path is capped by sun_path (104 bytes on macOS, 108 on Linux) and a long
+  # $TMPDIR overflows it. /tmp is short on every platform this suite runs on.
+  sockdir="$(mktemp -d /tmp/tsock.XXXXXX)"
+  # One server serves both sessions on this socket; kill it on EVERY exit path
+  # (a failing new-session leaves it alive) before its directory is deleted.
+  trap 'tmux -S "$sockdir/s" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT
+  sock="$sockdir/s"
   # (a) self-fetch renders the correct branch
   prepo="$work/pane repo"; mkdir -p "$prepo"
   ( cd "$prepo" && git init -q && git branch -m probe/xyz ) >/dev/null 2>&1
-  tmux -S "$sock" new-session -d -s s -c "$prepo" -x 80 -y 24 2>/dev/null
+  tmux -S "$sock" new-session -d -s s -c "$prepo" -x 80 -y 24 \
+    || fail "tmux new-session failed (socket path ${#sock} bytes: $sock)"
   rm -f "$work/dyn.out"
-  tmux -S "$sock" run-shell -t s "DOTFILES='$repo_root' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null '$TS' > '$work/dyn.out' 2>&1"
+  tmux -S "$sock" run-shell -t s "DOTFILES='$repo_root' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null '$TS' > '$work/dyn.out' 2>&1" \
+    || fail "tmux run-shell (self-fetch) returned non-zero"
   dyn="$(cat "$work/dyn.out" 2>/dev/null || true)"
   case "$dyn" in *"probe/xyz"*) : ;; *) fail "helper did not self-fetch the pane path/branch via tmux; got: [$dyn]" ;; esac
   # (b) a malicious pane dir name (newline + a PATH command) must not execute
@@ -226,15 +234,31 @@ if command -v tmux >/dev/null 2>&1; then
   evil="$(printf 'boom\npwncmd\n:')"   # slash-free leaf; a newline-separated command
   mkdir -p "$work/wrap"; ( cd "$work/wrap" && mkdir -- "$evil" ) 2>/dev/null || true
   rm -f "$work/PWNED_DYN"
-  tmux -S "$sock" new-session -d -s e -c "$work/wrap/$evil" -x 80 -y 24 2>/dev/null
-  tmux -S "$sock" run-shell -t e "DOTFILES='$repo_root' PATH='$work:$PATH' '$TS' > '$work/dyn2.out' 2>&1"
+  tmux -S "$sock" new-session -d -s e -c "$work/wrap/$evil" -x 80 -y 24 \
+    || fail "tmux new-session (injection pane) failed"
+  tmux -S "$sock" run-shell -t e "DOTFILES='$repo_root' PATH='$work:$PATH' '$TS' > '$work/dyn2.out' 2>&1" \
+    || fail "tmux run-shell (injection pane) returned non-zero"
   tmux -S "$sock" kill-server 2>/dev/null || true
   [ -e "$work/PWNED_DYN" ] && fail "a malicious pane directory name executed a command through the helper's self-fetch"
   pass=$((pass + 2))
+  # Regression for #38 A: the whole suite again under a TMPDIR far past
+  # sun_path, once (the guard variable stops the recursion). It must pass, not
+  # exit silently, which is how the long path used to fail.
+  if [ -z "${TMUX_STATUS_LONG_TMPDIR:-}" ]; then
+    longtmp="$work/$(printf 'x%.0s' $(seq 1 200))"
+    mkdir -p "$longtmp"
+    TMUX_STATUS_LONG_TMPDIR=1 TMPDIR="$longtmp" bash "$0" >"$work/long.out" 2>&1 \
+      || fail "the suite fails under a ${#longtmp}-byte TMPDIR: $(tail -3 "$work/long.out")"
+    pass=$((pass + 1))
+  else
+    expected=$((expected - 1))
+  fi
 else
   if [ -n "${STRICT:-}" ]; then fail "tmux unavailable and STRICT=1 - status-right self-fetch not exercised"; fi
   echo "SKIP: tmux unavailable - dynamic self-fetch / injection regression not run"
-  expected=$((expected - 2))
+  # One subtraction per tmux-gated assertion group, so the tally cannot drift:
+  expected=$((expected - 2))   # self-fetch + injection (pass += 2 above)
+  expected=$((expected - 1))   # the long-TMPDIR re-run (pass += 1 above)
 fi
 
 # --- _bar UNIT coverage: driven DIRECTLY, not through the platform load source ---
