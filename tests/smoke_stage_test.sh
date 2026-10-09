@@ -16,19 +16,20 @@
 #   - with no local objects it is left uninitialized for install.sh to fetch
 #     (nothing here fetches: stage_tree never does, and install.sh is not run);
 #   - a staging failure returns nonzero, and through bin/smoke fails the run and
-#     cleans up the partial copy.
+#     cleans up the partial copy;
+#   - a tar that only warns on stderr still fails the staging;
+#   - a working-tree entry named like a tar option (a leading -, or @ on
+#     bsdtar) is copied as a file, never read as an option.
 # Every case also proves the source checkout is byte-identical afterwards.
 #
 # Bash 3.2 compatible so the macOS CI legs behave identically: no associative
 # arrays, no mapfile, no ${var,,}.
 set -euo pipefail
 
-# A privilege skip: a root run cannot make a file unreadable to itself, which
-# the partial-failure case needs, and install.sh refuses root anyway.
-if [ "$(/usr/bin/id -u)" -eq 0 ]; then
-  echo "SKIP: smoke_stage_test (running as root)"
-  exit 0
-fi
+# Root can read a mode-000 file, so the partial-failure case (6) cannot build
+# its fixture as root; only that case is skipped, every other one runs.
+is_root=0
+[ "$(/usr/bin/id -u)" -ne 0 ] || is_root=1
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 smoke="$repo_root/bin/smoke"
@@ -169,29 +170,29 @@ assert_modes "$work/w1" "$work/d2" "common modules"
 ok
 
 # --- 3. Uninitialized, objects only in a sibling worktree's modules gitdir -------
-c2="$work/c2"
-git clone -q "$super" "$c2"
-git -C "$c2" worktree add -q --detach "$work/w2a"
+c3="$work/c3"
+git clone -q "$super" "$c3"
+git -C "$c3" worktree add -q --detach "$work/w3a"
 # shellcheck disable=SC2086
-git -C "$work/w2a" $allow submodule update --init -q
-git -C "$c2" worktree add -q --detach "$work/w2b"
-mark_modes "$work/w2b"
-[ ! -e "$c2/.git/modules" ] || fail "fixture: the main clone c2 must hold no modules gitdir"
-before_c2="$(snap "$c2")"; before_w2b="$(snap "$work/w2b")"
-stage_tree "$work/w2b" "$work/d3" || fail "sibling worktree: stage_tree failed"
-same "sibling worktree (main clone)" "$before_c2" "$(snap "$c2")"
-same "sibling worktree (worktree)" "$before_w2b" "$(snap "$work/w2b")"
+git -C "$work/w3a" $allow submodule update --init -q
+git -C "$c3" worktree add -q --detach "$work/w3b"
+mark_modes "$work/w3b"
+[ ! -e "$c3/.git/modules" ] || fail "fixture: the main clone c3 must hold no modules gitdir"
+before_c3="$(snap "$c3")"; before_w3b="$(snap "$work/w3b")"
+stage_tree "$work/w3b" "$work/d3" || fail "sibling worktree: stage_tree failed"
+same "sibling worktree (main clone)" "$before_c3" "$(snap "$c3")"
+same "sibling worktree (worktree)" "$before_w3b" "$(snap "$work/w3b")"
 assert_populated "$work/d3" \
-  "$(cd "$c2/.git/worktrees/w2a/modules/zsh/plugins/demo" && pwd -P)/objects" "sibling worktree"
-assert_modes "$work/w2b" "$work/d3" "sibling worktree"
+  "$(cd "$c3/.git/worktrees/w3a/modules/zsh/plugins/demo" && pwd -P)/objects" "sibling worktree"
+assert_modes "$work/w3b" "$work/d3" "sibling worktree"
 ok
 
 # --- 4. Uninitialized, no local objects: left for install.sh, nothing fetched ----
-c3="$work/c3"
-git clone -q "$super" "$c3"
-before="$(snap "$c3")"
-stage_tree "$c3" "$work/d4" || fail "no local objects: stage_tree failed"
-same "no local objects" "$before" "$(snap "$c3")"
+c4="$work/c4"
+git clone -q "$super" "$c4"
+before="$(snap "$c4")"
+stage_tree "$c4" "$work/d4" || fail "no local objects: stage_tree failed"
+same "no local objects" "$before" "$(snap "$c4")"
 [ "$(git -C "$work/d4" submodule status | cut -c1)" = - ] \
   || fail "no local objects: the copy's submodule must stay uninitialized (install.sh's to fetch)"
 [ -z "$(ls -A "$work/d4/zsh/plugins/demo")" ] || fail "no local objects: the copy's submodule dir must stay empty"
@@ -200,12 +201,12 @@ ok
 
 # --- 5. Failure: nonzero, and the source untouched -------------------------------
 # An unborn HEAD fails the first step (there is no commit to stage).
-c4="$work/c4"
-git init -q -b main "$c4"
-echo x > "$c4/a.txt"
-before="$(snap "$c4")"
-if stage_tree "$c4" "$work/d5" 2>/dev/null; then fail "unborn HEAD: stage_tree must fail"; fi
-same "unborn HEAD" "$before" "$(snap "$c4")"
+c5="$work/c5"
+git init -q -b main "$c5"
+echo x > "$c5/a.txt"
+before="$(snap "$c5")"
+if stage_tree "$c5" "$work/d5" 2>/dev/null; then fail "unborn HEAD: stage_tree must fail"; fi
+same "unborn HEAD" "$before" "$(snap "$c5")"
 ok
 
 # --- 6. Partial failure through bin/smoke: the run fails and cleans up ------------
@@ -213,19 +214,21 @@ ok
 # created - a partial copy. The file is NON-empty on purpose: macOS bsdtar never
 # opens a zero-length file for its data, so an empty unreadable file only drew
 # an xattr-listing warning there (exit 0) and staged a complete copy, which made
-# this case fail for the wrong reason on the macOS legs. bin/smoke must fail naming the staging step, leave no
-# .smoke/run behind, and leave the source untouched. Needs zsh: bin/smoke skips
-# before staging without it.
-if command -v zsh >/dev/null 2>&1; then
-  c5="$work/c5"
-  git clone -q "$super" "$c5"
-  mkdir -p "$c5/zsh" && : > "$c5/install.sh" && : > "$c5/zsh/zshrc"   # pass the ROOT guard
-  echo secret > "$c5/unreadable" && chmod 000 "$c5/unreadable"
-  before="$(snap "$c5")"
-  if fout="$(env -u STRICT "$smoke" "$c5" 2>&1)"; then fail "partial failure: bin/smoke must fail: $fout"; fi
+# this case fail for the wrong reason on the macOS legs. bin/smoke must fail
+# naming the staging step, leave no .smoke/run behind, and leave the source
+# untouched. Needs zsh: bin/smoke skips before staging without it.
+if [ "$is_root" -eq 1 ]; then
+  echo "SKIP: smoke_stage_test case 6, partial failure (running as root: a mode-000 file stays readable)"
+elif command -v zsh >/dev/null 2>&1; then
+  c6="$work/c6"
+  git clone -q "$super" "$c6"
+  mkdir -p "$c6/zsh" && : > "$c6/install.sh" && : > "$c6/zsh/zshrc"   # pass the ROOT guard
+  echo secret > "$c6/unreadable" && chmod 000 "$c6/unreadable"
+  before="$(snap "$c6")"
+  if fout="$(env -u STRICT "$smoke" "$c6" 2>&1)"; then fail "partial failure: bin/smoke must fail: $fout"; fi
   grep -q 'could not stage' <<<"$fout" || fail "partial failure: failed for the WRONG reason: $fout"
-  [ ! -e "$c5/.smoke/run" ] || fail "partial failure: bin/smoke left the partial copy behind"
-  same "partial failure" "$before" "$(snap "$c5")"
+  [ ! -e "$c6/.smoke/run" ] || fail "partial failure: bin/smoke left the partial copy behind"
+  same "partial failure" "$before" "$(snap "$c6")"
   ok
 else
   [ -z "${STRICT:-}" ] || fail "zsh not found and STRICT=1 - the partial-failure case cannot run"
@@ -236,23 +239,77 @@ fi
 # macOS bsdtar reports some problems (an xattr it cannot list, for one) on
 # stderr while exiting 0, so an exit-status check alone accepts a copy tar
 # itself called incomplete. stage_tree treats any tar stderr as failure. A stub
-# `tar` first on PATH proves it on any platform: it writes a warning, then runs
-# the real tar and keeps its (successful) exit status.
+# `tar` first on PATH proves it on any platform. It warns ONLY after the real
+# tar succeeded, and exits 0: a real tar failure prints a different line and
+# keeps its status, so this case cannot pass on some other tar failure.
 real_tar="$(command -v tar)"
 stub="$work/stub-bin"
 mkdir -p "$stub"
 printf '#!/bin/sh
+"%s" "$@" || { rc=$?; echo "tar-stub: the REAL tar failed" >&2; exit "$rc"; }
 echo "tar: stub: simulated warning" >&2
-exec "%s" "$@"
+exit 0
 ' "$real_tar" > "$stub/tar"
 chmod u+x "$stub/tar"
-c6="$work/c6"
-git clone -q "$super" "$c6"
-before="$(snap "$c6")"
-if (PATH="$stub:$PATH" stage_tree "$c6" "$work/d7") 2>/dev/null; then
+c7="$work/c7"
+git clone -q "$super" "$c7"
+before="$(snap "$c7")"
+if werr="$( (PATH="$stub:$PATH" stage_tree "$c7" "$work/d7") 2>&1)"; then
   fail "tar warning: stage_tree must fail when tar writes to stderr, even on exit 0"
 fi
-same "tar warning" "$before" "$(snap "$c6")"
+# The status alone would pass for ANY failure. The replayed stub warning under
+# stage_tree's own verdict, no real tar failure, and a complete extract prove
+# it failed on the stderr rule alone.
+grep -q 'tar did not copy' <<<"$werr" \
+  || fail "tar warning: failed for the WRONG reason (no 'did not copy'): $werr"
+grep -q 'tar: stub: simulated warning' <<<"$werr" \
+  || fail "tar warning: the stub's warning was not replayed: $werr"
+if grep -q 'the REAL tar failed' <<<"$werr"; then
+  fail "tar warning: the real tar failed, so this is not the warning-only path: $werr"
+fi
+[ "$(cat "$work/d7/a.txt" 2>/dev/null)" = tracked ] \
+  || fail "tar warning: the copy is incomplete, so tar did not merely warn: $werr"
+same "tar warning" "$before" "$(snap "$c7")"
+ok
+
+# --- 8. An entry named like a tar option is a file, never an option -------------
+# The names reach tar as arguments. Bare, `--exclude=a.txt` and `-v` are parsed
+# as options (the entry is never copied, a.txt is silently dropped), the two
+# --checkpoint names make GNU tar run a command, and bsdtar reads `@x.tar` as
+# "add the entries of this archive". On GNU tar the `@` name is an ordinary
+# file either way, so its half is proven only on the macOS legs (a NOTE line
+# says so on a GNU host).
+# Measured against the pre-fix code (no ./ prefix): the case goes red at
+# "stage_tree failed" (tar rejects -v / --exclude= entries), before the PWNED
+# check is reached. The PWNED check is a belt: --checkpoint=1 makes GNU tar
+# reach a checkpoint on the first record even in this tiny tree, so a bare
+# --checkpoint-action name does run its command.
+c8="$work/c8"
+case "$(tar --version 2>/dev/null)" in
+  *"GNU tar"*) echo "NOTE: smoke_stage_test case 8, option-like names (GNU tar: the @x.tar half is not proven on this host)" ;;
+esac
+git clone -q "$super" "$c8"
+echo dash-entry > "$c8/--exclude=a.txt"
+echo dash-short > "$c8/-v"
+echo at > "$c8/@x.tar"
+echo ckpt > "$c8/--checkpoint=1"
+echo ckpt-action > "$c8/--checkpoint-action=exec=touch PWNED"
+before="$(snap "$c8")"
+stage_tree "$c8" "$work/d8" || fail "option-like names: stage_tree failed"
+same "option-like names" "$before" "$(snap "$c8")"
+[ "$(cat "$work/d8/--exclude=a.txt")" = dash-entry ] \
+  || fail "option-like names: the entry named --exclude=a.txt was not copied"
+[ "$(cat "$work/d8/-v")" = dash-short ] || fail "option-like names: the entry named -v was not copied"
+[ "$(cat "$work/d8/@x.tar")" = at ] || fail "option-like names: the entry named @x.tar was not copied as a file"
+[ "$(cat "$work/d8/--checkpoint=1")" = ckpt ] \
+  || fail "option-like names: the entry named --checkpoint=1 was not copied"
+[ "$(cat "$work/d8/--checkpoint-action=exec=touch PWNED")" = ckpt-action ] \
+  || fail "option-like names: the --checkpoint-action entry was not copied"
+[ "$(cat "$work/d8/a.txt")" = tracked ] \
+  || fail "option-like names: a.txt missing, the --exclude= name was read as a tar option"
+for d in "$c8" "$work/d8" "$PWD"; do
+  [ ! -e "$d/PWNED" ] || fail "option-like names: tar ran the --checkpoint-action command (PWNED in $d)"
+done
 ok
 
 echo "PASS: smoke_stage_test ($n cases)"

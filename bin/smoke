@@ -179,9 +179,16 @@ _local_modules_gitdir() {
 # tar and bsdtar accept different sets and an unknown flag is an error.
 _tar_copy() {
   local src="$1" dst="$2" errc="$2.tar-create.err" errx="$2.tar-extract.err" f
-  local -a skip
+  local -a skip ents
   shift 2
   skip=()
+  # Every NAME goes to tar as ./NAME: a working-tree entry whose name starts
+  # with `-`, or with `@` on bsdtar (`@x.tar` reads as "add this archive's
+  # entries"), is otherwise read as a tar OPTION, silently changing what is
+  # copied (or failing it, or running a GNU --checkpoint-action command)
+  # instead of naming a file.
+  ents=()
+  for f in "$@"; do ents[${#ents[@]}]="./$f"; done
   # The probe archives an empty directory: a real, portable create that every
   # tar accepts, so only an unknown flag can fail it.
   mkdir -p "$dst.tar-probe" || return 1
@@ -190,7 +197,7 @@ _tar_copy() {
   done
   rmdir "$dst.tar-probe" || return 1
   # ${skip[@]+...}: bash 3.2 under `set -u` treats an empty array as unbound.
-  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - "$@") 2>"$errc" \
+  if (cd "$src" && tar ${skip[@]+"${skip[@]}"} -cf - ${ents[@]+"${ents[@]}"}) 2>"$errc" \
       | (cd "$dst" && tar ${skip[@]+"${skip[@]}"} -xpf -) 2>"$errx" \
       && [ ! -s "$errc" ] && [ ! -s "$errx" ]; then
     rm -f "$errc" "$errx"
@@ -217,7 +224,9 @@ stage_tree() {
     case "$e" in .git | .smoke | .forkgate) continue ;; esac
     names[${#names[@]}]="$e"
   done
-  _tar_copy "$src" "$dst" "${names[@]}" || return 1
+  # Same bash 3.2 empty-array guard as in _tar_copy: an empty tree leaves names
+  # empty, which bash 3.2 under `set -u` treats as unbound.
+  _tar_copy "$src" "$dst" ${names[@]+"${names[@]}"} || return 1
   # `ls-files -s` lines are "<mode> <sha> <stage>\t<path>"; mode 160000 is a
   # gitlink. read splits on the tab too (no plugin path holds whitespace).
   links="$(git -C "$dst" ls-files -s)" || return 1

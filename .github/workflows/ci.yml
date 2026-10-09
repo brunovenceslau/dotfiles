@@ -112,6 +112,10 @@ jobs:
           reuse --version | sed -n 1p
           gitleaks version
           python3 -I -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
+          # Two interpreters, printed, never compared: bin/ runs under the first
+          # bash on PATH, install.sh and the smoke's installer under /bin/bash.
+          printf 'PATH bash: '; bash --version | sed -n 1p
+          printf '/bin/bash: '; /bin/bash --version | sed -n 1p
 
       # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
       # can never report green on a gate it did not actually run. local-ci =
