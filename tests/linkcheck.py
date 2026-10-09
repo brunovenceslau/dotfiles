@@ -406,6 +406,10 @@ def slugify(text):
     text = HEADING_IMAGE.sub("\0", text.strip())
     text = HEADING_LINK.sub(r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
+    # The code span's 2048 bound is the one kept for speed, by measurement:
+    # unbounded, a heading of backtick runs of every length 1..2000 (2 MB)
+    # took 26 s, against 0.3 s bounded, since each unpartnered run scans
+    # the rest of the line. A heading's code span never comes near 2048.
     for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
         rendered.append(_render_inline(text[pos:m.start()]))
         rendered.append(m.group(2))
