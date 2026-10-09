@@ -1155,7 +1155,7 @@ MESSAGE_FUNCS = {
     "select": (1,),  # (chosen, the lines that say why none was)
     "read_small_file": (1,), "load_revocation": (1,),  # (data, why not)
     "_first_line": (1,),  # (line, why not)
-    "submodule_commit": (2,),  # (state, commit, why)
+    "submodule_commit": (2,),  # (state, commit, why, gitdir)
 }
 MESSAGE_METHODS = {
     "why_no_candidate": None, "why_invalid": None,
@@ -1621,10 +1621,10 @@ def submodule_units(mod, scratch):
     p = sub("dotgit-dir")
     os.mkdir(os.path.join(p, ".git"))
     write(os.path.join(p, ".git", "HEAD"), sha + "\n")
-    check(mod.submodule_commit(p) == (mod.AT, sha, None), "a .git directory's detached HEAD is read")
+    check(mod.submodule_commit(p) == (mod.AT, sha, None, None), "a .git directory's detached HEAD is read")
     # A SHA-256 commit id is one too.
     write(os.path.join(p, ".git", "HEAD"), "b" * 64 + "\n")
-    check(mod.submodule_commit(p) == (mod.AT, "b" * 64, None), "a SHA-256 HEAD is read")
+    check(mod.submodule_commit(p) == (mod.AT, "b" * 64, None, None), "a SHA-256 HEAD is read")
     # A ref outside refs/, or climbing out of the gitdir, is never followed.
     for ref in ("ref: ../../../etc/passwd", "ref: refs/../../x", "ref: HEAD"):
         write(os.path.join(p, ".git", "HEAD"), ref + "\n")
@@ -1632,17 +1632,17 @@ def submodule_units(mod, scratch):
     # A gitfile that names no gitdir.
     p = sub("bad-gitfile")
     write(os.path.join(p, ".git"), "not a gitfile\n")
-    state, _, why = mod.submodule_commit(p)
-    check(state == mod.UNREADABLE and "does not name a gitdir" in why, "a gitfile without gitdir: is unreadable")
+    state, _, why, gitdir = mod.submodule_commit(p)
+    check(state == mod.UNREADABLE and "does not name a gitdir" in why and gitdir is None, "a gitfile without gitdir: is unreadable")
     # A FIFO where .git or HEAD should be answers at once (read_small_file()).
     p = sub("fifo")
     os.mkfifo(os.path.join(p, ".git"))
     started = time.time()
-    state, _, why = mod.submodule_commit(p)
+    state, _, why, _ = mod.submodule_commit(p)
     check(state == mod.UNREADABLE and "not a regular file" in why and time.time() - started < 5,
           "a FIFO .git is unreadable at once, never waited on")
     # An empty directory is an uninitialized submodule; so is one deleted.
-    check(mod.submodule_commit(sub("empty")) == (mod.ABSENT, None, None), "an empty directory is not initialized")
+    check(mod.submodule_commit(sub("empty")) == (mod.ABSENT, None, None, None), "an empty directory is not initialized")
     check(mod.submodule_commit(os.path.join(base, "gone"))[0] == mod.ABSENT, "a missing directory is not initialized")
     # A packed ref that names another ref's commit is not taken for HEAD's.
     p = sub("packed")
@@ -1650,6 +1650,35 @@ def submodule_units(mod, scratch):
     write(os.path.join(p, ".git", "HEAD"), "ref: refs/heads/main\n")
     write(os.path.join(p, ".git", "packed-refs"), "# pack-refs with: peeled\n%s refs/heads/mainline\n" % sha)
     check(mod.submodule_commit(p)[0] == mod.UNRESOLVED, "a packed ref is matched by its whole name")
+    # A loose ref that is not a commit id falls through to packed-refs.
+    os.makedirs(os.path.join(p, ".git", "refs", "heads"))
+    write(os.path.join(p, ".git", "refs", "heads", "main"), "garbage\n")
+    write(os.path.join(p, ".git", "packed-refs"), "%s refs/heads/main\n" % sha)
+    check(mod.submodule_commit(p) == (mod.AT, sha, None, None), "a loose ref that is no commit id falls through to packed-refs")
+    # HEAD and the ref are opened without following a final symlink: one
+    # pointing at a commit-shaped file elsewhere is not read.
+    elsewhere = os.path.join(base, "elsewhere")
+    write(elsewhere, sha + "\n")
+    os.remove(os.path.join(p, ".git", "packed-refs"))
+    os.remove(os.path.join(p, ".git", "refs", "heads", "main"))
+    os.symlink(elsewhere, os.path.join(p, ".git", "refs", "heads", "main"))
+    check(mod.submodule_commit(p)[0] == mod.UNRESOLVED, "a symlinked loose ref is not followed")
+    os.remove(os.path.join(p, ".git", "HEAD"))
+    os.symlink(elsewhere, os.path.join(p, ".git", "HEAD"))
+    check(mod.submodule_commit(p)[0] == mod.UNREADABLE, "a symlinked HEAD is not followed")
+    # A gitfile naming a gitdir that exists hands that gitdir back with an
+    # unreadable HEAD (git would reuse it); one naming no gitdir does not.
+    p = sub("separate")
+    gd = os.path.join(base, "modules-demo")
+    os.makedirs(gd)
+    write(os.path.join(gd, "HEAD"), "nonsense\n")
+    write(os.path.join(p, ".git"), "gitdir: ../modules-demo\n")
+    state, _, _, gitdir = mod.submodule_commit(p)
+    check(state == mod.UNREADABLE and gitdir == os.path.join(p, "../modules-demo"),
+          "an unreadable HEAD in an existing separate gitdir names that gitdir")
+    write(os.path.join(p, ".git"), "gitdir: ../modules-gone\n")
+    state, _, _, gitdir = mod.submodule_commit(p)
+    check(state == mod.UNREADABLE and gitdir is None, "a gitdir that is gone is not named")
 
 
 def static_units(source):

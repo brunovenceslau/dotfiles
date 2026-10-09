@@ -660,9 +660,10 @@ install: doctor: signing key: <cause>
 install: doctor: ~/.gitconfig: a dangling ~/.gitconfig symlink is in place, and its target's settings would override ~/.config/git/config - remove it
 install: doctor: ~/.gitconfig: ~/.gitconfig sets <keys>, and git reads it after ~/.config/git/config - move its settings into <path> and remove it
 install: doctor: ~/.gitconfig: ~/.gitconfig is not a regular file - remove it
-install: doctor: plugins: cannot list the plugin pins of <path> (<error>) - check that it is a git checkout: git -C <path> ls-tree HEAD
+install: doctor: plugins: cannot list the plugin pins of <path> (<error>) - fix what git names, then run doctor again
 install: doctor: plugins: <plugin> is not initialized, so zsh starts without it - run: <path to install.sh> install
-install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - remove that directory, then run: <path to install.sh> install
+install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory aside, then run: <path to install.sh> install
+install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - move that directory and its git directory <path> aside, then run: <path to install.sh> install
 ```
 
 The `git config --file` lines for `user.name` and `user.email` are the ones
@@ -689,10 +690,15 @@ A plugin that is not initialized is the
 [empty plugin submodules](#degraded-shell) case:
 `./install.sh` initializes it at its pin, and `./install.sh link` does not
 touch submodules. A plugin whose commit cannot be read has a `.git` that
-names a gitdir that is gone, or a `HEAD` git cannot use; removing the
-directory lets the installer initialize it again. A plugin at another commit
-than its pin is not a problem: the installer leaves a local change alone on
-purpose, and `--verbose` prints a `note:` with the command back to the pin.
+names a gitdir that is gone, or a `HEAD` git cannot use. Moving the
+directory aside lets the installer initialize it again; when its git
+directory still exists, git would reuse it, so the line names that one to
+move aside too. Moved, not removed: either may hold the plugin's own
+commits. A plugin at another commit than its pin is not a problem: the
+installer leaves a local change alone on purpose, and `--verbose` prints a
+`note:` with the command back to the pin. In a partial clone the plugins are
+not checked, and `--verbose` says so: reading a tree such a clone lacks
+could fetch it, and git before 2.45 has no way to forbid that.
 
 **Cause.** The identity or signing setup is incomplete, a tool it needs is
 missing, or a plugin submodule is not in place. On a host that opted out of

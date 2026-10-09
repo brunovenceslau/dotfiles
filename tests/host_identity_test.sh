@@ -98,6 +98,36 @@ EOF
 chmod u+x "$work/fakebin/ssh-add"
 
 export GIT_CONFIG_SYSTEM=/dev/null
+# --- the checkout every case runs: a fixture, never this one ----------------
+# install.sh and lib/ as they are now, committed in a fixture repository with
+# one real plugin submodule under zsh/plugins/ from a local bare repository,
+# and cloned with it initialized. doctor checks the plugins of the checkout
+# that holds the installer, so the suite does not depend on how this one was
+# cloned. fx runs the fixtures' own git commands (never the step) with no
+# ambient config.
+fx() {
+  GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.name=t -c user.email=t@t \
+    -c commit.gpgsign=false -c protocol.file.allow=always "$@"
+}
+# mkcheckout DIR - install.sh and lib/ of this tree, in DIR (no git there).
+mkcheckout() {
+  mkdir -p "$1/lib"
+  cat "$repo_root/install.sh" > "$1/install.sh"; chmod u+x "$1/install.sh"
+  for f in "$repo_root"/lib/*.sh "$module"; do cat "$f" > "$1/lib/${f##*/}"; done
+}
+fx init -q --bare -b main "$work/plug.git"
+fx init -q -b main "$work/plug-wt"
+echo one > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" add p.zsh; fx -C "$work/plug-wt" commit -qm one
+pin="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+echo two > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" commit -qam two
+bump="$(fx -C "$work/plug-wt" rev-parse HEAD)"
+fx -C "$work/plug-wt" push -q "$work/plug.git" "$pin:refs/heads/main" "$bump:refs/heads/next"
+co="$work/co"
+fx init -q -b main "$co"; mkcheckout "$co"
+fx -C "$co" submodule add -q "$work/plug.git" zsh/plugins/demo
+fx -C "$co" add -A; fx -C "$co" commit -qm fixture
+fx clone -q --recurse-submodules "$co" "$work/self"
+installer="$work/self/install.sh"
 # No agent of the caller's is ever reachable from this suite (see the e2e case).
 unset GIT_CONFIG_GLOBAL GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT CANGA_HOST_ALLOWED_SIGNERS SSH_AUTH_SOCK SSH_AGENT_PID SSH_CONNECTION
 unset FAKE_AGENT_DOWN
@@ -1991,37 +2021,25 @@ has "Jane\\x1b[2JDoe" "doctor escapes a control character"
 ok
 
 # --- doctor: the plugin submodules, read from files, and the early exit's scope
-# A fixture checkout of its own, so each submodule state is staged without
-# touching this one: install.sh and lib/ as they are now, committed with one
-# real submodule under zsh/plugins/ from a local bare repository. fx runs the
-# fixture's own git commands (never doctor) with no ambient config.
-fx() {
-  GIT_CONFIG_GLOBAL=/dev/null git -c user.name=t -c user.email=t@t -c commit.gpgsign=false \
-    -c protocol.file.allow=always "$@"
-}
-# mkcheckout DIR - install.sh and lib/ of this tree, in DIR (no git there).
-mkcheckout() {
-  mkdir -p "$1/lib"
-  cat "$installer" > "$1/install.sh"; chmod u+x "$1/install.sh"
-  for f in "$repo_root"/lib/*.sh "$module"; do cat "$f" > "$1/lib/${f##*/}"; done
-}
-fx init -q --bare -b main "$work/plug.git"
-fx init -q -b main "$work/plug-wt"
-echo one > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" add p.zsh; fx -C "$work/plug-wt" commit -qm one
-pin="$(fx -C "$work/plug-wt" rev-parse HEAD)"
-echo two > "$work/plug-wt/p.zsh"; fx -C "$work/plug-wt" commit -qam two
-bump="$(fx -C "$work/plug-wt" rev-parse HEAD)"
-fx -C "$work/plug-wt" push -q "$work/plug.git" "$pin:refs/heads/main" "$bump:refs/heads/next"
-co="$work/co"
-fx init -q -b main "$co"; mkcheckout "$co"
-fx -C "$co" submodule add -q "$work/plug.git" zsh/plugins/demo
-fx -C "$co" add -A; fx -C "$co" commit -qm fixture
+# $co is the fixture the suite's checkout was cloned from (see its top); each
+# submodule state is staged there or in a clone of it.
 pdoc() { rc=0; out="$("$1/install.sh" doctor "${@:2}" 2>&1)" || rc=$?; }
+# paste CMD - run a command exactly as doctor printed it, as a shell reads it.
+paste_run() { GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null bash -c "$1" >/dev/null 2>&1; }
 dhealthy
 # Healthy: `submodule add` leaves HEAD a ref (refs/heads/main), resolved loose.
 pdoc "$co"; expect_rc 0 "doctor, plugin at its pin"; [ -z "$out" ] || fail "doctor, plugin at its pin: $out"
 pdoc "$co" --verbose; expect_rc 0 "doctor --verbose, plugin at its pin"
 has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "doctor names a plugin at its pin"
+# Only gitlinks under zsh/plugins/ are pins: a submodule elsewhere and a file
+# there are not read.
+mkdir -p "$co/zsh/plugins"; echo notes > "$co/zsh/plugins/README"
+fx -C "$co" update-index --add --cacheinfo "160000,$pin,vendor/other"
+fx -C "$co" add zsh/plugins/README; fx -C "$co" commit -qm "not plugins"
+pdoc "$co" --verbose; expect_rc 0 "doctor, a gitlink outside zsh/plugins/"
+lacks "vendor/other" "a gitlink outside zsh/plugins/ is not a plugin pin"
+lacks "README" "a file under zsh/plugins/ is not a plugin pin"
+fx -C "$co" rm -q --cached vendor/other; fx -C "$co" commit -qm "no other"
 # The same, with the ref packed.
 fx -C "$co/zsh/plugins/demo" pack-refs --all
 pdoc "$co" --verbose; expect_rc 0 "doctor, plugin ref packed"
@@ -2035,12 +2053,18 @@ fix="git -C $co -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule
 has "doctor: plugins: note: zsh/plugins/demo is at ${bump:0:12}, not its pin ${pin:0:12}: a local change, left as it is - to return to the pin, run: $fix" "doctor notes a local bump"
 lacks "dotfiles-upgrade" "a moved pin is not sent to dotfiles-upgrade"
 [ "$(HOME="$co" snap)" = "$snap_co" ] || fail "doctor wrote in the checkout"
-GIT_CONFIG_GLOBAL=/dev/null $fix >/dev/null 2>&1 || fail "the bumped plugin's fix did not run"
+paste_run "$fix" || fail "the bumped plugin's fix did not run"
 pdoc "$co" --verbose; has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "the bump's fix returns to the pin"
 # A HEAD naming a ref its files do not hold (a reftable store reads so).
+cogd="$co/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo"
 printf 'ref: refs/heads/nowhere\n' > "$co/.git/modules/zsh/plugins/demo/HEAD"
 pdoc "$co" --verbose; expect_rc 0 "doctor, unresolved plugin HEAD"
-has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at: $co/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo/HEAD names refs/heads/nowhere, which its files do not resolve" "doctor notes an unresolved HEAD"
+has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at: $cogd/HEAD names refs/heads/nowhere, which its files do not resolve" "doctor notes an unresolved HEAD"
+# A HEAD naming a path out of refs/ is never followed.
+printf 'ref: refs/../../x\n' > "$co/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$co"; expect_rc 1 "doctor, plugin HEAD naming refs/.."
+has "doctor: plugins: cannot read which commit zsh/plugins/demo is at ($cogd/HEAD names refs/../../x, which is not a ref) - move that directory and its git directory $cogd aside, then run: $co/install.sh install" "a HEAD out of refs/ is refused, with both to move"
+printf '%s\n' "$pin" > "$co/.git/modules/zsh/plugins/demo/HEAD"
 # A non-recursive clone leaves the directory empty: a problem, fixed by install.
 fx clone -q "$co" "$work/co2"
 pdoc "$work/co2"; expect_rc 1 "doctor, plugin not initialized"; one "doctor, plugin not initialized"
@@ -2066,23 +2090,61 @@ rc=0; out="$(GIT_CONFIG_GLOBAL="$work/broken.gitconfig" GIT_CONFIG_PARAMETERS="'
   "$co/install.sh" doctor --verbose 2>&1)" || rc=$?
 expect_rc 1 "doctor, git config unreadable"
 has "doctor: git: not reading the git config: " "an unreadable global config stops the identity checks"
-has "doctor: plugins: note: cannot tell which commit zsh/plugins/demo is at" "the plugin check runs under a broken global config"
+has "doctor: plugins: zsh/plugins/demo is at its pin ${pin:0:12}" "the plugin check runs under a broken global config"
 has "doctor: verdict: 1 problem(s) need action" "the verdict follows the early exit"
-# A gitfile naming a gitdir that is gone: a problem, and its fix works.
+# A gitfile naming a gitdir that is gone: only the directory is moved aside.
 fx -C "$work/co2" submodule update -q --init
 printf 'gitdir: ../../../.git/modules/gone\n' > "$work/co2/zsh/plugins/demo/.git"
 pdoc "$work/co2"; expect_rc 1 "doctor, plugin gitdir gone"; one "doctor, plugin gitdir gone"
 has "doctor: plugins: cannot read which commit zsh/plugins/demo is at ($work/co2/zsh/plugins/demo/../../../.git/modules/gone/HEAD: " "doctor names an unreadable plugin"
-has " - remove that directory, then run: $work/co2/install.sh install" "the unreadable plugin's fix"
-rm -rf "$work/co2/zsh/plugins/demo"
-fx -C "$work/co2" submodule update -q --init || fail "removing the unreadable plugin did not let it initialize again"
+has " - move that directory aside, then run: $work/co2/install.sh install" "the gone gitdir's fix moves the directory only"
+mv "$work/co2/zsh/plugins/demo" "$work/demo.aside1"
+fx -C "$work/co2" submodule update -q --init || fail "moving the unreadable plugin aside did not let it initialize again"
 pdoc "$work/co2"; expect_rc 0 "doctor, plugin initialized again"; [ -z "$out" ] || fail "doctor after the fix: $out"
-# Not a git checkout, even inside a repository: the pins are not listed, and
-# the outer repository is never read in its place.
-fx init -q -b main "$work/outer"; mkcheckout "$work/outer/co3"
-pdoc "$work/outer/co3"; expect_rc 1 "doctor, not a git checkout"; one "doctor, not a git checkout"
-has "doctor: plugins: cannot list the plugin pins of $work/outer/co3 (fatal: not a git repository" "doctor names a checkout that is not one"
-has " - check that it is a git checkout: git -C $work/outer/co3 ls-tree HEAD" "the not-a-checkout fix"
+# A gitdir that exists with a HEAD git cannot use: git reuses that gitdir on
+# init, so the fix moves it aside too, and init then starts afresh.
+gd2="$work/co2/zsh/plugins/demo/../../../.git/modules/zsh/plugins/demo"
+printf 'nonsense\n' > "$work/co2/.git/modules/zsh/plugins/demo/HEAD"
+pdoc "$work/co2"; expect_rc 1 "doctor, plugin HEAD unusable"; one "doctor, plugin HEAD unusable"
+has " - move that directory and its git directory $gd2 aside, then run: $work/co2/install.sh install" "an unusable HEAD's fix moves its gitdir too"
+mv "$work/co2/zsh/plugins/demo" "$work/demo.aside2"; mv "$work/co2/.git/modules/zsh/plugins/demo" "$work/gitdir.aside2"
+fx -C "$work/co2" submodule update -q --init || fail "moving the plugin and its gitdir aside did not let it initialize again"
+pdoc "$work/co2"; expect_rc 0 "doctor, plugin and gitdir initialized again"; [ -z "$out" ] || fail "doctor after the gitdir fix: $out"
+# Not a git checkout, even inside a repository whose path holds a ':' (which
+# no GIT_CEILING_DIRECTORIES entry can express): the pins are not listed, and
+# the outer repository, which pins a plugin, is never read in its place.
+outer="$work/out:er"
+fx init -q -b main "$outer"; fx -C "$outer" update-index --add --cacheinfo "160000,$pin,zsh/plugins/demo"
+fx -C "$outer" commit -qm outer; mkcheckout "$outer/co3"
+pdoc "$outer/co3"; expect_rc 1 "doctor, not a git checkout"; one "doctor, not a git checkout"
+has "doctor: plugins: cannot list the plugin pins of $outer/co3 (fatal: not a git repository: '$outer/co3/.git') - fix what git names, then run doctor again" "doctor names a checkout that is not one, never the outer repository"
+# A repository with no commit yet: HEAD names nothing to list.
+fx init -q -b main "$work/unborn"; mkcheckout "$work/unborn"
+pdoc "$work/unborn"; expect_rc 1 "doctor, unborn HEAD"; one "doctor, unborn HEAD"
+has "doctor: plugins: cannot list the plugin pins of $work/unborn (fatal: " "doctor names an unborn HEAD"
+# A partial clone missing its trees: nothing is read, so nothing is fetched
+# (git before 2.45 ignores GIT_NO_LAZY_FETCH), and the note says so.
+fx clone -q --bare "$co" "$work/super.git"; fx -C "$work/super.git" config uploadpack.allowFilter true
+fx clone -q --no-checkout --filter=tree:0 "file://$work/super.git" "$work/pc"; mkcheckout "$work/pc"
+objects() { find "$work/pc/.git/objects" -type f | LC_ALL=C sort; }
+before="$(objects)"
+pdoc "$work/pc" --verbose; expect_rc 0 "doctor, partial clone"
+has "doctor: plugins: note: $work/pc is a partial clone, where reading the plugin pins could fetch from its remote - not checked" "doctor notes a partial clone"
+[ "$(objects)" = "$before" ] || fail "doctor fetched into a partial clone"
+# Where git honours GIT_NO_LAZY_FETCH (2.45 and later), the runner itself
+# fetches nothing either: ls-tree fails instead of reaching the remote.
+if python3 -c 'import re,sys; m=re.match(r"git version (\d+)\.(\d+)", sys.argv[1]); sys.exit(0 if m and (int(m.group(1)), int(m.group(2))) >= (2, 45) else 1)' "$(git --version)"; then
+  rc=0; out="$(python3 -I -B -c '
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("host_identity", sys.argv[1])
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+pins, err = mod.plugin_pins(sys.argv[2])
+print("pins=%r" % (pins,))' "$module" "$work/pc" 2>&1)" || rc=$?
+  has "pins=None" "ls-tree in a partial clone fails rather than fetching"
+  [ "$(objects)" = "$before" ] || fail "repo_git fetched into a partial clone"
+else
+  echo "SKIP: GIT_NO_LAZY_FETCH (git older than 2.45 ignores it)"
+fi
 ok
 
 # --- --rotate and identity on an opted-out host -------------------------------

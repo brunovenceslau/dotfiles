@@ -692,10 +692,10 @@ do_identity() {
 
 # do_doctor [--verbose] - `install.sh doctor`: lib/host_identity.py's
 # read-only checks (its CHECKS registry): the identity and signing path, and
-# the plugin submodules of this checkout (the --installer path names it). It writes nothing, prints only the
-# problems (every check with --verbose) and returns 1 when it found one. A
-# python3 that does not run is the one problem reported here, since the checks
-# themselves need it.
+# the plugin submodules of this checkout (the --installer path names it). It
+# writes nothing, prints only the problems (every check with --verbose) and
+# returns 1 when it found one. A python3 that does not run is the one problem
+# reported here, since the checks themselves need it.
 do_doctor() {
   if ! _python_ok; then
     log "doctor: python3: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)"

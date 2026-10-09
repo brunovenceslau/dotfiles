@@ -739,14 +739,16 @@ def missing_name_line(host):
 # --- reading files and running tools -----------------------------------------
 
 
-def read_small_file(path):
+def read_small_file(path, nofollow=False):
     """(bytes, None) or (None, reason) for a regular file of at most MAX_FILE.
 
     Opened non-blocking and checked with fstat, so a FIFO or a device named
-    in the config never hangs or feeds the step.
+    in the config never hangs or feeds the step. NOFOLLOW refuses a final
+    symlink too (O_NOFOLLOW), for a file whose place is all that names it.
     """
+    flags = os.O_RDONLY | os.O_NONBLOCK | (os.O_NOFOLLOW if nofollow else 0)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        fd = os.open(path, flags)
     except OSError as e:
         return None, e.strerror
     try:
@@ -976,8 +978,9 @@ def git(args):
 
 
 def repo_git(checkout, args):
-    """Run git inside the framework checkout CHECKOUT, the second and only
-    other way this file runs git; return what _run_git() returns.
+    """Run git on the repository of the framework checkout CHECKOUT, the
+    second and only other way this file runs git; return what _run_git()
+    returns.
 
     git() runs outside every repository and reads the user's global and
     system config, since that config IS what the identity checks judge. This
@@ -985,18 +988,26 @@ def repo_git(checkout, args):
     plugin pins), with the global and system config scrubbed, as install.sh's
     vgit scrubs them, so no user or machine config can steer what it reads,
     and a config.local that blocks (a FIFO) or a git that cannot be kept out
-    of a repository leaves it working. The repository-local environment
-    (GIT_DIR among them), the GIT_CONFIG_* injections and the traces go as in
-    git_env(), and GIT_CEILING_DIRECTORIES names CHECKOUT's parent, so a
-    checkout that is not a repository is said to be one, never a repository
-    around it (a $HOME that is one) read in its place. The checkout's own
+    of a repository leaves it working. The repository-local environment, the
+    GIT_CONFIG_* injections and the traces go as in git_env(); GIT_DIR is
+    then set to CHECKOUT/.git, so git discovers nothing: a checkout that is
+    not a repository is said to be one, and a repository around it (a $HOME
+    that is one) is never read in its place, whatever its path holds (a ':'
+    no ceiling could express, an APFS spelling). GIT_NO_LAZY_FETCH keeps a
+    partial clone from fetching a missing object from its promisor remote
+    (git 2.45 and later honour it; plugin_pins() never reaches ls-tree in a
+    partial clone, so an older git cannot fetch either). The checkout's own
     .git/config still applies: whoever can write it owns the working tree,
-    the same scope as vgit. Only object reads go through here (ls-tree),
-    never a command that runs a filter, a hook or an fsmonitor."""
+    the same scope as vgit. Only config and object reads go through here
+    (config, ls-tree), never a command that runs a filter, a hook or an
+    fsmonitor."""
     env = git_env(os.path.dirname(checkout))
+    del env["GIT_CEILING_DIRECTORIES"]  # no discovery: GIT_DIR is explicit
+    env["GIT_DIR"] = os.path.join(checkout, ".git")
     env["GIT_CONFIG_GLOBAL"] = os.devnull
     env["GIT_CONFIG_SYSTEM"] = os.devnull
     env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_NO_LAZY_FETCH"] = "1"
     env["LC_ALL"] = "C"
     env.pop("LANGUAGE", None)
     return _run_git(args, checkout, env)
@@ -2285,7 +2296,8 @@ def advisory(host):
 # `ssh-keygen`, the checkout's plugin pins through repo_git() and each
 # submodule's HEAD as a file) and records findings. It opens no network
 # connection of its own, though a forwarded agent answers over its SSH
-# session. A check that reads the git config is an identity check (the third
+# session; in a partial clone, where a tree read could fetch, the plugin
+# check reads nothing (partial_clone()). A check that reads the git config is an identity check (the third
 # field of its CHECKS entry): a config.local that is not a regular file, or a
 # git that cannot be kept outside every repository, is reported once and
 # skips those checks only. Each tool runs
@@ -2348,10 +2360,10 @@ def _grouped(lines):
 OBJECT_ID = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
-def _first_line(path):
+def _first_line(path, nofollow=False):
     """(the first line of the small file PATH without its newline, None), or
-    (None, why it cannot be read)."""
-    data, why = read_small_file(path)
+    (None, why it cannot be read). NOFOLLOW as read_small_file() takes it."""
+    data, why = read_small_file(path, nofollow)
     if data is None:
         return None, "%s: %s" % (_shown(path), why)
     return data.split(b"\n", 1)[0].decode("utf-8", "replace").rstrip("\r"), None
@@ -2365,66 +2377,94 @@ UNREADABLE = "unreadable"  # .git, its gitdir or HEAD cannot be read
 
 
 def submodule_commit(path):
-    """(state, commit, why) for the submodule checked out at PATH, read from
-    files alone: its .git (a gitfile naming its gitdir, or the gitdir
-    itself), that gitdir's HEAD, and the ref HEAD names, loose or packed.
-    Never git in the submodule: even `git status` with optional locks and
-    the fsmonitor off runs a clean filter the submodule's config names.
-    STATE is ABSENT, AT (COMMIT is set), UNRESOLVED (a reftable, or another
-    worktree's ref store) or UNREADABLE; WHY says why for the last two."""
+    """(state, commit, why, gitdir) for the submodule checked out at PATH,
+    read from files alone: its .git (a gitfile naming its gitdir, or the
+    gitdir itself), that gitdir's HEAD, and the ref HEAD names, loose or
+    packed, each opened without following a final symlink. Never git in the
+    submodule: even `git status` with optional locks and the fsmonitor off
+    runs a clean filter the submodule's config names. STATE is ABSENT, AT
+    (COMMIT is set), UNRESOLVED (a reftable, or another worktree's ref store)
+    or UNREADABLE; WHY says why for the last two. GITDIR is set only for
+    UNREADABLE, when .git is a gitfile naming a gitdir that exists: git
+    reuses that gitdir when the submodule is initialized again."""
     dotgit = os.path.join(path, ".git")
     try:
         st = os.lstat(dotgit)
     except OSError as e:
         if e.errno == errno.ENOENT:
-            return ABSENT, None, None
-        return UNREADABLE, None, "%s: %s" % (_shown(dotgit), e.strerror)
+            return ABSENT, None, None, None
+        return UNREADABLE, None, "%s: %s" % (_shown(dotgit), e.strerror), None
+    separate = None
     if stat.S_ISDIR(st.st_mode):
         gitdir = dotgit  # a submodule cloned before git absorbed gitdirs
     else:
         line, why = _first_line(dotgit)
         if line is None:
-            return UNREADABLE, None, why
+            return UNREADABLE, None, why, None
         if not line.startswith("gitdir: "):
-            return UNREADABLE, None, "%s does not name a gitdir" % _shown(dotgit)
+            return UNREADABLE, None, "%s does not name a gitdir" % _shown(dotgit), None
         # A relative gitdir is relative to the submodule's directory. Joined,
         # never normalized: the kernel then resolves each `..` the way git does.
         gitdir = os.path.join(path, line[len("gitdir: "):])
+        separate = gitdir if os.path.isdir(gitdir) else None
     head_path = os.path.join(gitdir, "HEAD")
-    head, why = _first_line(head_path)
+    head, why = _first_line(head_path, True)
     if head is None:
-        return UNREADABLE, None, why
+        return UNREADABLE, None, why, separate
     if OBJECT_ID.match(head):
-        return AT, head, None
+        return AT, head, None, None
     if not head.startswith("ref: "):
-        return UNREADABLE, None, "%s is neither a commit nor a ref" % _shown(head_path)
+        return UNREADABLE, None, "%s is neither a commit nor a ref" % _shown(head_path), separate
     ref = head[len("ref: "):]
     if not ref.startswith("refs/") or ".." in ref.split("/") or "\0" in ref:
-        return UNREADABLE, None, "%s names %s, which is not a ref" % (_shown(head_path), _shown(ref))
-    loose, _ = _first_line(os.path.join(gitdir, ref))
+        return UNREADABLE, None, "%s names %s, which is not a ref" % (_shown(head_path), _shown(ref)), separate
+    loose, _ = _first_line(os.path.join(gitdir, ref), True)
     if loose is not None and OBJECT_ID.match(loose.strip()):
-        return AT, loose.strip(), None
-    data, _ = read_small_file(os.path.join(gitdir, "packed-refs"))
+        return AT, loose.strip(), None, None
+    data, _ = read_small_file(os.path.join(gitdir, "packed-refs"), True)
     for record in (data or b"").decode("utf-8", "replace").splitlines():
         parts = record.split(" ")
         if len(parts) == 2 and parts[1] == ref and OBJECT_ID.match(parts[0]):
-            return AT, parts[0], None
-    return UNRESOLVED, None, "%s names %s, which its files do not resolve" % (_shown(head_path), _shown(ref))
+            return AT, parts[0], None, None
+    return (UNRESOLVED, None, "%s names %s, which its files do not resolve" % (_shown(head_path), _shown(ref)),
+            None)
+
+
+# Where the SHA-pinned zsh plugins live: doctor's plugin check reads the
+# gitlinks under this directory only.
+PLUGIN_DIR = "zsh/plugins/"
+# The config keys that make a repository a partial clone: the remote.<name>
+# form git writes today, and the extensions.partialClone older git wrote.
+PARTIAL_CLONE = r"^(extensions\.partialclone|remote\..*\.promisor)$"
+
+
+def partial_clone(checkout):
+    """True when the checkout's repository is a partial clone, where reading
+    a tree it does not hold would fetch it, unless the git is new enough to
+    honour GIT_NO_LAZY_FETCH. Read from its config, which fetches nothing."""
+    rc, out, _ = repo_git(checkout, ["config", "--local", "--get-regexp", PARTIAL_CLONE])
+    if rc != 0:
+        return False
+    for line in out.splitlines():
+        key, _, value = line.partition(" ")
+        if key.startswith("extensions.") or value.lower() not in ("false", "no", "off", "0"):
+            return True
+    return False
 
 
 def plugin_pins(checkout):
-    """(pins, None), pins a list of (path, commit) for every submodule the
-    checkout's HEAD pins, or (None, git's error, unescaped) when git cannot
-    list them. One
-    `git ls-tree` through repo_git()."""
-    rc, out, err = repo_git(checkout, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"])
+    """(pins, None) or (None, git's error, unescaped). PINS lists (path,
+    commit) for each submodule under PLUGIN_DIR that the checkout's HEAD
+    records, read by one `git ls-tree` through repo_git()."""
+    rc, out, err = repo_git(checkout, ["ls-tree", "-z", "--full-tree", "HEAD", "--", PLUGIN_DIR])
     if rc != 0:
         return None, (err or "exit %d" % rc)
     pins = []
     for record in out.split("\0"):
         meta, _, name = record.partition("\t")
         fields = meta.split(" ")
-        if len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit":
+        if (len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit"
+                and name.startswith(PLUGIN_DIR)):
             pins.append((name, fields[2]))
     return pins, None
 
@@ -2697,15 +2737,27 @@ class Doctor(object):
         # files are read in a submodule (submodule_commit()).
         inst = shell_word(self.host.installer)
         checkout = os.path.dirname(os.path.abspath(self.host.installer))
+        if partial_clone(checkout):
+            # An older git ignores GIT_NO_LAZY_FETCH, so even ls-tree could
+            # fetch a missing tree: doctor reads nothing there.
+            self.info("%s is a partial clone, where reading the plugin pins could fetch from its remote - not checked"
+                      % _shown(checkout))
+            return
         pins, err = plugin_pins(checkout)
         if pins is None:
-            self.problem("cannot list the plugin pins of %s (%s) - check that it is a git checkout: git -C %s ls-tree HEAD"
-                         % (_shown(checkout), _shown(err), shell_word(checkout)))
+            self.problem("cannot list the plugin pins of %s (%s) - fix what git names, then run doctor again"
+                         % (_shown(checkout), _shown(err)))
             return
         for path, pin in pins:
-            state, commit, why = submodule_commit(os.path.join(checkout, path))
-            if state == UNREADABLE:
-                self.problem("cannot read which commit %s is at (%s) - remove that directory, then run: %s install"
+            state, commit, why, gitdir = submodule_commit(os.path.join(checkout, path))
+            if state == UNREADABLE and gitdir is not None:
+                # Moved aside, never removed: either may hold the plugin's
+                # own commits. git reuses the gitdir on the next init, so it
+                # goes too.
+                self.problem("cannot read which commit %s is at (%s) - move that directory and its git directory %s aside, then run: %s install"
+                             % (_shown(path), why, _shown(gitdir), inst))
+            elif state == UNREADABLE:
+                self.problem("cannot read which commit %s is at (%s) - move that directory aside, then run: %s install"
                              % (_shown(path), why, inst))
             elif state == ABSENT:
                 # ensure_submodules (`install`) initializes it; `link` never

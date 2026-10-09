@@ -906,9 +906,7 @@ The identity step and `install.sh doctor` live in `lib/host_identity.py`;
    four time zones, and runs the generated differential leg of
    `tests/host_identity_conformance.py` once.
 5. Run `STRICT=1 bash tests/host_identity_test.sh`, then
-   `make local-ci STRICT=1`. The suite runs `doctor` from this checkout, so
-   its plugin submodules must be initialized (`git submodule update
-   --init`), as CI's recursive checkout has them.
+   `make local-ci STRICT=1`.
 
 ## Deferred decisions
 
