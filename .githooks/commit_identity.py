@@ -21,13 +21,14 @@ differs from the effective identity (`git var GIT_AUTHOR_IDENT` and
 `GIT_COMMITTER_IDENT` at push time, so a `git -c user.email=...` on the push
 counts). This is what catches an identity removed from the config before the
 push: the commits made under it still carry it. The commits compared are
-those reachable from a pushed tip but from no remote-tracking ref (of any
-remote) and from no remote oid git names on stdin. A commit already fetched
+those reachable from a pushed tip but from no ref under refs/remotes/ and
+from no remote oid git names on stdin. A commit already fetched
 from a remote passes whoever made it, so merging a fetched default branch
 does not trip on GitHub's own merge commits; one the remote holds under a
-ref never fetched is still compared. Any tracked remote counts, even a
-local repository added as one, so a commit fetched from a scratch clone is
-not compared either. Emails are compared exactly, case included, so a
+ref never fetched is still compared. Any ref under refs/remotes/ counts,
+whether or not a remote is configured for it, so a commit fetched from a
+fork, from a local scratch clone, or written there by hand is not
+compared. Emails are compared exactly, case included, so a
 case-only difference refuses. A foreign author is refused on
 purpose: `git push --no-verify` is the escape for a reviewed commit made by
 someone else. While a config refusal stands the commits are not compared:
@@ -325,7 +326,8 @@ def commit_refusals(gdir, stdin):
             lines.append("commit %s has %s email %s, not the effective %s"
                          % (oid, role, quoted(email), quoted(effective)))
     if more:
-        lines.append("and %d more commits whose email differs" % more)
+        lines.append("and %d more commit%s whose email differs"
+                     % (more, "" if more == 1 else "s"))
     return lines
 
 

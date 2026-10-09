@@ -170,5 +170,35 @@ code, text, _ = run_with(lambda: mod.ident_email("/g", "GIT_AUTHOR_IDENT"),
 check(code == 2 and text.rstrip().endswith("exit 128): fatal: no"),
       "ident_email(): a failing git var exits 2 with its last line")
 
+# commit_refusals(): the cap boundary and the exact compare, with
+# pushed_commits() and ident_email() stubbed.
+def refusals_for(commits):
+    real = mod.pushed_commits, mod.ident_email
+    mod.pushed_commits = lambda *_a: commits
+    mod.ident_email = lambda *_a: "g@x"
+    try:
+        return mod.commit_refusals("/g", b"")
+    finally:
+        mod.pushed_commits, mod.ident_email = real
+
+
+def foreign(n):
+    return [("%040x" % i, "g@x", "c@x") for i in range(n)]
+
+
+cap = mod.MAX_COMMITS
+got = refusals_for(foreign(cap))
+check(len(got) == cap and not any("more commit" in g for g in got),
+      "commit_refusals(): exactly the cap gives no count line")
+got = refusals_for(foreign(cap + 1))
+check(len(got) == cap + 1 and got[-1] == "and 1 more commit whose email "
+      "differs", "commit_refusals(): one past the cap counts 1 more commit")
+got = refusals_for(foreign(cap + 2))
+check(got[-1] == "and 2 more commits whose email differs",
+      "commit_refusals(): two past the cap counts 2 more commits")
+got = refusals_for([(A40, "G@x", "g@x")])
+check(got == ["commit %s has author email 'G@x', not the effective 'g@x'"
+              % A40], "commit_refusals(): a case-only difference refuses")
+
 print("commit_identity_units: %d failure(s)" % len(failures))
 sys.exit(1 if failures else 0)

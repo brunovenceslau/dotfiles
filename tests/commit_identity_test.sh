@@ -463,6 +463,25 @@ fi
   || fail "20 commit lines, then one line counting the other 5: $(err)"
 ok "pre-push names the first 20 offending commits and counts the rest"
 
+# docs/development.md states the cap; hold it to MAX_COMMITS.
+cap="$(sed -n 's/^MAX_COMMITS = \([0-9][0-9]*\)$/\1/p' "$repo_root/.githooks/commit_identity.py")"
+[ -n "$cap" ] || fail "commit_identity.py no longer sets MAX_COMMITS = <n>"
+# tr joins the wrapped lines; grep -c drains its input (no SIGPIPE).
+[ "$(tr '\n' ' ' < "$repo_root/docs/development.md" \
+  | grep -cF "The first $cap offending commits")" -ge 1 ] \
+  || fail "docs/development.md must state the cap of $cap offending commits"
+ok "the cap docs/development.md states matches MAX_COMMITS"
+
+# Any ref under refs/remotes/ counts as published, configured remote or not:
+# pinned, so a change to that rule is a decision, not a side effect.
+git -C "$r" checkout -q -b byhand main
+GIT_AUTHOR_EMAIL=hand@x try_commit "$r" || fail "fixture: the hand@x commit was refused: $(err)"
+git -C "$r" update-ref refs/remotes/nobody/x HEAD
+git -C "$r" push -q origin byhand 2>"$work/err" \
+  || fail "pre-push: a commit under a hand-made refs/remotes/ ref is not compared: $(err)"
+git -C "$r" update-ref -d refs/remotes/nobody/x
+ok "a commit a hand-made refs/remotes/ ref reaches is not compared"
+
 # A commit already on a remote passes, whoever made it, and so does a merge
 # of it; a merge commit made under another identity is refused.
 # fetch and reset, not pull: a pull would merge other's diverged main as a
