@@ -179,19 +179,25 @@ optout_reads_false() { # $1 = one commented line; 0 when git would read it as fa
   printf '[commit]\n\t%s\n' "$body" > "$shapes"
   [ "$(git config --file "$shapes" --type=bool commit.gpgsign 2>/dev/null)" = false ]
 }
+# No fixture may pin a spelling whose meaning varies by platform: the oracle
+# follows the HOST's git, and git parses an integer with strtoimax (base 0) plus
+# its own k/m/g suffix and quote handling. Base-0 hex and octal (0x0, 00), signs
+# and leading blanks are C89 and portable; the suffixes and quotes are git's own
+# code. A binary prefix (0b0) is C23 only (glibc reads it, macOS libc does not),
+# so it is deliberately absent.
 catch_n=0
 for line in '# gpgsign = false' '#commit.gpgsign=no' '; gpgsign = false' ';	commit.gpgsign = off' \
   '# gpgsign = false # trailing' '# gpgsign = false ; trailing' '# gpgsign =' '; commit.gpgsign =  ' \
   '# gpgsign = "false"' '# gpgsign = 0 # x' '# gpgsign = 00' '; gpgsign = -0' '# gpgsign = +0' \
   '# gpgsign = 0x0' '# gpgsign = 0k' '# gpgsign = 0G' '# gpgsign = 00m' '# gpgsign = ""' \
   '   # gpgsign = false' '## gpgsign = false' ';; commit.gpgsign = no' \
-  '# gpgsign = 0b0' '# gpgsign = fal"se"' '# gpgsign = n"o"' '# gpgsign = " 0"' '# gpgsign = false\' \
+  '# gpgsign = fal"se"' '# gpgsign = n"o"' '# gpgsign = " 0"' '# gpgsign = false\' \
   '# GpgSign = FALSE' '# Commit.GPGSign = Off'; do
   catch_n=$((catch_n + 1))
   optout_reads_false "$line" && r=1 || r=0
   ck "the oracle flags the opt-out: $line" "$r" "1"
 done
-ck "the must-catch fixtures are all present" "$catch_n" "28"
+ck "the must-catch fixtures are all present" "$catch_n" "27"
 ignore_n=0
 for line in '# gpgsign = true' '; commit.gpgsign = true # off' '# tag.gpgsign = false' '# Leave gpgsign off' \
   '# gpgsign = 1' '# gpgsign = 0x1' '# gpgsign = 10' '# gpgsign = 0k1' '# gpgsign' '# gpgsign = yes'; do
