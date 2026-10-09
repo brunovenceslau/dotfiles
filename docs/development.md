@@ -468,7 +468,8 @@ link-convention change.
   case. A root-absolute path (`/docs/x.md`) fails too. A `?query` is dropped
   before resolving.
 - A full or collapsed reference link (`[text][ref]`, `[text][]`) must have a
-  definition in the same file. A shortcut `[ref]` is not checked, since it
+  definition in the same file. A backslash-escaped bracket (`\]`) does not
+  end link text or a label. A shortcut `[ref]` is not checked, since it
   cannot be told apart from bracketed prose.
 - An `#anchor` into a Markdown file must match a heading under GitHub's slug
   rule: the rendered text, lowercased, with punctuation dropped and each space
@@ -483,10 +484,12 @@ link-convention change.
   of the file when never closed, as GitHub renders them), indented code blocks
   and inline code spans are not prose, so a link inside one is ignored. Front
   matter that never closes is prose, since GitHub renders its `---` as a rule.
-  An HTML `href` or `src` may be double- or single-quoted. A link whose
+  An HTML `href` or `src` may be double- or single-quoted, and a `>` inside
+  a quoted attribute value does not end the tag. A link whose
   text wraps across lines is still found, and a CRLF file reads exactly like
   its LF twin. A link destination may hold balanced parentheses (up to 3
-  levels deep) and backslash escapes, or be written `<...>` with spaces. An
+  levels deep) and backslash escapes, or be written `<...>` with spaces, and
+  its title may be double- or single-quoted or in parentheses. An
   inline link whose destination runs past 2048 characters is not read as a
   link. Every other URL scheme is out of scope, since the gate
   never touches the network.

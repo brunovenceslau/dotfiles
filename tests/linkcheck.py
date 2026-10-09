@@ -15,11 +15,13 @@ same tracked set:
 
   - the target of an inline link `[text](path#anchor)`, an image, a
     reference definition `[ref]: path`, and the `href` or `src` of an HTML
-    `<a>` or `<img>` tag (double- or single-quoted) must name a tracked
+    `<a>` or `<img>` tag (double- or single-quoted; a `>` inside a quoted
+    value does not end the tag, a blank line does) must name a tracked
     file, or a directory holding one, inside ROOT. A Markdown destination
     is read the CommonMark way: balanced parentheses (3 levels deep),
     backslash escapes of ASCII punctuation (undone before resolving), or
-    the `<...>` form, which may hold spaces. An inline link's
+    the `<...>` form, which may hold spaces; a title may follow, double-
+    or single-quoted or in parentheses. An inline link's
     destination is read up to 2048 characters: a longer one is not a link
     to this gate (no file name in a git tree comes close). An untracked
     file on this machine does not count: GitHub
@@ -29,7 +31,8 @@ same tracked set:
     `?query` is dropped before resolving;
   - a full or collapsed reference link, `[text][ref]` or `[text][]`, must have
     a matching definition in the same file (labels compared case-folded, with
-    whitespace collapsed). A shortcut `[ref]` is not checked: it cannot be told
+    whitespace collapsed). A backslash-escaped bracket does not end link
+    text or a label. A shortcut `[ref]` is not checked: it cannot be told
     apart from bracketed prose;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
@@ -58,7 +61,8 @@ destination's scan at 3 later openers, since each brings an unclosed
 parenthesis and a 4th level ends the destination)
 or stops at the next opener of its kind; everything else is a str.find loop
 or a lookup built in one pass. An HTML attribute value is read up to its
-closing quote by str.find, so it has no length cap.
+closing quote by str.find, within its paragraph, so it has no length
+cap; html_targets says why an unclosed one costs at most two such scans.
 
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
@@ -118,30 +122,39 @@ _DEST_ANGLE = r"<([^<>\n]*)>"
 # Either form is read with its escapes undone (md_dest), as the renderer
 # reads it: `a\(b.md` names the file `a(b.md`.
 MD_ESCAPE = re.compile(r"\\(" + _PUNCT + ")")
+# A bracket escaped by a backslash (`\]`) neither opens nor closes link text
+# or a label; `\\` is an escaped backslash, so the bracket after it counts.
+# Every alternative starts on its own character (in TEXT, a lookahead splits
+# the two backslash forms), so a string splits into units one way only.
+_LABEL_CHAR = r"(?:[^\[\]\\]|\\[\s\S])"
 # [text](dest "title"): text may wrap across lines (never across a blank
 # line) and may hold one level of nested brackets, which covers an image
-# inside a link (a badge). The destination is either form above, captured
+# inside a link (a badge). The title is double-quoted, single-quoted or
+# parenthesized, each bounded. The destination is either form above, captured
 # as group 2 (`<...>`, without its brackets) or 3 (bare). The bare form is
 # ATOMIC (a lookahead captures it, a backreference consumes it, so it is
 # never backtracked into): nothing it could give back would let the match
 # succeed, since a destination never ends where a dest character follows.
 # Neither form is bounded by the regex; check_file skips a destination over
 # DEST_MAX characters, as the bounded class it replaces did.
-TEXT = r"((?:[^\[\]\n]|\n(?![ \t]*\n)|\[[^\[\]]*\])*)"
+TEXT = (r"((?:[^\[\]\\\n]|\\[^\n]|\\(?=\n)|\n(?![ \t]*\n)|\["
+        + _LABEL_CHAR + r"*\])*)")
 LINK = re.compile(r"(?<!\\)\[" + TEXT + r"\]\(\s*(?:" + _DEST_ANGLE + r"|(?=(" + _DEST_BARE + r"))\3)"
-                  r"(?:\s+\"[^\"]{0,2048}\")?\s*\)")
+                  r"(?:\s+(?:\"[^\"]{0,2048}\"|'[^']{0,2048}'|\([^()]{0,2048}\)))?\s*\)")
 DEST_MAX = 2048
-REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[([^\[\]]*)\]")
+REFLINK = re.compile(r"(?<![\\\]])\[" + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]")
 # A definition's label holds no unescaped bracket and at most 999 characters
 # (CommonMark): unbounded, each line opening with `[` scanned the rest of the
-# file for a `]`.
-REFDEF = re.compile(r"^ {0,3}\[([^\[\]]{1,999})\]:[ \t]*<?(\S+?)>?(?:[ \t].*)?$", re.M)
-# An `<a` or `<img` tag opener; its attributes are read up to the tag's own
-# `>` (found with str.find, so an unclosed tag costs one scan, not one per
-# opener). HTML_ATTR finds where an href or src value opens, and str.find
-# its closing quote (double or single) inside the tag.
+# file for a `]`. Its destination is either form, as in LINK: group 2 holds
+# a `<...>` one (spaces allowed), group 3 a bare one.
+REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:" + _DEST_ANGLE
+                    + r"|((?!<)\S+))(?:[ \t].*)?$", re.M)
+# An `<a` or `<img` tag opener. html_targets walks its attributes with
+# TAG_STOP, which finds the next `>` or the next `=` opening a quoted value
+# (group 1 set when that value is an href or src, group 2 its quote); a
+# `>` inside a quoted value does not close the tag.
 HTML_TAG = re.compile(r"<(?:a|img)(?=[\s>/])", re.I)
-HTML_ATTR = re.compile(r"\s(?:href|src)\s*=\s*([\"'])", re.I)
+TAG_STOP = re.compile(r">|(\s(?:href|src)\s*)?=\s*([\"'])", re.I)
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
@@ -510,6 +523,43 @@ class Lines:
         return bisect.bisect_left(self.nl, offset) + 1
 
 
+def html_targets(text):
+    """(offset, value) of every href and src in an `<a>` or `<img>` tag.
+    A tag ends at the first `>` outside a quoted value, within its
+    paragraph: inline HTML never crosses a blank line, and a tag that does
+    not close there is text, not a tag. Linear: an opener inside a tag, or
+    inside the stretch a failed scan crossed, is not scanned again. The
+    cost: an opener that a failed scan read as part of a quoted value is
+    never tried on its own, which only matters after a tag that never
+    closes (broken HTML). Once a quote never closes in a paragraph, no later
+    opener there holds that quote, so each paragraph pays at most two such
+    scans to its end."""
+    ends = [m.start() for m in BLANK_LINE.finditer(text)] + [len(text)]
+    out, skip = [], -1
+    for m in HTML_TAG.finditer(text):
+        if m.start() < skip:
+            continue
+        stop = ends[bisect.bisect_left(ends, m.start())]
+        pos, found = m.end(), []
+        while True:
+            a = TAG_STOP.search(text, pos, stop)
+            if not a:
+                skip = stop   # no `>` left in the paragraph for any opener
+                break
+            if a.group() == ">":
+                out.extend(found)
+                skip = a.end()
+                break
+            close = text.find(a.group(2), a.end(), stop)
+            if close < 0:
+                skip = a.end()   # an unclosed quote: not a tag
+                break
+            if a.group(1):
+                found.append((a.end(), text[a.end():close]))
+            pos = close + 1
+    return out
+
+
 def check_file(tree, rel):
     raw = read_text(tree.root, rel)
     line_of = Lines(raw).of
@@ -535,26 +585,10 @@ def check_file(tree, rel):
     labels = set()
     for m in REFDEF.finditer(code_free):
         labels.add(ref_label(m.group(1)))
-        targets.append((m.start(2), m.group(2), md_dest(m.group(2))))
-    gt = -1
-    for m in HTML_TAG.finditer(code_free):
-        if m.start() < gt:
-            continue   # inside the previous tag, so an attribute, not a tag
-        gt = code_free.find(">", m.end())
-        if gt < 0:
-            break   # no later tag can close either
-        pos = m.end()
-        while True:
-            a = HTML_ATTR.search(code_free, pos, gt)
-            if not a:
-                break
-            close = code_free.find(a.group(1), a.end(), gt)
-            if close < 0:
-                pos = a.end()   # unclosed inside the tag: not a value; look on
-                continue
-            value = code_free[a.end():close]
-            targets.append((a.end(), value, value))
-            pos = close + 1
+        g = 2 if m.group(2) is not None else 3
+        targets.append((m.start(g), m.group(g), md_dest(m.group(g))))
+    for off, value in html_targets(code_free):
+        targets.append((off, value, value))
     for m in REFLINK.finditer(code_free):
         label = m.group(2) if m.group(2).strip() else m.group(1)
         if ref_label(label) not in labels:

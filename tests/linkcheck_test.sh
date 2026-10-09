@@ -401,6 +401,54 @@ expect_broken README.md 'See [x](docs/gone_(b).md).' \
 expect_broken README.md 'See [x](<docs/gone file.md>).' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
   "a broken <...> destination holding a space is checked"
+# Forms that hid a link before: a single-quoted or parenthesized title, a
+# `>` inside a quoted HTML attribute before the href, an escaped `]` in a
+# reference label (full, collapsed and in the definition), and a `<...>`
+# definition holding a space. Each resolves here, and each is reported
+# when broken (below).
+new_tree
+printf '# Space\n' >"$work/r/docs/sp ace.md"
+cat >"$work/r/docs/forms.md" <<'MD'
+# Forms
+
+[1](guide.md 'single') [2](guide.md (paren)) [3](guide.md "double")
+<a title="x>y" href="guide.md#tail">4</a> <img alt='a>b' src="guide.md">
+A [full][a\]b], a [c\]d][] and a [spaced one][sp].
+
+[a\]b]: guide.md#setup
+[c\]d]: #forms
+[sp]: <sp ace.md> "title"
+MD
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "titles, a quoted '>' before an href, escaped label brackets and a <...> definition must resolve (exit $rc): $out"
+ok "single-quoted and parenthesized titles, a quoted '>' in a tag, an escaped ']' in a label and a spaced <...> definition resolve"
+expect_broken README.md "See [x](docs/gone.md 'title')." \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a link with a single-quoted title is checked"
+expect_broken README.md 'See [x](docs/gone.md (title)).' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a link with a parenthesized title is checked"
+expect_broken README.md '<a title="x>y" href="docs/gone.md">x</a>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "an href after a quoted attribute holding '>' is checked"
+expect_broken README.md "<img alt='a>b' src='docs/gone.png'>" \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.png$' \
+  "a single-quoted src after a quoted attribute holding '>' is checked"
+expect_broken README.md 'See [x][a\]b].
+
+[a\]b]: docs/gone.md' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone\.md$' \
+  "a definition whose label holds an escaped ']' is checked"
+expect_broken README.md 'See [x][no\]def].' \
+  'no such reference definition in this file: \[no\\\]def\]' \
+  "a full reference whose label holds an escaped ']' needs a definition"
+expect_broken README.md 'See [no\]def][].' \
+  'no such reference definition in this file: \[no\\\]def\]' \
+  "a collapsed reference whose text holds an escaped ']' needs a definition"
+expect_broken README.md '[sp]: <docs/gone file.md>' \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/gone file\.md$' \
+  "a <...> definition holding a space is checked whole"
 # The pattern spells the 2100 x's out: an interval such as x{2100} is past
 # RE_DUP_MAX (255) on BSD regex, so macOS grep cannot match it.
 long_stem="$(printf 'x%.0s' $(seq 1 2100))"; long_name="$long_stem.md"
@@ -450,6 +498,23 @@ shapes = {
     "h19.md": "# ![a](" + " " * n + "x",
     "h20.md": "# [a](x " + " " * n + '"',
     "h21.md": "# [a](" + "(x" * (n // 2),
+    # Body destinations: balanced and unclosed parentheses, angle openers,
+    # backslashes and every title form; `[a](<` once took 2 s at 200 KB.
+    "h22.md": "[a](<" * (n // 4),
+    "h23.md": "[a](x(y)" * (n // 8),
+    "h24.md": "[a](x" + "(y)" * (n // 3),
+    "h25.md": "[a](x(y(z(" * (n // 10),
+    "h26.md": "[a](\\" * (n // 5),
+    "h27.md": "[a](x 'y [a](x (y " * (n // 18),
+    # Escaped brackets in link text, labels and definitions.
+    "h28.md": "[\\" * (n // 2),
+    "h29.md": "[a][b\\]" * (n // 7),
+    "h30.md": "[b\\]]: x\n" * (n // 8),
+    # Tags whose quoted values hold `>`, or never close, or never open.
+    "h31.md": '<a t=">"' * (n // 8),
+    "h32.md": "<a t='" * (n // 6),
+    "h33.md": "<a t=\"x' " * (n // 9),
+    "h34.md": "<a =" + " " * n + "x",
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -464,7 +529,7 @@ bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
-ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, in prose and headings) finishes in bounded time"
+ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, in prose and headings) finishes in bounded time"
 
 # --- Fails closed ---------------------------------------------------------------
 rm -rf "$work/plain"; mkdir -p "$work/plain"
