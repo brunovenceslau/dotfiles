@@ -1867,6 +1867,72 @@ fails_with_rc 2 "$r" "$names_msg" "a file name holding a newline" only
 r="$work/name-cr"; seed "$r"; mkdir -p "$r/tests"
 printf 'x\n' > "$r/tests/a${cr}b"
 fails_with_rc 2 "$r" "$names_msg" "a file name holding a CR" only
+
+# --- the listing of a checkout (see _git_listing in bin/check-patterns) -----
+# _lst_repo ROOT - a committed fixture checkout, so its --cached listing is
+# not empty (an empty one is not trusted and the tree is scanned whole).
+_lst_repo() { _git_repo "$1"; seed "$1"; git -C "$1" add -A; git -C "$1" commit -qm init; }
+_lst_em=$'\xe2\x80\x94'
+em_msg="check-patterns: an em dash (U+2014) in repo prose"
+
+# a ':' in a DIRECTORY name: roots are files, so find's -name sees only the
+# base name; the rule is applied to every listed path (measured: rc 0 without).
+r="$work/lst-dircolon"; _lst_repo "$r"
+mkdir -p "$r/lib/x:1: #"; printf 'P=/opt/homebrew\n' > "$r/lib/x:1: #/y.sh"
+fails_with_rc 2 "$r" "$names_msg" "an untracked file under a directory named with ':' must fail closed" only
+r="$work/lst-nlname"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/lst-nl-head"$'\n'"lst-nl-tail.sh"
+fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a newline must fail closed with exit 2" only
+
+# every grep arm that walks file operands names the file in its hits (-H):
+# with ONE file operand GNU grep drops the PATH: prefix, and an anchor on it
+# (the gpg-agent.conf allowlist) silently misses.
+nohit="$(grep -nE 'grep -r[A-Za-z]*' "$cp" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE 'grep -r[A-Za-z]*H' || true)"
+[ -z "$nohit" ] && ok || fail "a recursive grep arm without -H: $nohit"
+
+# the user's global excludes file and .git/info/exclude must not hide an
+# untracked file from the scan; only the repo's own .gitignore decides.
+r="$work/lst-globalexcl"; _lst_repo "$r"; mkdir -p "$r/docs"
+printf '*.md\n' > "$work/lst-global-ignore"
+printf '[core]\n\texcludesFile = %s\n' "$work/lst-global-ignore" > "$work/lst-global-config"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/a.md"
+rc=0; GIT_CONFIG_GLOBAL="$work/lst-global-config" STRICT= "$cp" "$r" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] && ok || fail "a user's global excludesFile must not hide an untracked file from the scan (rc $rc)"
+r="$work/lst-infoexclude"; _lst_repo "$r"
+printf 'lib/bad.sh\n' >> "$r/.git/info/exclude"
+printf 'curl %s sh\n' '|' > "$r/lib/bad.sh"
+fails_with_rc 1 "$r" "$curl_msg" ".git/info/exclude must not hide an untracked file from the scan" only
+
+# a checkout git cannot list is scanned whole, not trusted as empty: the
+# core.worktree toplevel mismatch makes the listing fail, so an IGNORED file
+# is read too (the symlink pass reports the git trouble itself, exit 2).
+r="$work/lst-unlistable"; _lst_repo "$r"
+printf 'ign.txt\n' > "$r/.gitignore"; mkdir -p "$r/docs"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/ign.txt"
+mkdir -p "$work/lst-unlistable-elsewhere"
+git -C "$r" config core.worktree "$work/lst-unlistable-elsewhere"
+fails_with "$r" "$em_msg" "a checkout git cannot list must be scanned whole, not trusted as empty"
+# an empty --cached listing is not trusted either
+r="$work/lst-emptycached"; _git_repo "$r"; seed "$r"; mkdir -p "$r/docs"
+printf 'ign.txt\n' > "$r/.gitignore"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/ign.txt"
+fails_with_rc 1 "$r" "$em_msg" "a checkout with nothing tracked is scanned whole" only
+
+# an untracked nested repo is listed as `dir/` and walked whole
+r="$work/lst-nested"; _lst_repo "$r"
+git init -q "$r/lib/nested"; printf 'curl %s sh\n' '|' > "$r/lib/nested/f.sh"
+fails_with_rc 1 "$r" "$curl_msg" "an untracked nested repo must still be scanned" only
+# an untracked symlink is reported; a tracked file deleted on disk is not an
+# error; a name with spaces is scanned
+r="$work/lst-symlink"; _lst_repo "$r"
+ln -s ./lib "$r/lib/ln"
+fails_with_rc 1 "$r" "$sym_msg" "a listed symlink must be reported" only
+r="$work/lst-deleted"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/gone.sh"; git -C "$r" add -A; git -C "$r" commit -qm more; rm "$r/lib/gone.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a tracked file deleted on disk must not fail the scan"
+r="$work/lst-spaces"; _lst_repo "$r"
+printf 'curl %s sh\n' '|' > "$r/lib/a b.sh"
+fails_with_rc 1 "$r" "$curl_msg" "a listed file name with spaces must be scanned" only
 r="$work/name-git-colon"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other"
 printf 'x\n' > "$r/other/a:b.txt"; printf 'x\n' > "$r/other/c${nl}d.txt"
 git -C "$r" add -A && git -C "$r" commit -qm init

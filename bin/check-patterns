@@ -378,38 +378,61 @@ _scan_roots() {
 #     not pass on the strength of an empty list; and `_git_symlink_pass`
 #     below, which meets the same git trouble, is what reports it and fails
 #     closed (exit 2) with its own message.
-#   - `-c core.excludesFile=/dev/null`: only the repo's own ignore files
-#     decide, never the user's global one, so two machines read one surface.
+#   - `--exclude-per-directory=.gitignore`, NOT `--exclude-standard`: only the
+#     repo's own .gitignore files decide. `.git/info/exclude` and the user's
+#     global excludes file are local to one machine, and either could hide a
+#     file from the gate there that CI would still flag. ACCEPTED RESIDUAL: an
+#     uncommitted edit of a .gitignore hides what it names until that edit is
+#     committed; the .gitignore is a tracked file and is reviewed as one.
+#     `-c core.excludesFile=/dev/null` is belt and braces for the same.
 #     `-c core.fsmonitor=false` and the unset of git's local env vars are the
 #     same hardening _git_symlink_pass documents below (that pass stays the
 #     one that polices symlinks and gitlinks repo-wide).
+#   - A checkout whose `--cached` listing is empty is not trusted: no real
+#     checkout of this repo lists nothing, so the directory is scanned whole.
 #   - A listed symlink never becomes a grep operand (GNU grep -r follows a
 #     command-line one): it goes to `scan_links`, which only find reads, as a
 #     symlink met while walking a directory always did.
-#   - A listed path that is not a file on disk (deleted but still tracked, a
-#     gitlink, a nested repo) is skipped: there is nothing to read.
+#   - A listed DIRECTORY (an untracked nested repo, listed as `dir/`, or a
+#     gitlink) is handed to the arms as a directory root, walked whole as
+#     before: git does not list inside it, and skipping it would scan less.
+#   - A listed path that is not a file or directory on disk (deleted but still
+#     tracked) is skipped: there is nothing to read.
+#   - A listed path holding `:`, LF or CR in ANY component (`lib/x:1: #/y.sh`)
+#     fails closed (exit 2) with arm 12's file-name message: roots are files
+#     now, so find's `-name` would only ever test the base name, and every arm
+#     reads a hit as PATH:NN:. Such a file is not added to `roots`.
 #   - bin/check-patterns itself stays out of the list: every recursive arm
-#     excludes it by base name, which GNU grep applies to a directory walk
-#     and BSD grep may not apply to a file operand.
+#     excludes it by base name. Whether BSD grep applies --exclude to a FILE
+#     operand is UNVERIFIED here (no macOS grep source or manual was read);
+#     the design does not depend on it, because the file is simply not an
+#     operand.
 has_git=0
 { [ -e "$root/.git" ] || [ -L "$root/.git" ]; } && has_git=1
 git_listed=0
 git_files=()
 scan_links=()
+listed_names=""   # %q-quoted listed paths with ':', LF or CR; see _name_pass
 _git_listing() {
   local lev_rc=0 ls_rc=0 top v f
   local -a env_args=()
   command -v git >/dev/null 2>&1 || return 1
   git rev-parse --local-env-vars >"$cp_tmp/ls-env" 2>/dev/null || lev_rc=$?
-  { [ "$lev_rc" -eq 0 ] && grep -qx GIT_DIR "$cp_tmp/ls-env" 2>/dev/null; } || return 1
+  # Both, as _git_symlink_pass requires: a git too old to list one of them
+  # cannot be trusted to have been scrubbed.
+  { [ "$lev_rc" -eq 0 ] && grep -qx GIT_DIR "$cp_tmp/ls-env" 2>/dev/null \
+      && grep -qx GIT_INDEX_FILE "$cp_tmp/ls-env" 2>/dev/null; } || return 1
   while IFS= read -r v; do
     [ -z "$v" ] || env_args+=(-u "$v")
   done <"$cp_tmp/ls-env"
   top=$(env ${env_args[@]+"${env_args[@]}"} git -C "$root" -c core.fsmonitor=false rev-parse --show-toplevel 2>/dev/null) || return 1
   [ "$top" -ef "$root" ] || return 1
   env ${env_args[@]+"${env_args[@]}"} git -C "$root" -c core.fsmonitor=false -c core.excludesFile=/dev/null \
-    ls-files -z --cached --others --exclude-standard >"$cp_tmp/ls-list" 2>"$cp_tmp/ls-list.err" || ls_rc=$?
+    ls-files -z --cached --others --exclude-per-directory=.gitignore >"$cp_tmp/ls-list" 2>"$cp_tmp/ls-list.err" || ls_rc=$?
   { [ "$ls_rc" -eq 0 ] && [ ! -s "$cp_tmp/ls-list.err" ]; } || return 1
+  env ${env_args[@]+"${env_args[@]}"} git -C "$root" -c core.fsmonitor=false \
+    ls-files -z --cached >"$cp_tmp/ls-cached" 2>"$cp_tmp/ls-cached.err" || ls_rc=$?
+  { [ "$ls_rc" -eq 0 ] && [ ! -s "$cp_tmp/ls-cached.err" ] && [ -s "$cp_tmp/ls-cached" ]; } || return 1
   while IFS= read -r -d '' f; do
     git_files+=("$root/$f")
   done <"$cp_tmp/ls-list"
@@ -429,6 +452,16 @@ _add_root() {
       "$d"/*) ;;
       *) continue ;;
     esac
+    case "$f" in
+      *:* | *$'\n'* | *$'\r'*)
+        printf -v l '%q' "$f"
+        # once per path: lib/ is a root of several arms
+        case $'\n'"$listed_names" in
+          *$'\n'"$l"$'\n'*) ;;
+          *) listed_names="$listed_names$l"$'\n' ;;
+        esac
+        continue ;;
+    esac
     if [ -L "$f" ]; then
       dup=0
       for l in ${scan_links[@]+"${scan_links[@]}"}; do
@@ -437,6 +470,8 @@ _add_root() {
       [ "$dup" -eq 1 ] || scan_links+=("$f")
     elif [ -f "$f" ]; then
       roots+=("$f")
+    elif [ -d "$f" ]; then
+      roots+=("${f%/}")
     fi
   done
 }
@@ -807,7 +842,7 @@ _re_escape() {
 # would exempt a decoy file elsewhere ending in the same segments (e.g.
 # tests/config/gnupg/gpg-agent.conf) too - fail OPEN.
 _gpg_agent_path=$(_re_escape "$root/config/gnupg/gpg-agent.conf")
-if out=$(grep -rna --exclude=check-patterns \
+if out=$(grep -rHna --exclude=check-patterns \
     -F '/opt/homebrew' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" \
     | _code_hits '/opt/homebrew' '(/opt/homebrew[^[:space:]]*[[:space:]]+/usr/local|/usr/local[^[:space:]]*[[:space:]]+/opt/homebrew)')
@@ -834,7 +869,7 @@ fi
 # openssl@3` asks where a FORMULA lives, which is a different question this rule has
 # no answer for, and flagging it would offer a remedy that does not apply. Every other
 # brew call is untouched - lib/packages.sh's `brew bundle` is how packages install.
-if out=$(grep -rna --exclude=check-patterns \
+if out=$(grep -rHna --exclude=check-patterns \
     -E 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))' "${scan[@]}" 2>&1); then
   viol=$(printf '%s\n' "$out" | _code_hits 'brew[[:space:]]+(shellenv|--prefix([[:space:]]*$|[[:space:]]*[^[:alnum:][:space:]_./@-]))')
   if [ -n "$viol" ]; then
@@ -1226,8 +1261,9 @@ fi
 # directory, so one there hides its target from every arm that walks past it.
 #
 # SURFACE: `prose`, arm (11)'s own surface (the widest above) - a single
-# source, not a fourth hand-kept list - plus `scan_links`, the symlink
-# entries of zsh/ that _scan_roots kept away from the grep arms. It holds no
+# source, not a fourth hand-kept list - plus `scan_links`, the symlinks that
+# _scan_roots kept away from the grep arms: those of zsh/ and every listed
+# symlink of a checkout (see _git_listing). It holds no
 # pinned zsh/plugins directory (_scan_roots left it out), so find never walks
 # it either; a symlinked zsh/plugins is one of `scan_links` and is reported.
 #
@@ -1376,6 +1412,13 @@ _name_pass() {
 }
 _name_pass "$names_msg" "" -name '*:*' -o -name "*$nl*" -o -name "*$cr*"
 names_found="$name_out"
+# Listed paths whose DIRECTORY part holds the bad character (see _git_listing):
+# find only sees the base name of a file root.
+if [ -n "$listed_names" ]; then
+  _err "${listed_names%"$nl"}" "$names_msg"
+  fatal=1
+  names_found="$names_found${names_found:+$nl}${listed_names%"$nl"}"
+fi
 _name_pass "$stray_msg" "$root/bin/check-patterns" -name check-patterns ! -type d
 stray_found="$name_out"
 
