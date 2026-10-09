@@ -1425,17 +1425,42 @@ printf '#!/bin/sh\nexit 1\n' > "$work/nopy/python3"; chmod u+x "$work/nopy/pytho
 rc=0; out="$(PATH="$work/nopy" "$installer" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable"
 has "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $installer identity)" "python3 unusable names the full installer path"
-# A checkout path is untrusted text: one holding an ESC byte prints it as
-# \x1b, a backslash doubled, so it cannot rewrite the terminal. The real
-# directory is pwd -P'd by install.sh, so it is made, not symlinked.
-escdir="$work/co$(printf '\033')[2J\\x"
+# A checkout path is untrusted text and the line names it in a command: a
+# path holding a quote, an ESC, a newline, a Latin-1 byte and UTF-8 prints as
+# one $'...' word, every byte outside printable ASCII as \xNN, and that word
+# pasted into a shell names the real path. The \351 byte goes red under
+# macOS's bash 3.2 without _shell_word's 255 mask. The directory is made,
+# not symlinked: install.sh resolves its own with pwd -P.
+escdir="$work/co'$(printf '\033')[2J\\x$(printf '\n\351\303\251')"
 mkdir -p "$escdir"
 ln -s "$repo_root/install.sh" "$escdir/install.sh"
 ln -s "$repo_root/lib" "$escdir/lib"
 rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
-expect_rc 1 "python3 unusable, escaped checkout path"
-has "then run $work/co\\x1b[2J\\\\x/install.sh identity)" "python3 unusable escapes the checkout path"
-lacks "$(printf '\033')" "python3 unusable prints no raw ESC"
+expect_rc 1 "python3 unusable, quoted checkout path"
+has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xe9\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
+raw_free() {
+  local LC_ALL=C b
+  for b in "$(printf '\033')" "$(printf '\351')" "$(printf '\303')"; do
+    case $out in *"$b"*) fail "$1: output holds a raw byte (output: $out)" ;; esac
+  done
+  case $out in *"
+"*) fail "$1: output holds a raw newline (output: $out)" ;; esac
+}
+raw_free "python3 unusable"
+word="${out#*then run }"; word="${word% identity)}"
+[ "$(eval "printf '%s' $word")" = "$escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
+ok
+
+# --- install.sh _shell_word: the shapes, and LC_ALL kept ----------------------
+fresh
+sw() { bash -c '. "$1"; _shell_word "$2"' _ "$installer" "$1"; }
+for pair in "/a/b-c_d.e@f%g+h=i:j,k|/a/b-c_d.e@f%g+h=i:j,k" "|''" "\\|'\\'" "a b|'a b'" "it's|'it'\\''s'" \
+  "$(printf 'n\nl')|\$'n\\x0al'" "$(printf 'd\177')|\$'d\\x7f'" "$(printf 'q\047\033')|\$'q\\'\\x1b'"; do
+  want="${pair##*|}"; got="$(sw "${pair%|*}")"
+  [ "$got" = "$want" ] || fail "_shell_word: [$got], want [$want]"
+done
+bash -c '. "$1"; unset LC_ALL; _shell_word "$(printf "\351")" >/dev/null; [ -z "${LC_ALL+x}" ]' _ "$installer" \
+  || fail "_shell_word leaked its LC_ALL=C into the caller"
 ok
 
 # --- a config.local that is not a regular file: refused before any git read ---

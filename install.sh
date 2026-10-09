@@ -85,32 +85,49 @@ _install_refuse_root || exit 1
 log()  { printf '%s\n' "install: $*"; }
 warn() { printf '%s\n' "install: $*" >&2; }
 
-# _escaped VALUE - print VALUE (a path, or other text this script did not
-# write) as one line of printable ASCII, for a message: a backslash doubles
-# and any other byte outside 0x20-0x7e prints as \xNN, so the value cannot
-# forge a line break or rewrite the terminal. The spelling of
-# lib/host_identity.py's escape(), stricter on purpose: that one keeps a
-# printable non-ASCII character as it is, which bash 3.2 cannot judge, so
-# here every byte of it is escaped. A subshell, so LC_ALL=C (byte-wise
+# _shell_word PATH - print PATH as one word of a command a message tells the
+# operator to run, so pasting the command runs it on PATH and nothing else;
+# the counterpart of lib/host_identity.py's shell_word(). A path of only
+# [A-Za-z0-9@%+=:,./_-] stays bare, as shlex.quote() leaves it, so the usual
+# message keeps its shape; another printable-ASCII path goes in '...', each '
+# as '\''; any other path goes in $'...' (bash 3.2, bash 5 and zsh all read
+# it), \ as \\, ' as \' and every byte outside printable ASCII as \xNN, so the
+# word round-trips and no raw control byte reaches the terminal. Not
+# printf %q, whose spelling changes with the bash version and the locale.
+# Byte-wise on purpose: bash 3.2 cannot tell a printable non-ASCII character,
+# so every such byte is spelled out. A subshell, so LC_ALL=C (byte-wise
 # ${s:i:1} and "'c") does not leak; MUST mask with 255, because bash 3.2
 # reads "'c" of a byte above 0x7f as a negative signed char.
-_escaped() (
+_shell_word() (
   LC_ALL=C
-  s=$1 out="" i=0 v=0
+  s=$1 kind=bare lit="" esc="" c="" i=0 v=0
+  [ -n "$s" ] || kind=quoted
   while [ "$i" -lt "${#s}" ]; do
-    printf -v v '%d' "'${s:i:1}"
+    c=${s:i:1}
+    printf -v v '%d' "'$c"
     v=$((v & 255))
-    if [ "$v" -eq 92 ]; then
-      out="$out\\\\"
-    elif [ "$v" -ge 32 ] && [ "$v" -le 126 ]; then
-      out="$out${s:i:1}"
+    if [ "$v" -lt 32 ] || [ "$v" -gt 126 ]; then
+      kind=ansi
+      printf -v c '\\x%02x' "$v"
+      esc="$esc$c"
     else
-      printf -v v '\\x%02x' "$v"
-      out="$out$v"
+      case $c in
+        [A-Za-z0-9@%+=:,./_-]) ;;
+        *) [ "$kind" = ansi ] || kind=quoted ;;
+      esac
+      case $c in
+        "'") lit="$lit'\\''" esc="$esc\\'" ;;
+        \\) lit="$lit$c" esc="$esc\\\\" ;;
+        *) lit="$lit$c" esc="$esc$c" ;;
+      esac
     fi
     i=$((i + 1))
   done
-  printf '%s' "$out"
+  case $kind in
+    bare) printf '%s' "$s" ;;
+    quoted) printf "'%s'" "$lit" ;;
+    ansi) printf "\$'%s'" "$esc" ;;
+  esac
 )
 
 # _link_failed RC - report a non-zero do_link status and succeed, so the caller
@@ -403,7 +420,7 @@ ensure_submodules() {
   log "initializing SHA-pinned plugin submodules (a non-recursive clone left them empty)"
   git -C "$DOTFILES" -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
     submodule update --init \
-    || warn "submodule init failed; plugins may be absent - run: git -C \"$(_escaped "$DOTFILES")\" -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update --init --recursive"
+    || warn "submodule init failed; plugins may be absent - run: git -C $(_shell_word "$DOTFILES") -c fetch.fsckObjects=true -c transfer.fsckObjects=true submodule update --init --recursive"
 }
 
 # harden_plugin_perms - strip group/other write from the plugin tree, the only
@@ -658,7 +675,7 @@ _python_ok() {
 }
 do_identity() {
   if ! _python_ok; then
-    warn "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $(_escaped "$DOTFILES")/install.sh identity)"
+    warn "identity: python3 is not usable here - skipping (install the Command Line Tools, then run $(_shell_word "$DOTFILES/install.sh") identity)"
     return 1
   fi
   python3 -I "$DOTFILES/lib/host_identity.py" --config-local "$xdg_config/git/config.local" \

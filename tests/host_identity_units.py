@@ -2028,6 +2028,49 @@ def main(argv):
         mod.shutil.copyfileobj = real_copy
     check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "a failed fallback copy leaves no temp file")
 
+    # ^C in the middle of the fallback's copy unwinds the same way.
+    calls = []
+
+    def copy_then_interrupt(src, dst, *rest):
+        calls.append(1)
+        if len(calls) == 1:
+            return real_copy(src, dst, *rest)
+        dst.write(src.read(3))
+        dst.flush()
+        raise KeyboardInterrupt
+
+    mod.os.link = no_link
+    mod.shutil.copyfileobj = copy_then_interrupt
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        try:
+            mod.backup_once(target, fd, 0o600)
+            raised = False
+        except KeyboardInterrupt:
+            raised = True
+        check(raised and len(calls) == 2, "^C during the fallback copy propagates")
+        check(not os.path.lexists(target + ".bak"), "^C during the fallback copy leaves no partial .bak")
+        check(not mod._left, "^C during the fallback copy leaves nothing recorded in _left")
+    finally:
+        os.close(fd)
+        mod.os.link = real_link
+        mod.shutil.copyfileobj = real_copy
+    check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "^C during the fallback copy leaves no temp file")
+
+    # The fallback's .bak keeps the source mode whatever the umask, as the
+    # hard link of the chmod'ed temp file does.
+    old_umask = os.umask(0o077)
+    mod.os.link = no_link
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        mod.backup_once(target, fd, 0o644)
+        check(stat.S_IMODE(os.lstat(target + ".bak").st_mode) == 0o644, "the fallback .bak keeps the source mode under a umask")
+    finally:
+        os.close(fd)
+        os.umask(old_umask)
+        mod.os.link = real_link
+    os.unlink(target + ".bak")
+
     # A .bak made by someone else between the lexists check and the fallback's
     # O_EXCL create is refused AND kept: the cleanup removes only its own.
     with open(target + ".bak", "w") as fh:

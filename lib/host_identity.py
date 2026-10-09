@@ -1453,18 +1453,29 @@ def _copy_new(src_path, dst_path, mode):
         with _Held():
             out = os.open(dst_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             _left.add(dst_path)
+        # The create's mode passes through the umask; the hard-link path
+        # keeps the source mode exactly, so this one does too.
+        os.fchmod(out, mode)
         with os.fdopen(os.dup(out), "wb") as dst, open(src_path, "rb") as src:
             shutil.copyfileobj(src, dst)
         done = True
     finally:
         # Held: a signal that lands mid-cleanup waits for it to finish.
+        # Best effort, each step on its own: a deferred EIO on close still
+        # lets the unlink run, and neither hides the error that got here.
         with _Held():
             if out is not None:
-                os.close(out)
+                try:
+                    os.close(out)
+                except OSError:
+                    pass
             if dst_path in _left:
                 _left.discard(dst_path)
                 if not done:
-                    os.unlink(dst_path)
+                    try:
+                        os.unlink(dst_path)
+                    except OSError:
+                        pass
 
 
 def backup_once(path, src_fd, mode):
