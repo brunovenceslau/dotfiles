@@ -80,6 +80,7 @@ import os
 import platform
 import pwd
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -581,6 +582,18 @@ def _shown(value):
     return value if escape(value) == value else quoted(value)
 
 
+def shell_word(path):
+    """PATH as one word of a command a message tells the operator to run
+    (the installer, config.local): shlex.quote(), so a space or a `$` in it
+    stays one literal word and the command runs as printed. A path that
+    _shown() leaves bare is quoted only when a shell needs it, so the
+    quoted messages keep their shape. One that escape() changes (a control
+    character, a backslash) prints escaped inside the quotes: it can never
+    reach the terminal raw, and the command then names its escaped
+    spelling, a path no shell would turn back into the real one."""
+    return shlex.quote(escape(path))
+
+
 def usable_principal(p):
     """A literal email address that is safe to write as user.email.
 
@@ -676,7 +689,7 @@ def missing_name_line(host):
     is the operator's to choose, so the account's full name is a
     suggestion."""
     return 'identity: user.name is not set - run: %s identity --name "%s"' % (
-        host.installer, suggested_name(account_name()))
+        shell_word(host.installer), suggested_name(account_name()))
 
 
 # --- reading files and running tools -----------------------------------------
@@ -1417,7 +1430,7 @@ def write_keys(path, items):
 
 
 def hint_rerun(host):
-    warn("identity:   then run: %s identity [--name \"Full Name\"]" % host.installer)
+    warn("identity:   then run: %s identity [--name \"Full Name\"]" % shell_word(host.installer))
 
 
 def require_ssh_format(host):
@@ -1475,7 +1488,7 @@ def select(host, pairs, email):
         for p, k in sorted(pairs):
             lines.append("identity:   %s %s" % (_shown(p), fingerprint(k)))
         lines.append("identity:   set the one this host commits as first, then re-run:")
-        lines.append("identity:   git config --file %s user.email <email>" % host.config_local)
+        lines.append("identity:   git config --file %s user.email <email>" % shell_word(host.config_local))
         return None, lines
     keys = sorted(set(k for _, k in pairs))
     email = email or principals[0]
@@ -1600,7 +1613,7 @@ def identity(host, name):
     if keys is None:
         warn(why)
         warn("identity:   load this host's signing key with ssh-add, then run:")
-        warn("identity:   %s identity [--name \"Full Name\"]" % host.installer)
+        warn("identity:   %s identity [--name \"Full Name\"]" % shell_word(host.installer))
         return 1
     if refuse_unclear(host, keys, path):
         return 1
@@ -1771,7 +1784,7 @@ def rotate(host):
         warn("identity: cannot read user.email (%s) - writing nothing" % _shown(email_v.err))
         return 1
     if not email_v.set:
-        warn("identity: --rotate needs user.email - run %s identity first" % host.installer)
+        warn("identity: --rotate needs user.email - run %s identity first" % shell_word(host.installer))
         return 1
     email = email_v.text
     origins, err = host.origins_or_error("user.signingkey")
@@ -1779,7 +1792,7 @@ def rotate(host):
         warn("identity: --rotate: cannot read user.signingkey (%s) - writing nothing" % _shown(err))
         return 1
     if not origins:
-        warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % host.installer)
+        warn("identity: --rotate: user.signingkey is not set - nothing to rotate; run %s identity" % shell_word(host.installer))
         return 1
     origin, old_value = origins[-1]
     if not host.is_local_origin(origin):
@@ -1881,7 +1894,7 @@ def check_signing_key(host, agent_said=False):
         email, path, why = stale
         warn("identity: user.signingkey %s is not valid for %s in %s (%s)"
              % (fingerprint(key), _shown(email), _shown(path), why))
-        warn("identity:   new signatures will not verify; run: %s identity --rotate" % host.installer)
+        warn("identity:   new signatures will not verify; run: %s identity --rotate" % shell_word(host.installer))
         reported = True
     if needs_agent:
         keys, _ = host.agent()
@@ -1900,7 +1913,8 @@ def overridden_line(host):
     if not found:
         return 0
     what = "; ".join("%s = false from %s" % (k, _shown(o)) for k, o in found)
-    warn("identity: signing is off against %s: %s - see %s identity" % (_shown(host.config_local), what, host.installer))
+    warn("identity: signing is off against %s: %s - see %s identity"
+         % (_shown(host.config_local), what, shell_word(host.installer)))
     return 1
 
 
@@ -1927,7 +1941,7 @@ def stale_line(host):
         msg = "identity: user.signingkey %s is not valid for %s in %s (%s) - see %s identity"
     else:
         msg = "identity: user.signingkey %s is not valid for %s in %s (%s) - run %s identity --rotate"
-    warn(msg % (fingerprint(key), _shown(email), _shown(path), why, host.installer))
+    warn(msg % (fingerprint(key), _shown(email), _shown(path), why, shell_word(host.installer)))
     return 1
 
 
@@ -1945,11 +1959,11 @@ def auto(host):
             msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys); every commit fails until this host has a signing key - run %s identity on this host, or opt it out of signing (see docs/signing-key.md)"
         else:
             msg = "identity: not set automatically in an SSH session (a forwarded agent holds another machine's keys) - run %s identity to set it on purpose"
-        warn(msg % host.installer)
+        warn(msg % shell_word(host.installer))
         return 1, None
     rc = identity(host, None)
     if rc != 0 and commits_fail_closed(host):
-        return rc, FAIL_CLOSED % _shown(host.installer)
+        return rc, FAIL_CLOSED % shell_word(host.installer)
     return rc, None
 
 
@@ -2032,7 +2046,7 @@ def advisory(host):
         warn(text)
     if opted_out(host):
         return 0
-    inst = host.installer
+    inst = shell_word(host.installer)
     sign = host.effective("commit.gpgsign", "bool")
     if sign.error:
         warn("commit.gpgsign is not a boolean git reads (%s) - git refuses every commit until it is fixed"
@@ -2210,7 +2224,7 @@ class Doctor(object):
 
     def values(self):
         host = self.host
-        inst = host.installer
+        inst = shell_word(host.installer)
         cl = host.config_local
         off = self.opted_out_origin
         for key in ("user.name", "user.email", "user.useConfigOnly", "user.signingkey", "commit.gpgsign",
@@ -2254,9 +2268,9 @@ class Doctor(object):
                 self.problem("cannot read %s (%s) - check the file git -C ~ config --show-origin --get %s names"
                              % (key, _shown(v.err), key), signing=signing)
             elif v.unset and key == "user.name":
-                self.problem(name_local % cl if off else name_step % inst)
+                self.problem(name_local % shell_word(cl) if off else name_step % inst)
             elif v.unset and key == "user.email":
-                self.problem(email_local % cl if off else email_step % inst)
+                self.problem(email_local % shell_word(cl) if off else email_step % inst)
             elif v.unset and signing and commits_fail_closed(host):
                 self.problem("user.signingkey is not set, so git refuses every commit - run: %s identity, or opt this host out of signing (see docs/signing-key.md)"
                              % inst, signing=True)
@@ -2369,7 +2383,7 @@ class Doctor(object):
     def ssh_session(self):
         if os.environ.get("SSH_CONNECTION"):
             self.info("SSH_CONNECTION is set: the automatic step writes nothing in this session; %s identity, run on purpose, still works"
-                      % self.host.installer)
+                      % shell_word(self.host.installer))
         else:
             self.ok("not an SSH session")
 
@@ -2549,8 +2563,8 @@ def main(argv):
     # every warning; a run that cannot write prints its one cause line, and
     # the name line comes on a later run.
     # Each line is printed as it is: every value in it went through
-    # _shown() where it was put in, the suffixes' installer path included,
-    # so this is no place to escape it a second time.
+    # _shown() or shell_word() where it was put in, the suffixes' installer
+    # path included, so this is no place to escape it a second time.
     if lines:
         if rc == 0:
             for line in lines:
@@ -2559,8 +2573,8 @@ def main(argv):
             line = headline(lines)
             if consequence:
                 line += consequence
-            elif "%s identity" % host.installer not in line:
-                line += " (details: %s identity)" % _shown(host.installer)
+            elif "%s identity" % shell_word(host.installer) not in line:
+                line += " (details: %s identity)" % shell_word(host.installer)
             warn(line)
     return rc
 

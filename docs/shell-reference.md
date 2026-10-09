@@ -397,7 +397,10 @@ holds only printable characters and no backslash. Otherwise it prints in
 single quotes, with each control, bidi or invisible character, backslash,
 quote and byte that is not UTF-8 escaped (`\x1b`, `\u202e`), so it
 cannot rewrite the terminal or pass for message text. The words around it
-print as written. The identity step's own lines follow the same rule.
+print as written. A path inside a command a line tells you to run (the
+installer, `config.local`) is quoted for the shell when it needs it, so the
+command runs as printed from a `HOME` that holds a space. The identity
+step's own lines follow the same rules.
 
 `install.sh doctor` exits `0` when it found no problem (a host that opted out
 included), `1` when it found one (a `python3` that does not run included),

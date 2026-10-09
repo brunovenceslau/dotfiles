@@ -17,6 +17,7 @@ import errno
 import io
 import importlib.util
 import os
+import shlex
 import signal
 import stat
 import struct
@@ -639,6 +640,59 @@ def escaping_units(mod, scratch):
                   "sweep %d, %s: nothing printed raw (%r)" % (n, mode, text))
 
 
+def command_word_units(mod, scratch):
+    """A fix line's command names config.local and the installer as one
+    shell word each, so it runs as printed from a HOME holding a space."""
+    h = HostileHost(mod, scratch, "with space")
+    inst = os.path.join(h.home, "dot files", "install.sh")
+
+    def command(text, head):
+        """The words of the command after HEAD in TEXT's line holding it."""
+        for line in text.splitlines():
+            if head in line:
+                return shlex.split(line.split(head, 1)[1])
+        return None
+
+    # An opted-out host: doctor's fixes name config.local.
+    h.set(commit__gpgsign="false")
+    rc, text = h.said("doctor", installer=inst)
+    check(command(text, "user.name is not set, so git refuses every commit - run: ")
+          == ["git", "config", "--file", h.local, "user.name", "Full Name"],
+          "doctor's user.name fix names config.local as one shell word (%r)" % text)
+    check(command(text, "user.email is not set, so git refuses every commit - run: ")
+          == ["git", "config", "--file", h.local, "user.email", "<your", "email>"],
+          "doctor's user.email fix names config.local as one shell word (%r)" % text)
+    # A host that signs: the fixes name the installer.
+    h.set(user__email="me@example.com")
+    rc, text = h.said("doctor", installer=inst)
+    check(command(text, "user.name is not set, so git refuses every commit - run: ")
+          == [inst, "identity", "--name", "Full Name"],
+          "doctor's user.name fix names the installer as one shell word (%r)" % text)
+    rc, text = h.said("identity", installer=inst)
+    check(command(text, "user.name is not set - run: ") == [inst, "identity", "--name", "Full Name"],
+          "identity's missing-name line names the installer as one shell word (%r)" % text)
+    # Two identities for the agent's key: the fix sets user.email first.
+    with open(h.signers, "w") as fh:
+        fh.write("a@example.com %s\nb@example.com %s\n" % (K1, K1))
+    h.set()
+    rc, text = h.said("identity", installer=inst)
+    check(rc == 1 and command(text, "identity:   git config --file ")[:1] == [h.local],
+          "identity's user.email fix names config.local as one shell word (%r)" % text)
+    # auto's one line: the suffix names the installer the way the lines do,
+    # so a line that already names it gets no second pointer. A key is set,
+    # so the host does not fail closed.
+    h.set(user__signingkey="key::ssh-ed25519 AAAA")
+    rc, text = h.said("auto", installer=inst)
+    check(rc == 1 and text.count("\n") == 1 and text.endswith(" (details: %s identity)\n" % shlex.quote(inst)),
+          "auto's details suffix names the installer as one shell word (%r)" % text)
+    os.environ["SSH_CONNECTION"] = "10.0.0.1 22 10.0.0.2 22"
+    rc, text = h.said("auto", installer=inst)
+    del os.environ["SSH_CONNECTION"]
+    check(rc == 1 and text.count("\n") == 1 and "(details:" not in text
+          and "- run %s identity to set it on purpose" % shlex.quote(inst) in text,
+          "auto's SSH line names the installer once, as one shell word (%r)" % text)
+
+
 def main(argv):
     module, scratch = argv
     with open(module, encoding="utf-8") as fh:
@@ -1017,6 +1071,13 @@ def main(argv):
 
     try:
         escaping_units(mod, scratch)
+    finally:
+        mod.git_release()
+        os.environ.clear()
+        os.environ.update(saved)
+
+    try:
+        command_word_units(mod, scratch)
     finally:
         mod.git_release()
         os.environ.clear()
