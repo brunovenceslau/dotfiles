@@ -330,6 +330,21 @@ def atx_text(rest):
     return rest
 
 
+# A link inside a heading, for slugify: it renders as its text. The destination
+# follows CommonMark: no whitespace, `\(` and `\)` escaped, or balanced
+# parentheses nested up to 3 levels deep (the minimum the spec requires), or
+# `<...>`, which may hold spaces; a quoted title may follow. Every alternative
+# of the starred group starts on a different character (`\`, a non-paren
+# non-space, `(`), so the match never backtracks into itself: linear time.
+_DEST_CHAR = r"\\.|[^()\\\s]"
+_NEST = r"\((?:" + _DEST_CHAR + r")*\)"
+for _ in range(2):
+    _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
+HEADING_LINK = re.compile(
+    r"!?\[([^\[\]]*)\]\(\s*(?:<[^<>\n]*>|(?:" + _DEST_CHAR + r"|" + _NEST + r")*)"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+
+
 def slugify(text):
     """GitHub's heading id: the rendered text, lowercased, with every character
     that is not a letter, mark, number, connector (`_`), hyphen or space
@@ -339,9 +354,7 @@ def slugify(text):
     `_link_bin_tree` keeps both underscores."""
     # Every class below stops at its own opener or is bounded, so a heading
     # line of unclosed `[`, `(`, `<` or backticks costs near-linear time.
-    # One level of balanced parentheses in the destination, as in a Wikipedia
-    # URL; the two branches start on disjoint characters, so no backtracking blowup.
-    text = re.sub(r"!?\[([^\[\]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", text)   # a link renders as its text
+    text = HEADING_LINK.sub(r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
     for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
         rendered.append(_render_inline(text[pos:m.start()]))

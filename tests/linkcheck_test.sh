@@ -333,16 +333,37 @@ run
 [ "$rc" = 0 ] || fail "a Unicode anchor, a mailto: link and a tab-indented fence must pass (exit $rc): $out"
 ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
 
-# A heading holding a link whose destination has balanced parentheses (a
-# Wikipedia URL) renders as the link's text alone, so its id is the text's.
-# Unbalanced parentheses in plain heading text are dropped like any
-# punctuation; both must resolve.
+# A heading holding a link renders as the link's text alone, whatever its
+# destination holds: balanced parentheses (a Wikipedia URL) nested up to 3
+# levels, an escaped paren, an angle-bracket form with a space, a title. A
+# destination with a bare space is not a link, so its text stays literal.
+# External (https) destinations keep the unrelated link pass out of the way.
+# Expected ids follow github-slugger: lowercase, punctuation such as `()`
+# dropped, `_` kept, each space a `-`.
 new_tree
-printf '## See [Foo](https://example.com/a_(b)) now\n\n## Odd (text\n\n[p](#see-foo-now) [q](#odd-text)\n' >"$work/r/docs/paren.md"
+cat >"$work/r/docs/paren.md" <<'MD'
+## ![i](https://e.com/a_(b)) [Foo](https://e.com/c_(d)) now
+
+## X [Foo](https://e.com/a_((b))) y
+
+## Z [Foo](https://e.com/a_(((b)))) w
+
+## E [Foo](https://e.com/a\(b) v
+
+## A [Foo](<https://e.com/a b>) "t" [Bar](https://e.com/c 'ttl') u
+
+## S [a](b c) t
+
+## Odd (text
+
+[1](#i-foo-now) [2](#x-foo-y) [3](#z-foo-w) [4](#e-foo-v) [5](#a-foo-t-bar-u) [6](#s-ab-c-t)
+[7](#odd-text)
+MD
 git -C "$work/r" add -A
 run
-[ "$rc" = 0 ] || fail "a heading link destination with parentheses must slug to its text (exit $rc): $out"
-ok "a heading link whose destination holds balanced parentheses slugs to its text"
+[ "$rc" = 0 ] || fail "a heading link must slug to its text, whatever its destination holds (exit $rc): $out"
+ok "a heading link slugs to its text: parentheses nested to 3 levels, escaped paren, angle form, title, image; a spaced destination stays literal"
+# Regression guard, not a fix witness: `## Odd (text` passed before the fix.
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
