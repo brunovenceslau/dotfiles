@@ -3561,6 +3561,21 @@ for shape in run several run-literal run-rest after-run eol; do
   esac
 done
 
+# runs() clears lastrun on every line. A stale entry names a run index of an
+# EARLIER line: line 1 below is a link over the limit (a short line is never
+# walked) that lists a run of two before its two runs of one, so lastrun[1]
+# ends at 2. On line 2, whose single run of one is index 1, a kept entry
+# points rn[1] at a run that line does not have: skipcode then returns at
+# most its own index and the guard exits 2. Line 2 is exempt only if its lone
+# backtick is read as literal text.
+r="$work/mdw-lastrun"; seed "$r"; mkdir -p "$r/docs"
+printf '[%s `` b ` c ` %s](%s)\n[%s ` %s](%s)\n' "$md40" "$md40" "$_md_long_token" "$md40" "$md40" "$_md_long_token" > "$r/docs/x.md"
+bounded_run 20 "$work/mdw-lastrun.out" env STRICT= "$cp" "$r" \
+  || fail "arm 15 lastrun: bounded_run could not turn job control on"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] && ok \
+  || fail "arm 15: a stale lastrun outlived 20 s (hung $br_hung, stuck $br_stuck)"
+[ "$br_rc" = 0 ] && ok || fail "arm 15: a run of one on line 2 must not see line 1's runs (exit $br_rc)"
+
 # front matter that never closes is not front matter: GitHub renders the
 # `---` as a rule and the rest as prose, so its lines are held to the limit
 # at their own line numbers.
