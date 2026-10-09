@@ -70,11 +70,39 @@ for argv in "install --bogus" "packages --bogus" "link extra" "upgrade --force" 
     || fail "install.sh $argv did not say it takes no arguments (got: $out)"
 done
 
+# --- an operand is echoed back as shell words, never raw ----------------------
+# A typed argument is untrusted text: one holding an ESC and one holding a
+# quote come back as two words, the ESC spelled \x1b, so the warning can
+# neither rewrite the terminal nor blur where one argument ends.
+esc="$(printf '\033')"
+rc=0; out="$("$installer" link "a${esc}[2Jb" "it's here" 2>&1)" || rc=$?
+[ "$rc" -eq 2 ] || fail "install.sh link with odd operands exited $rc (want 2)"
+grep -qF -- "link takes no arguments (got: \$'a\\x1b[2Jb' 'it'\\''s here')" <<<"$out" \
+  || fail "the got: line does not show the operands as shell words (got: $out)"
+case $out in *"$esc"*) fail "the got: line holds a raw ESC (got: $out)" ;; esac
+rc=0; out="$("$installer" "bo${esc}gus" 2>&1)" || rc=$?
+grep -qF -- "unknown command: \$'bo\\x1bgus' (expected" <<<"$out" \
+  || fail "the unknown command is not shown as a shell word (got: $out)"
+
 # --- the no-write contract: HOME stays completely empty ---------------------
 # (no `find -quit`: BSD/macOS find lacks it; -mindepth is portable.)
 if [ -n "$(find "$HOME" -mindepth 1)" ]; then
   fail "a help/error dispatch wrote into HOME (these paths must be write-free)"
 fi
+
+# --- a held upgrade lock: the printed rmdir command runs as printed -----------
+# The state dir holds a quote and an ESC: the old rmdir '$lock' broke on the
+# quote and printed the ESC raw. Running the printed command removes the lock.
+st="$work/st'${esc}x"
+mkdir -p "$st/upgrade.lock"
+rc=0; out="$(bash -c '. "$1"; manifest_dir="$2"; do_upgrade' _ "$installer" "$st" 2>&1)" || rc=$?
+[ "$rc" -eq 1 ] || fail "a held lock: do_upgrade returned $rc (want 1)"
+case $out in *"$esc"*) fail "the held-lock lines hold a raw ESC (got: $out)" ;; esac
+grep -qF -- "rmdir \$'$work/st\\'\\x1bx/upgrade.lock'" <<<"$out" \
+  || fail "the held-lock rmdir command does not quote the lock path (got: $out)"
+cmd="${out##*remove it (it is a directory):  }"
+(eval "$cmd") || fail "the printed rmdir command did not run: $cmd"
+[ ! -e "$st/upgrade.lock" ] || fail "the printed rmdir command did not remove the lock: $cmd"
 
 # --- first install: the pre-XDG history migration ---------------------------
 # A real install into a second scratch HOME. ~/.zsh_history is COPIED (never

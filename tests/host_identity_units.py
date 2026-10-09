@@ -2057,6 +2057,35 @@ def main(argv):
         mod.shutil.copyfileobj = real_copy
     check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "^C during the fallback copy leaves no temp file")
 
+    # A deferred write error that surfaces only on close (EIO, an NFS quota)
+    # fails the fallback copy too, and its .bak goes with it.
+    real_close = mod.os.close
+    closes = []
+
+    def close_then_eio(fd):
+        closes.append(fd)
+        real_close(fd)
+        if len(closes) == 2:  # 1: the temp file's mkstemp fd; 2: the .bak's
+            raise OSError(errno.EIO, "Input/output error")
+
+    mod.os.link = no_link
+    mod.os.close = close_then_eio
+    fd = os.open(target, os.O_RDONLY)
+    try:
+        try:
+            mod.backup_once(target, fd, 0o600)
+            raised = False
+        except OSError as e:
+            raised = e.errno == errno.EIO
+        check(raised and len(closes) == 2, "an EIO on closing the fallback .bak fails the copy")
+        check(not os.path.lexists(target + ".bak"), "an EIO on closing the fallback .bak leaves no .bak")
+        check(not mod._left, "an EIO on closing the fallback .bak leaves nothing recorded in _left")
+    finally:
+        mod.os.close = real_close
+        os.close(fd)
+        mod.os.link = real_link
+    check(not [n for n in os.listdir(scratch) if n.startswith(".config.local")], "an EIO on closing the fallback .bak leaves no temp file")
+
     # The fallback's .bak keeps the source mode whatever the umask, as the
     # hard link of the chmod'ed temp file does.
     old_umask = os.umask(0o077)

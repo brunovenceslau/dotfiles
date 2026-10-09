@@ -85,12 +85,14 @@ _install_refuse_root || exit 1
 log()  { printf '%s\n' "install: $*"; }
 warn() { printf '%s\n' "install: $*" >&2; }
 
-# _shell_word PATH - print PATH as one word of a command a message tells the
-# operator to run, so pasting the command runs it on PATH and nothing else;
-# the counterpart of lib/host_identity.py's shell_word(). A path of only
+# _shell_word VALUE... - print each VALUE as one shell word, space-separated:
+# a path in a command a message tells the operator to run, so pasting it runs
+# on that path and nothing else, or an operand that came from the command
+# line or the file system, shown with its word boundaries kept. The
+# counterpart of lib/host_identity.py's shell_word(). A value of only
 # [A-Za-z0-9@%+=:,./_-] stays bare, as shlex.quote() leaves it, so the usual
-# message keeps its shape; another printable-ASCII path goes in '...', each '
-# as '\''; any other path goes in $'...' (bash 3.2, bash 5 and zsh all read
+# message keeps its shape; another printable-ASCII value goes in '...', each '
+# as '\''; any other value goes in $'...' (bash 3.2, bash 5 and zsh all read
 # it), \ as \\, ' as \' and every byte outside printable ASCII as \xNN, so the
 # word round-trips and no raw control byte reaches the terminal. Not
 # printf %q, whose spelling changes with the bash version and the locale.
@@ -100,34 +102,39 @@ warn() { printf '%s\n' "install: $*" >&2; }
 # reads "'c" of a byte above 0x7f as a negative signed char.
 _shell_word() (
   LC_ALL=C
-  s=$1 kind=bare lit="" esc="" c="" i=0 v=0
-  [ -n "$s" ] || kind=quoted
-  while [ "$i" -lt "${#s}" ]; do
-    c=${s:i:1}
-    printf -v v '%d' "'$c"
-    v=$((v & 255))
-    if [ "$v" -lt 32 ] || [ "$v" -gt 126 ]; then
-      kind=ansi
-      printf -v c '\\x%02x' "$v"
-      esc="$esc$c"
-    else
-      case $c in
-        [A-Za-z0-9@%+=:,./_-]) ;;
-        *) [ "$kind" = ansi ] || kind=quoted ;;
-      esac
-      case $c in
-        "'") lit="$lit'\\''" esc="$esc\\'" ;;
-        \\) lit="$lit$c" esc="$esc\\\\" ;;
-        *) lit="$lit$c" esc="$esc$c" ;;
-      esac
-    fi
-    i=$((i + 1))
+  sep=""
+  for s in "$@"; do
+    kind=bare lit="" esc="" c="" i=0 v=0
+    [ -n "$s" ] || kind=quoted
+    while [ "$i" -lt "${#s}" ]; do
+      c=${s:i:1}
+      printf -v v '%d' "'$c"
+      v=$((v & 255))
+      if [ "$v" -lt 32 ] || [ "$v" -gt 126 ]; then
+        kind=ansi
+        printf -v c '\\x%02x' "$v"
+        esc="$esc$c"
+      else
+        case $c in
+          [A-Za-z0-9@%+=:,./_-]) ;;
+          *) [ "$kind" = ansi ] || kind=quoted ;;
+        esac
+        case $c in
+          "'") lit="$lit'\\''" esc="$esc\\'" ;;
+          \\) lit="$lit$c" esc="$esc\\\\" ;;
+          *) lit="$lit$c" esc="$esc$c" ;;
+        esac
+      fi
+      i=$((i + 1))
+    done
+    printf '%s' "$sep"
+    case $kind in
+      bare) printf '%s' "$s" ;;
+      quoted) printf "'%s'" "$lit" ;;
+      ansi) printf "\$'%s'" "$esc" ;;
+    esac
+    sep=" "
   done
-  case $kind in
-    bare) printf '%s' "$s" ;;
-    quoted) printf "'%s'" "$lit" ;;
-    ansi) printf "\$'%s'" "$esc" ;;
-  esac
 )
 
 # _link_failed RC - report a non-zero do_link status and succeed, so the caller
@@ -305,12 +312,12 @@ _migrate_legacy_history() {
   # holds secrets typed on a command line. The chmod stays as belt-and-braces for
   # a destination that somehow already existed with looser bits.
   if ! ( umask 077 && cp -- "$legacy" "$dest" ); then
-    warn "could not copy ~/.zsh_history to $dest - starting with an empty history"
+    warn "could not copy ~/.zsh_history to $(_shell_word "$dest") - starting with an empty history"
     return 0
   fi
   chmod 600 "$dest" 2>/dev/null \
-    || warn "copied ~/.zsh_history to $dest but could not chmod it 600 - check its permissions"
-  log "carried ~/.zsh_history over to ${dest#"$HOME"/} (the original is untouched)"
+    || warn "copied ~/.zsh_history to $(_shell_word "$dest") but could not chmod it 600 - check its permissions"
+  log "carried ~/.zsh_history over to $(_shell_word "${dest#"$HOME"/}") (the original is untouched)"
 }
 
 # _cache_shell_inits - pre-compile the zsh integration the startup path sources:
@@ -335,7 +342,7 @@ _migrate_legacy_history() {
 # holding without teaching uninstall a new path.
 _cache_shell_inits() {
   local cache_dir="$xdg_cache/zsh" tool bin out tmp want first_line
-  mkdir -p "$cache_dir" || { warn "could not create $cache_dir - shell integrations will be skipped"; return 0; }
+  mkdir -p "$cache_dir" || { warn "could not create $(_shell_word "$cache_dir") - shell integrations will be skipped"; return 0; }
   for tool in starship zoxide canga sbx; do
     # A case, not a lookup table: bash 3.2 has no associative arrays. `set --`
     # carries the generator's argv, so the call below stays one quoted "$@".
@@ -445,7 +452,7 @@ harden_plugin_perms() {
   # green because this function returns 0 whatever chmod does and no test read
   # the warning. tests/plugin_perms_test.sh case 4 now does.
   chmod -R -- go-w "$plugins" 2>/dev/null \
-    || warn "could not remove group/other write from $plugins - compinit may flag it as insecure"
+    || warn "could not remove group/other write from $(_shell_word "$plugins") - compinit may flag it as insecure"
   return 0
 }
 
@@ -458,7 +465,7 @@ do_uninstall() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --purge) purge=1 ;;
-      *) warn "uninstall: unknown option: $1 (expected: --purge)"; return 2 ;;
+      *) warn "uninstall: unknown option: $(_shell_word "$1") (expected: --purge)"; return 2 ;;
     esac
     shift
   done
@@ -480,8 +487,8 @@ do_upgrade() {
   mkdir -p "$manifest_dir"
   if ! mkdir "$lock" 2>/dev/null; then
     warn "upgrade: another upgrade appears to be in progress"
-    warn "  lock DIR: $lock"
-    warn "  if no upgrade is running, remove it (it is a directory):  rmdir '$lock'"
+    warn "  lock DIR: $(_shell_word "$lock")"
+    warn "  if no upgrade is running, remove it (it is a directory):  rmdir $(_shell_word "$lock")"
     return 1
   fi
   # Publish the lock path so the EXIT/INT/TERM trap (_install_cleanup) releases it
@@ -728,7 +735,7 @@ case "$cmd" in
     # across releases should fail loudly on a form it does not
     # understand rather than silently discard it.
     shift
-    [ $# -eq 0 ] || { warn "link takes no arguments (got: $*)"; exit 2; }
+    [ $# -eq 0 ] || { warn "link takes no arguments (got: $(_shell_word "$@"))"; exit 2; }
     link_rc=0
     do_link || link_rc=$?
     # After the links, so `starship` resolves its config through the freshly linked
@@ -752,13 +759,13 @@ case "$cmd" in
     # reports as a failed upgrade. It re-seeded the agent settings.json; there is no
     # longer a config surface that needs it, so it succeeds doing nothing.
     shift
-    [ $# -eq 0 ] || { warn "reseed-settings takes no arguments (got: $*)"; exit 2; }
+    [ $# -eq 0 ] || { warn "reseed-settings takes no arguments (got: $(_shell_word "$@"))"; exit 2; }
     ;;
   install)
     # Reject arguments like the other arms: `install.sh` alone means install, so
     # drop the subcommand only when it was given, then nothing may remain.
     [ $# -eq 0 ] || shift
-    [ $# -eq 0 ] || { warn "install takes no arguments (got: $*)"; exit 2; }
+    [ $# -eq 0 ] || { warn "install takes no arguments (got: $(_shell_word "$@"))"; exit 2; }
     # State/cache dirs the startup path expects to exist, created here so zshrc
     # need not fork mkdir on a normal launch.
     mkdir -p "$xdg_state/zsh" "$xdg_cache/zsh" "$manifest_dir"
@@ -805,7 +812,7 @@ case "$cmd" in
     # `dotfiles-upgrade` wraps this. No bypass flag by design - so reject any
     # argument rather than silently ignore a typo like `--dry-run`/`--force`.
     shift
-    [ $# -eq 0 ] || { warn "upgrade takes no arguments (got: $*) - there is no bypass flag by design"; exit 2; }
+    [ $# -eq 0 ] || { warn "upgrade takes no arguments (got: $(_shell_word "$@")) - there is no bypass flag by design"; exit 2; }
     do_upgrade || { warn "upgrade did not complete (see warnings above)"; exit 1; }
     ;;
   packages)
@@ -814,7 +821,7 @@ case "$cmd" in
     # never triggers a package install (which needs the network). No sudo is
     # involved on that path either: Homebrew is user-scoped.
     shift
-    [ $# -eq 0 ] || { warn "packages takes no arguments (got: $*)"; exit 2; }
+    [ $# -eq 0 ] || { warn "packages takes no arguments (got: $(_shell_word "$@"))"; exit 2; }
     packages_install || { warn "packages: installation reported problems (see warnings above)"; exit 1; }
     log "packages: done."
     ;;
@@ -848,7 +855,7 @@ case "$cmd" in
         --rotate)
           [ "$id_rotate" -eq 0 ] || { warn "identity: --rotate given more than once"; exit 2; }
           id_rotate=1; shift ;;
-        *) warn "identity: unknown option: $1 (expected: --name \"Full Name\" | --rotate)"; exit 2 ;;
+        *) warn "identity: unknown option: $(_shell_word "$1") (expected: --name \"Full Name\" | --rotate)"; exit 2 ;;
       esac
     done
     if [ "$id_rotate" -eq 1 ] && [ "$id_has_name" -eq 1 ]; then
@@ -875,7 +882,7 @@ case "$cmd" in
         --verbose)
           [ -z "$doc_args" ] || { warn "doctor: --verbose given more than once"; exit 2; }
           doc_args=--verbose; shift ;;
-        *) warn "doctor: unknown option: $1 (expected: --verbose)"; exit 2 ;;
+        *) warn "doctor: unknown option: $(_shell_word "$1") (expected: --verbose)"; exit 2 ;;
       esac
     done
     doc_rc=0
@@ -887,7 +894,7 @@ case "$cmd" in
     printf '%s\n' "       (retired, kept for cross-version compatibility: reseed-settings)"
     ;;
   *)
-    warn "unknown command: $cmd (expected: install | link | packages | upgrade | uninstall | identity | doctor | reseed-settings)"
+    warn "unknown command: $(_shell_word "$cmd") (expected: install | link | packages | upgrade | uninstall | identity | doctor | reseed-settings)"
     exit 2
     ;;
 esac

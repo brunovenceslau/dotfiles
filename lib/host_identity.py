@@ -1458,6 +1458,11 @@ def _copy_new(src_path, dst_path, mode):
         os.fchmod(out, mode)
         with os.fdopen(os.dup(out), "wb") as dst, open(src_path, "rb") as src:
             shutil.copyfileobj(src, dst)
+        # Closed here, not in the finally: a deferred write error (EIO, a
+        # full NFS quota) surfaces on close and must fail the copy. Dropped
+        # before the close, so a failed close is never closed again.
+        fd, out = out, None
+        os.close(fd)
         done = True
     finally:
         # Held: a signal that lands mid-cleanup waits for it to finish.

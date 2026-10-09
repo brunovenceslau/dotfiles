@@ -1428,9 +1428,11 @@ has "identity: python3 is not usable here - skipping (install the Command Line T
 # A checkout path is untrusted text and the line names it in a command: a
 # path holding a quote, an ESC, a newline, a Latin-1 byte and UTF-8 prints as
 # one $'...' word, every byte outside printable ASCII as \xNN, and that word
-# pasted into a shell names the real path. The \351 byte goes red under
-# macOS's bash 3.2 without _shell_word's 255 mask. The directory is made,
-# not symlinked: install.sh resolves its own with pwd -P.
+# pasted into a shell names the real path. The \351 byte exercises
+# _shell_word's 255 mask only on the macOS legs, where install.sh runs under
+# /bin/bash 3.2 (a negative "'c" there); bash 4 and later read it as 233 with
+# or without the mask. The directory is made, not symlinked: install.sh
+# resolves its own with pwd -P.
 escdir="$work/co'$(printf '\033')[2J\\x$(printf '\n\351\303\251')"
 mkdir -p "$escdir"
 ln -s "$repo_root/install.sh" "$escdir/install.sh"
@@ -1461,6 +1463,16 @@ for pair in "/a/b-c_d.e@f%g+h=i:j,k|/a/b-c_d.e@f%g+h=i:j,k" "|''" "\\|'\\'" "a b
 done
 bash -c '. "$1"; unset LC_ALL; _shell_word "$(printf "\351")" >/dev/null; [ -z "${LC_ALL+x}" ]' _ "$installer" \
   || fail "_shell_word leaked its LC_ALL=C into the caller"
+# Under a UTF-8 caller locale the helper still works on bytes: without its
+# own LC_ALL=C, ${s:i:1} would take e-acute as one character and spell it
+# \xe9 (its code point), not its two UTF-8 bytes.
+utf8="$(locale -a 2>/dev/null | grep -iE '^(C|en_US)\.utf-?8$' | sed -n 1p)" || utf8=""
+if [ -n "$utf8" ]; then
+  got="$(LC_ALL="$utf8" bash -c '. "$1"; _shell_word "$2"' _ "$installer" "$(printf 'x\303\251')")"
+  [ "$got" = "\$'x\\xc3\\xa9'" ] || fail "_shell_word under $utf8: [$got], want [\$'x\\xc3\\xa9']"
+else
+  echo "SKIP: _shell_word under a UTF-8 locale (locale -a lists no C.UTF-8 or en_US.UTF-8)"
+fi
 ok
 
 # --- a config.local that is not a regular file: refused before any git read ---
