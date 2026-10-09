@@ -743,7 +743,7 @@ ok "a heading's code span is read verbatim up to 2048 characters and as prose pa
 # pass read it too). The previous regexes were quadratic here (measured: one
 # 200 KB line of `[a](b` alone, or of `<a `, outlived 20 s, and a single
 # 200 KB heading of `[` or of `[a](x` did too), while every scan now takes
-# well under a second, so the 30 s bound separates the two with room for a
+# well under a second, so the 60 s bound separates the two with room for a
 # slow runner.
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
@@ -834,10 +834,12 @@ with open(os.path.join(d, "hostile-links.md"), "w") as f:
         f.write("[x](%s#x)\n" % name)
 PY
 git -C "$work/r" add -A
-bounded_run 30 "$work/hostile.out" python3 -I "$gate" "$work/r" \
+# 60 s, not 30: measured 5.9 to 7.6 s here at load 1.8, so 30 s gave a
+# 1.3x to 1.7x margin on a runner three times slower.
+bounded_run 60 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: bounded_run could not turn job control on"
 [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
-  || fail "hostile input: linkcheck outlived 30 s (hung $br_hung, stuck $br_stuck)"
+  || fail "hostile input: linkcheck outlived 60 s (hung $br_hung, stuck $br_stuck)"
 [ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
@@ -1088,12 +1090,8 @@ cat >"$work/r/docs/spans2.md" <<'MD'
 
 ## \` escaped
 
-## [`a](u`)
-
-## ![`a](u`) x
-
 [1](#a) [2](#a-b) [3](#a-c) [4](#a-c-1) [5](#pad-x) [6](#ab-foo)
-[7](#unclosed--tick) [8](#-escaped) [9](#au) [10](#au-x)
+[7](#unclosed--tick) [8](#-escaped)
 MD
 git -C "$work/r" add -A
 run
@@ -1120,13 +1118,28 @@ expect_broken README.md '<b title="`">x</b> <a id="p"></a> `y`
 
 [l](#p)' 'no such anchor in README\.md: #p' \
   "a backtick in another tag's value pairs with a later one (known miss)"
+# heading_slug HEADING ID WHY - a heading in a fresh tree must have this id.
+heading_slug() {
+  new_tree
+  printf '## %s\n\n[l](#%s)\n' "$1" "$2" >"$work/r/docs/slug1.md"
+  git -C "$work/r" add -A
+  run
+  [ "$rc" = 0 ] || fail "$3: $1 must slug to $2 (exit $rc): $out"
+  ok "$3"
+}
+heading_slug '[`a](u`)' au "a span opened in link text takes the closing bracket and the destination"
+heading_slug '![`a](u`) x' au-x "a span opened in image alt text takes the closing bracket and the destination"
+heading_slug '[`a`](u`) `c`' a-c "a span closed inside the link text leaves the destination backtick to the link"
+heading_slug '[`a` b](u`) `c`' a-b-c "a span closed inside longer link text leaves the destination backtick to the link"
 # Pinned miss: in a body link a backtick in the destination can pair with a
 # later one, so the link is hidden and the anchor after it is lost.
 new_tree
-printf '%s\n' '[a](docs/gone-bt.md`) `b` <a id="k"></a>' >>"$work/r/README.md"
+printf '%s\n' '[a](docs/gone-bt.md`) <a id="k"></a> `b`' '' '[l](#k)' >>"$work/r/README.md"
 git -C "$work/r" add -A
 run
-[ "$rc" = 0 ] || fail "a backtick in a body link destination hides the link, a known miss (exit $rc): $out"
+[ "$rc" = 1 ] && grep -q 'no such anchor in README\.md: #k' <<<"$out" \
+  && ! grep -q 'gone-bt' <<<"$out" \
+  || fail "a backtick in a body link destination hides the link and the anchor after it, a known miss (exit $rc): $out"
 ok "a backtick in a body link's destination pairs with a later one (known miss, pinned)"
 expect_broken README.md '<a x<img id="q">
 

@@ -484,10 +484,10 @@ link-convention change.
   heading, a backtick opens a code span only outside a link's destination
   and title. In any text, a backtick opens a span only when no backslash
   escapes it, and not inside an `<a>` or `<img>` tag. A backtick in the
-  destination of a body link is a known miss: it can pair with a later one
-  and hide the link. A backtick in any other tag's quoted value is a known
-  miss too. An anchor into any other file, such as a `#L10` line anchor, is
-  not checked.
+  destination or title of a body link is a known miss: it can pair with a
+  later one, which hides the link and any anchor between the two backticks.
+  A backtick in any other tag's quoted value is a known miss too. An
+  anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
 - Front matter, fenced code blocks and HTML comments (both running to the end
