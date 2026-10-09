@@ -218,7 +218,7 @@ ok
 # naming the staging step, leave no .smoke/run behind, and leave the source
 # untouched. Needs zsh: bin/smoke skips before staging without it.
 if [ "$is_root" -eq 1 ]; then
-  echo "SKIP: smoke_stage_test case 6 (running as root: a mode-000 file stays readable)"
+  echo "SKIP: smoke_stage_test case 6, partial failure (running as root: a mode-000 file stays readable)"
 elif command -v zsh >/dev/null 2>&1; then
   c6="$work/c6"
   git clone -q "$super" "$c6"
@@ -286,7 +286,7 @@ ok
 # --checkpoint-action name does run its command.
 c8="$work/c8"
 case "$(tar --version 2>/dev/null)" in
-  *"GNU tar"*) echo "NOTE: smoke_stage_test case 8 (GNU tar: the @x.tar half is not proven on this host)" ;;
+  *"GNU tar"*) echo "NOTE: smoke_stage_test case 8, option-like names (GNU tar: the @x.tar half is not proven on this host)" ;;
 esac
 git clone -q "$super" "$c8"
 echo dash-entry > "$c8/--exclude=a.txt"
