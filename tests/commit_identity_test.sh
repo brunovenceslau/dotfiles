@@ -435,6 +435,24 @@ for role in committer author; do
 done
 ok "pre-push refuses a second author or committer hidden behind a NUL"
 
+# The NUL rule alone, with no duplicate header to trip the other rule: one
+# author, one committer and a line holding a NUL. A regression that drops
+# the NUL check would pass this commit, so only the refusal below catches it.
+solo="$(printf 'tree %s\nparent %s\nauthor G <g@x> 1 +0000\ncommitter G <g@x> 1 +0000\nx\0y\n\nsolo\n' \
+  "$(git -C "$r" rev-parse 'main^{tree}')" "$(git -C "$r" rev-parse main)" \
+  | git -C "$r" hash-object -t commit -w --literally --stdin)"
+[ "$(git -C "$r" log -1 --format=%ae "$solo")" = g@x ] \
+  || fail "fixture: %ae should read the author header of $solo"
+if git -C "$r" push -q origin "$solo:refs/heads/solo" 2>"$work/err"; then
+  fail "pre-push must refuse a commit whose only fault is a NUL line"
+fi
+grep -qxF "commit-identity: pre-push: commit $solo has a NUL in its headers, so who made it is unclear" \
+  "$work/err" || fail "pre-push must exit 2 on a lone NUL among the headers: $(err)"
+if git -C "$remote" rev-parse -q --verify refs/heads/solo >/dev/null; then
+  fail "a refused push must not create the remote branch"
+fi
+ok "pre-push refuses a NUL among the headers with no duplicate header"
+
 # The headers are read raw: an output encoding that writes NULs of its own
 # (UTF-16) changes nothing, and an empty message still passes.
 git -C "$r" checkout -q -b enc main
