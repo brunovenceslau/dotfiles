@@ -339,7 +339,9 @@ def slugify(text):
     `_link_bin_tree` keeps both underscores."""
     # Every class below stops at its own opener or is bounded, so a heading
     # line of unclosed `[`, `(`, `<` or backticks costs near-linear time.
-    text = re.sub(r"!?\[([^\[\]]*)\]\([^()]*\)", r"\1", text)   # a link renders as its text
+    # One level of balanced parentheses in the destination, as in a Wikipedia
+    # URL; the two branches start on disjoint characters, so no backtracking blowup.
+    text = re.sub(r"!?\[([^\[\]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
     for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
         rendered.append(_render_inline(text[pos:m.start()]))

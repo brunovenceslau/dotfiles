@@ -332,6 +332,17 @@ git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a Unicode anchor, a mailto: link and a tab-indented fence must pass (exit $rc): $out"
 ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
+
+# A heading holding a link whose destination has balanced parentheses (a
+# Wikipedia URL) renders as the link's text alone, so its id is the text's.
+# Unbalanced parentheses in plain heading text are dropped like any
+# punctuation; both must resolve.
+new_tree
+printf '## See [Foo](https://example.com/a_(b)) now\n\n## Odd (text\n\n[p](#see-foo-now) [q](#odd-text)\n' >"$work/r/docs/paren.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a heading link destination with parentheses must slug to its text (exit $rc): $out"
+ok "a heading link whose destination holds balanced parentheses slugs to its text"
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
