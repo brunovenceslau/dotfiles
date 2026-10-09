@@ -211,12 +211,18 @@ pass=$((pass + 2))
 # error (the fetch-then-`git -C` path cannot execute it). run-shell is deterministic:
 # no attached client, no async render capture.
 if command -v tmux >/dev/null 2>&1; then
-  sock="$work/tmux.sock"
+  # The socket lives in its own short directory, not under $work: a unix socket
+  # path is capped by sun_path (104 bytes on macOS, 108 on Linux) and a long
+  # $TMPDIR overflows it. /tmp is short on every platform this suite runs on.
+  sockdir="$(mktemp -d /tmp/tsock.XXXXXX)"
+  trap 'rm -rf "$work" "$sockdir"' EXIT
+  sock="$sockdir/s"
   tmux -L cl24test-$$ kill-server 2>/dev/null || true
   # (a) self-fetch renders the correct branch
   prepo="$work/pane repo"; mkdir -p "$prepo"
   ( cd "$prepo" && git init -q && git branch -m probe/xyz ) >/dev/null 2>&1
-  tmux -S "$sock" new-session -d -s s -c "$prepo" -x 80 -y 24 2>/dev/null
+  tmux -S "$sock" new-session -d -s s -c "$prepo" -x 80 -y 24 \
+    || fail "tmux new-session failed (socket path ${#sock} bytes: $sock)"
   rm -f "$work/dyn.out"
   tmux -S "$sock" run-shell -t s "DOTFILES='$repo_root' GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null '$TS' > '$work/dyn.out' 2>&1"
   dyn="$(cat "$work/dyn.out" 2>/dev/null || true)"
@@ -226,7 +232,8 @@ if command -v tmux >/dev/null 2>&1; then
   evil="$(printf 'boom\npwncmd\n:')"   # slash-free leaf; a newline-separated command
   mkdir -p "$work/wrap"; ( cd "$work/wrap" && mkdir -- "$evil" ) 2>/dev/null || true
   rm -f "$work/PWNED_DYN"
-  tmux -S "$sock" new-session -d -s e -c "$work/wrap/$evil" -x 80 -y 24 2>/dev/null
+  tmux -S "$sock" new-session -d -s e -c "$work/wrap/$evil" -x 80 -y 24 \
+    || fail "tmux new-session (injection pane) failed"
   tmux -S "$sock" run-shell -t e "DOTFILES='$repo_root' PATH='$work:$PATH' '$TS' > '$work/dyn2.out' 2>&1"
   tmux -S "$sock" kill-server 2>/dev/null || true
   [ -e "$work/PWNED_DYN" ] && fail "a malicious pane directory name executed a command through the helper's self-fetch"
