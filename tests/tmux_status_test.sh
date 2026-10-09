@@ -215,7 +215,9 @@ if command -v tmux >/dev/null 2>&1; then
   # path is capped by sun_path (104 bytes on macOS, 108 on Linux) and a long
   # $TMPDIR overflows it. /tmp is short on every platform this suite runs on.
   sockdir="$(mktemp -d /tmp/tsock.XXXXXX)"
-  trap 'rm -rf "$work" "$sockdir"' EXIT
+  # One server serves both sessions on this socket; kill it on EVERY exit path
+  # (a failing new-session leaves it alive) before its directory is deleted.
+  trap 'tmux -S "$sockdir/s" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT
   sock="$sockdir/s"
   tmux -L cl24test-$$ kill-server 2>/dev/null || true
   # (a) self-fetch renders the correct branch

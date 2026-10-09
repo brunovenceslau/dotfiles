@@ -170,14 +170,14 @@ ck "the example never mentions tag.forceSignAnnotated" "$(grep -ci forcesignanno
 # with or without the commit. prefix. git reads `false`, `no`, `off`, `0` and an
 # EMPTY value as false; `#` and `;` both start a comment; a trailing comment may
 # follow the value, and the value may be quoted.
-optout_re='^[#;][[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*("?(false|no|off|0)"?)?[[:space:]]*([#;].*)?$'
+optout_re='^[#;][[:space:]]*(commit\.)?gpgsign[[:space:]]*=[[:space:]]*("?(false|no|off|[-+]?0+)"?)?[[:space:]]*([#;].*)?$'
 optout_count() { grep -ciE "$optout_re" "$1" || :; }
 # The matcher itself is proven on one line per shape, so it cannot go blind to
 # one of them while the example stays clean.
 shapes="$work/optout_shapes"
 for line in '# gpgsign = false' '#commit.gpgsign=no' '; gpgsign = false' ';	commit.gpgsign = off' \
   '# gpgsign = false # trailing' '# gpgsign = false ; trailing' '# gpgsign =' '; commit.gpgsign =  ' \
-  '# gpgsign = "false"' '# gpgsign = 0 # x'; do
+  '# gpgsign = "false"' '# gpgsign = 0 # x' '# gpgsign = 00' '; gpgsign = -0' '# gpgsign = +0'; do
   printf '%s\n' "$line" > "$shapes"
   ck "the opt-out matcher catches: $line" "$(optout_count "$shapes")" "1"
 done
