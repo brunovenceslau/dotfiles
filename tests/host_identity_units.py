@@ -601,6 +601,21 @@ def escaping_units(mod, scratch):
               "%s quotes a CANGA_HOST_ALLOWED_SIGNERS holding a control character (%r)" % (mode, text))
     del os.environ["CANGA_HOST_ALLOWED_SIGNERS"]
 
+    # auto: main() prints ONE line, its headline plus a suffix that names
+    # the installer; the suffix's value is escaped like any other.
+    inst = "/opt/inst" + OSC + "/install.sh"
+    inst_shown = "'/opt/inst%s/install.sh'" % OSC_SHOWN
+    h.set(user__signingkey="key::ssh-ed25519 AAAA", user__name="Jane")
+    rc, text = h.said("auto", installer=inst)
+    check(rc == 1 and printable(text) and text.count("\n") == 1
+          and text.endswith(" (details: %s identity)\n" % inst_shown),
+          "auto's one line escapes the installer in its details suffix (%r)" % text)
+    h.set(user__email="other@example.com")
+    rc, text = h.said("auto", installer=inst)
+    check(rc == 1 and printable(text) and text.count("\n") == 1
+          and "; every commit fails until this host has a signing key - run %s identity on this host" % inst_shown
+          in text, "auto's one line escapes the installer in its fail-closed suffix (%r)" % text)
+
     # The sweep: every mode on a host whose every value holds one, nothing
     # printed raw.
     revocation = os.path.join(scratch, "revoked" + OSC)

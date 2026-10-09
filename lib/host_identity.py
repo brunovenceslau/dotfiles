@@ -1949,7 +1949,7 @@ def auto(host):
         return 1, None
     rc = identity(host, None)
     if rc != 0 and commits_fail_closed(host):
-        return rc, FAIL_CLOSED % host.installer
+        return rc, FAIL_CLOSED % _shown(host.installer)
     return rc, None
 
 
@@ -2548,6 +2548,9 @@ def main(argv):
     # line (log(), not a warning) and then the name line, since rc 0 keeps
     # every warning; a run that cannot write prints its one cause line, and
     # the name line comes on a later run.
+    # Each line is printed as it is: every value in it went through
+    # _shown() where it was put in, the suffixes' installer path included,
+    # so this is no place to escape it a second time.
     if lines:
         if rc == 0:
             for line in lines:
@@ -2557,7 +2560,7 @@ def main(argv):
             if consequence:
                 line += consequence
             elif "%s identity" % host.installer not in line:
-                line += " (details: %s identity)" % host.installer
+                line += " (details: %s identity)" % _shown(host.installer)
             warn(line)
     return rc
 
