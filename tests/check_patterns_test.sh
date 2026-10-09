@@ -3466,12 +3466,14 @@ SHAPES
 # over the limit, exempt only as ONE whole link, so the verdict is checked
 # beside the bound: a bound alone would pass a gate that exits early and wrong.
 # What each shape pins: run, several and eol fail under that two-character
-# skip (hang); run-literal pins "the whole run is literal" (a mutant that lets
-# the rest of an escaped run open a span flips it to a pass); after-run pins
-# that the walk resumes AT the character after the run (a skip one too far
-# jumps over the `]`); backslash-pair pins that `\\` is consumed as a pair, so
-# the backtick after it is real (a mutant that does not flips it to a fail);
-# unclosed guards over-correction, it stays green under the revert.
+# skip (hang); run-literal catches a mutant where the escaped run still opens
+# its own span; run-rest catches a mutant where the REST of the run opens a
+# span (the CommonMark reading, length L-1, which pairs with the next run of
+# that length); after-run pins that the walk resumes AT the character after
+# the run (a skip one too far jumps over the `]`); backslash-pair pins that
+# `\\` is consumed as a pair, so the backtick after it is real (a mutant that
+# does not flips it to a fail); unclosed pins skipcode's unclosed-run
+# fallback (`return i + rl[k]`), it stays green under the revert.
 i=0
 while IFS='|' read -r want shape; do
   i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"
@@ -3481,6 +3483,7 @@ while IFS='|' read -r want shape; do
     several) printf '[%s \\` \\``` \\`` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
     backslash-pair) printf '[%s \\\\`]` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
     run-literal) printf '[%s \\`` ] `` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
+    run-rest) printf '[%s \\`` ] ` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
     after-run) printf '[%s \\``](%s)\n' "$md81" "$_md_long_token" > "$f" ;;
     unclosed) printf '[%s ``` %s](%s)\n' "$md40" "$md40" "$_md_long_token" > "$f" ;;
     eol) printf '[%s](%s) \\``\n' "$md81" "$_md_long_token" > "$f" ;;
@@ -3497,6 +3500,9 @@ while IFS='|' read -r want shape; do
     # rc alone can come from another arm (see fails_with above)
     grep -qF "$md_msg" "$work/mdw-esc-$i.out" && ok \
       || fail "arm 15 escaped backtick: $shape failed without the arm 15 message"
+    # and no other arm fired beside it
+    [ "$(grep -F 'check-patterns:' "$work/mdw-esc-$i.out" | grep -vF "$md_msg" | grep -vcF 'check-patterns: SKIP ')" = 0 ] && ok \
+      || fail "arm 15 escaped backtick: $shape tripped another arm"
   fi
 done <<'SHAPES'
 pass|run
@@ -3505,6 +3511,7 @@ pass|backslash-pair
 pass|unclosed
 pass|after-run
 fail|run-literal
+fail|run-rest
 fail|eol
 SHAPES
 
