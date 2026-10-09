@@ -1440,7 +1440,12 @@ ln -s "$repo_root/install.sh" "$escdir/install.sh"
 ln -s "$repo_root/lib" "$escdir/lib"
 rc=0; out="$(PATH="$work/nopy" "$escdir/install.sh" identity 2>&1)" || rc=$?
 expect_rc 1 "python3 unusable, quoted checkout path"
-has "then run \$'$work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
+# The path install.sh prints is its own resolution of the checkout, cd + pwd
+# -P (DOTFILES at its top), mirrored here: on macOS TMPDIR sits under /var,
+# a symlink to /private/var, so the unresolved $work never matches.
+real_escdir="$(cd "$(dirname "$escdir/install.sh")" && pwd -P)"
+real_work="$(cd "$work" && pwd -P)"
+has "then run \$'$real_work/co\\'\\x1b[2J\\\\x\\x0a\\xc3\\xa9/install.sh' identity)" "python3 unusable quotes the checkout path as one word"
 raw_free() {
   local LC_ALL=C b
   for b in "$(printf '\033')" "$(printf '\303')" "$(printf '\251')"; do
@@ -1451,7 +1456,7 @@ raw_free() {
 }
 raw_free "python3 unusable"
 word="${out#*then run }"; word="${word% identity)}"
-[ "$(eval "printf '%s' $word")" = "$escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
+[ "$(eval "printf '%s' $word")" = "$real_escdir/install.sh" ] || fail "the printed word does not name the real installer: $word"
 ok
 
 # --- install.sh _shell_word: the shapes, and LC_ALL kept ----------------------
