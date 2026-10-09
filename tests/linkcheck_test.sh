@@ -365,8 +365,10 @@ cat >"$work/r/docs/paren.md" <<'MD'
 
 ## Odd (text
 
+## ![i](https://e.com/u "t") Foo
+
 [1](#-foo-now) [2](#x-foo-y) [3](#z-foo-w) [4](#e-foo-v) [5](#a-foo-bar-baz-u)
-[6](#s-ab-c-t) [7](#b-ahttpsecomx-y-t) [8](#d-foohttpsecomab-q) [9](#odd-text)
+[6](#s-ab-c-t) [7](#b-ahttpsecomx-y-t) [8](#d-foohttpsecomab-q) [9](#odd-text) [10](#-foo)
 MD
 git -C "$work/r" add -A
 run
@@ -417,10 +419,11 @@ shapes = {
     "h15.md": "# " + "<" * (2 * n),
     "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 2100)),
     "h17.md": "[a][" * (n // 4),
-    # A heading link whose destination is unclosed after a run of spaces: the
-    # spaces once competed between four parts of the heading-link pattern.
-    "h18.md": "# [a](" + " " * n,
-    "h19.md": "# [a](x" + " " * n,
+    # A heading link or image whose destination is unclosed after a run of
+    # spaces and then a character (atx_text strips trailing spaces, so the
+    # spaces must be followed by something): once quadratic, 200 KB outlived 60 s.
+    "h18.md": "# [a](" + " " * n + "x",
+    "h19.md": "# ![a](" + " " * n + "x",
     "h20.md": "# [a](x " + " " * n + '"',
     "h21.md": "# [a](" + "(x" * (n // 2),
 }

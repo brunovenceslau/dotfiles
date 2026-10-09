@@ -339,17 +339,20 @@ def atx_text(rest):
 # deeper one stays literal text here (pinned by a test) instead of a hang risk.
 # Linear time: the alternatives of the starred group start on different
 # characters (a lookahead splits the two backslash forms), and the optional
-# group holds the whole destination-title-spaces tail, so a run of spaces has
-# one way to be consumed.
+# group holds the whole destination-title-spaces tail, so a run of spaces is
+# retried at most once per part, never once per start position.
 _PUNCT = r"[!-/:-@\[-`{-~]"
 _DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\\s]"
 _NEST = r"\((?:" + _DEST_CHAR + r")*\)"
 for _ in range(2):
     _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
-HEADING_IMAGE = re.compile(r"!\[[^\[\]]*\]\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)")
-HEADING_LINK = re.compile(
-    r"\[([^\[\]]*)\]\(\s*(?:(?:<[^<>\n]*>|(?:" + _DEST_CHAR + r"|" + _NEST + r")+)"
-    r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*)?\)")
+_TAIL = (r"\(\s*(?:(?:<[^<>\n]*>|(?:" + _DEST_CHAR + "|" + _NEST + r")+)"
+         r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*)?\)")
+# An image shares the link's tail, else the `[alt](...)` part of an image with
+# a title would match as a link and leak its alt text; an escaped `!` makes it
+# a plain link.
+HEADING_IMAGE = re.compile(r"(?<!\\)!\[[^\[\]]*\]" + _TAIL)
+HEADING_LINK = re.compile(r"\[([^\[\]]*)\]" + _TAIL)
 
 
 def slugify(text):
