@@ -175,7 +175,11 @@ print(" ".join(x for x in names if x not in m.GIT_LOCAL_ENV))
 ok
 
 # --- unit checks: Python 3.9 floor, env scrub, key types, fallbacks ----------
-mkdir -p "$work/units"
+# SCRATCH is passed through a symlink on purpose: macOS's TMPDIR already is one
+# (/var -> /private/var), so a check that compares a path with getcwd() fails
+# only there unless Linux runs it behind a link too.
+mkdir -p "$work/units-real"
+ln -s units-real "$work/units"
 out="$(python3 -I -B "$repo_root/tests/host_identity_units.py" "$module" "$work/units" 2>&1)" \
   || fail "unit checks: $out"
 has "0 failure(s)" "unit checks ran to the end"
