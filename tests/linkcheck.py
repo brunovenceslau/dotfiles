@@ -331,18 +331,25 @@ def atx_text(rest):
 
 
 # A link inside a heading, for slugify: it renders as its text. The destination
-# follows CommonMark: no whitespace, `\(` and `\)` escaped, or balanced
-# parentheses nested up to 3 levels deep (the minimum the spec requires), or
-# `<...>`, which may hold spaces; a quoted title may follow. Every alternative
-# of the starred group starts on a different character (`\`, a non-paren
-# non-space, `(`), so the match never backtracks into itself: linear time.
-_DEST_CHAR = r"\\.|[^()\\\s]"
+# follows CommonMark: no whitespace; a backslash escapes only ASCII punctuation
+# (`\(` and `\)` included), else it is a literal; balanced parentheses nest;
+# or `<...>`, which may hold spaces. A quoted or parenthesized title may follow.
+# Nesting stops at 3 levels: GitHub's cmark-gfm allows 32 (inlines.c), but a
+# heading link deeper than 3 is far past anything in a tracked doc, and a
+# deeper one stays literal text here (pinned by a test) instead of a hang risk.
+# Linear time: the alternatives of the starred group start on different
+# characters (a lookahead splits the two backslash forms), and the optional
+# group holds the whole destination-title-spaces tail, so a run of spaces has
+# one way to be consumed.
+_PUNCT = r"[!-/:-@\[-`{-~]"
+_DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\\s]"
 _NEST = r"\((?:" + _DEST_CHAR + r")*\)"
 for _ in range(2):
     _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
+HEADING_IMAGE = re.compile(r"!\[[^\[\]]*\]\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)")
 HEADING_LINK = re.compile(
-    r"!?\[([^\[\]]*)\]\(\s*(?:<[^<>\n]*>|(?:" + _DEST_CHAR + r"|" + _NEST + r")*)"
-    r"(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+    r"\[([^\[\]]*)\]\(\s*(?:(?:<[^<>\n]*>|(?:" + _DEST_CHAR + r"|" + _NEST + r")+)"
+    r"(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^()]*\)))?\s*)?\)")
 
 
 def slugify(text):
@@ -354,6 +361,11 @@ def slugify(text):
     `_link_bin_tree` keeps both underscores."""
     # Every class below stops at its own opener or is bounded, so a heading
     # line of unclosed `[`, `(`, `<` or backticks costs near-linear time.
+    # html-pipeline builds the id from the rendered text, and an image adds
+    # none, so `![i](u) Foo` keeps its leading space and gets a leading hyphen.
+    # A NUL stands in for the image: it is not whitespace, so the strip below
+    # leaves the space beside it, and the character loop drops it.
+    text = HEADING_IMAGE.sub("\0", text.strip())
     text = HEADING_LINK.sub(r"\1", text)   # a link renders as its text
     rendered, pos = [], 0
     for m in re.finditer(r"(?<!`)(`+)(?!`)(.{1,2048}?)(?<!`)\1(?!`)", text):
