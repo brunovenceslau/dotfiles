@@ -846,12 +846,14 @@ import linkcheck
 def best(text):
     lo = None
     gc.disable()
-    for _ in range(5):
-        t = time.perf_counter()
-        linkcheck.blank_spans(text, True)
-        dt = time.perf_counter() - t
-        lo = dt if lo is None else min(lo, dt)
-    gc.enable()
+    try:
+        for _ in range(5):
+            t = time.perf_counter()
+            linkcheck.blank_spans(text, True)
+            dt = time.perf_counter() - t
+            lo = dt if lo is None else min(lo, dt)
+    finally:
+        gc.enable()
     return lo
 
 def pairs(n):
@@ -906,8 +908,30 @@ PY
 git -C "$work/r" add -A
 run
 [ "$rc" = 2 ] && grep -qF 'wide\x1b\u202e.md: over '"$cap"' bytes' <<<"$out" \
+  && ! grep -q "$(printf '\033')" <<<"$out" \
+  && ! grep -q "$(printf '\342\200\256')" <<<"$out" \
   || fail "a file over the cap in bytes, not in characters, must exit 2 with its name escaped (got $rc): $out"
 ok "the cap counts bytes, and the over-cap error prints a hostile name escaped"
+
+# A symlink swapped into the final component after realpath's check: the open
+# itself refuses it (O_NOFOLLOW), with the same error as the check. realpath
+# is stubbed to pass, which stands for losing that race.
+new_tree
+ln -s ../README.md "$work/r/docs/swapped.md"
+python3 -I -B - "$repo_root/tests" "$work/r" <<'PY' || fail "O_NOFOLLOW: a final-component symlink must be refused"
+import os, sys
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+linkcheck.os.path.realpath = lambda p: p
+try:
+    linkcheck.read_text(sys.argv[2], "docs/swapped.md")
+except linkcheck.GateError as e:
+    if "reached through a symlink" not in str(e):
+        sys.exit("wrong message: %s" % e)
+else:
+    sys.exit("the symlink was read")
+PY
+ok "a symlink swapped into the final component after the check is refused at the open"
 
 # A tracked file swapped for a FIFO must fail closed, not wait for a writer.
 new_tree

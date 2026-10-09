@@ -83,6 +83,7 @@ Python 3.9-safe: macOS's Command Line Tools python3 is 3.9.
 """
 
 import bisect
+import errno
 import html
 import html.entities
 import os
@@ -297,9 +298,13 @@ def read_text(root, rel):
         raise GateError("%s: reached through a symlink in the working tree" % rel)
     try:
         # O_NONBLOCK: opening a FIFO swapped in after main's isfile check
-        # would otherwise wait for a writer forever. The symlink case is
-        # already refused above, so O_NOFOLLOW would add nothing.
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        # would otherwise wait for a writer forever. O_NOFOLLOW: realpath
+        # above refuses a symlink anywhere in the path at check time, and
+        # this refuses one swapped into the FINAL component between that
+        # check and the open (it covers the final component only); the
+        # kernel answers ELOOP, reported as the same symlink error.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as f:
             if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
                 raise GateError("%s: tracked as a regular file but not one "
@@ -308,6 +313,8 @@ def read_text(root, rel):
             # is refused too, and an oversized one is never read whole.
             data = f.read(MAX_FILE_BYTES + 1)
     except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise GateError("%s: reached through a symlink in the working tree" % rel)
         raise GateError("%s: %s" % (rel, e.strerror))
     if len(data) > MAX_FILE_BYTES:
         raise GateError("%s: over %d bytes, too large to check in bounded time"
