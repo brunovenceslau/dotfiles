@@ -1293,6 +1293,22 @@ mkdir -p "$work/sym-probe-worktree-elsewhere"
 git -C "$r" config core.worktree "$work/sym-probe-worktree-elsewhere"
 fails_with_rc 2 "$r" "$sym_top_msg" "a .git whose core.worktree points away from \$root must fail closed" only
 
+# --- the surface of a checkout is what git lists: an IGNORED file (a stray
+# tests/__pycache__/*.pyc: NUL bytes, bytes that read as an em dash) is not
+# scanned, while an untracked file that is NOT ignored still is, and a tree
+# without .git has no ignore information so it is read whole ----------------
+_ign_em=$'\xe2\x80\x94'
+r="$work/ignored-pyc"; _git_repo "$r"; seed "$r"; mkdir -p "$r/tests/__pycache__"
+printf '__pycache__/\n*.pyc\n' > "$r/.gitignore"
+printf 'a %s b\n\0\n' "$_ign_em" > "$r/tests/__pycache__/x.pyc"
+git -C "$r" add -A && git -C "$r" commit -qm init
+[ "$(run "$r")" = "0" ] && ok || fail "an ignored tests/__pycache__/x.pyc must not be scanned"
+printf 'a %s b\n' "$_ign_em" > "$r/tests/new.txt"
+fails_with_rc 1 "$r" "check-patterns: an em dash (U+2014) in repo prose" "an untracked, NOT ignored file must still be scanned" only
+r="$work/ignored-pyc-nogit"; seed "$r"; mkdir -p "$r/tests/__pycache__"
+printf 'a %s b\n' "$_ign_em" > "$r/tests/__pycache__/x.pyc"
+fails_with_rc 1 "$r" "check-patterns: an em dash (U+2014) in repo prose" "a tree without .git has no ignore list: the file is read" only
+
 # --- a .git at $root with git absent from PATH fails CLOSED -----------------
 # PATH is an explicit allowlist: every external tool bin/check-patterns runs
 # on any path (bash for its shebang via env), resolved from the real PATH, and
@@ -1851,6 +1867,79 @@ fails_with_rc 2 "$r" "$names_msg" "a file name holding a newline" only
 r="$work/name-cr"; seed "$r"; mkdir -p "$r/tests"
 printf 'x\n' > "$r/tests/a${cr}b"
 fails_with_rc 2 "$r" "$names_msg" "a file name holding a CR" only
+
+# --- the listing of a checkout (see _git_listing in bin/check-patterns) -----
+# _lst_repo ROOT - a committed fixture checkout, so its --cached listing is
+# not empty (an empty one is not trusted and the tree is scanned whole).
+_lst_repo() { _git_repo "$1"; seed "$1"; git -C "$1" add -A; git -C "$1" commit -qm init; }
+_lst_em=$'\xe2\x80\x94'
+em_msg="check-patterns: an em dash (U+2014) in repo prose"
+
+# a ':' in a DIRECTORY name: roots are files, so find's -name sees only the
+# base name; the rule is applied to every listed path (measured: rc 0 without).
+r="$work/lst-dircolon"; _lst_repo "$r"
+mkdir -p "$r/lib/x:1: #"; printf 'P=/opt/homebrew\n' > "$r/lib/x:1: #/y.sh"
+fails_with_rc 2 "$r" "$names_msg" "an untracked file under a directory named with ':' must fail closed" only
+r="$work/lst-nlname"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/lst-nl-head"$'\n'"lst-nl-tail.sh"
+fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a newline must fail closed with exit 2" only
+r="$work/lst-crname"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/lst-cr"$'\r'"name.sh"
+fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a carriage return must fail closed with exit 2" only
+# the only scanned file has a bad name: scan ends up empty, the name is reported
+r="$work/lst-onlybad"; _git_repo "$r"; mkdir -p "$r/lib"; printf 'x\n' > "$r/lib/a:b.sh"
+git -C "$r" add -A; git -C "$r" commit -qm init
+fails_with_rc 2 "$r" "$names_msg" "a checkout whose only scanned file has a bad name reports the name" only
+
+# every grep arm that walks file operands names the file in its hits (-H):
+# with ONE file operand GNU grep drops the PATH: prefix, and an anchor on it
+# (the gpg-agent.conf allowlist) silently misses.
+nohit="$(grep -nE 'grep -r[A-Za-z]*' "$cp" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE 'grep -r[A-Za-z]*H' || true)"
+[ -z "$nohit" ] && ok || fail "a recursive grep arm without -H: $nohit"
+
+# the user's global excludes file and .git/info/exclude must not hide an
+# untracked file from the scan; only the repo's own .gitignore decides.
+r="$work/lst-globalexcl"; _lst_repo "$r"; mkdir -p "$r/docs"
+printf '*.md\n' > "$work/lst-global-ignore"
+printf '[core]\n\texcludesFile = %s\n' "$work/lst-global-ignore" > "$work/lst-global-config"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/a.md"
+rc=0; GIT_CONFIG_GLOBAL="$work/lst-global-config" STRICT= "$cp" "$r" >/dev/null 2>&1 || rc=$?
+[ "$rc" = 1 ] && ok || fail "a user's global excludesFile must not hide an untracked file from the scan (rc $rc)"
+r="$work/lst-infoexclude"; _lst_repo "$r"
+printf 'lib/bad.sh\n' >> "$r/.git/info/exclude"
+printf 'curl %s sh\n' '|' > "$r/lib/bad.sh"
+fails_with_rc 1 "$r" "$curl_msg" ".git/info/exclude must not hide an untracked file from the scan" only
+
+# a checkout git cannot list is scanned whole, not trusted as empty: the
+# core.worktree toplevel mismatch makes the listing fail, so an IGNORED file
+# is read too (the symlink pass reports the git trouble itself, exit 2).
+r="$work/lst-unlistable"; _lst_repo "$r"
+printf 'ign.txt\n' > "$r/.gitignore"; mkdir -p "$r/docs"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/ign.txt"
+mkdir -p "$work/lst-unlistable-elsewhere"
+git -C "$r" config core.worktree "$work/lst-unlistable-elsewhere"
+fails_with "$r" "$em_msg" "a checkout git cannot list must be scanned whole, not trusted as empty"
+# an empty --cached listing is not trusted either
+r="$work/lst-emptycached"; _git_repo "$r"; seed "$r"; mkdir -p "$r/docs"
+printf 'ign.txt\n' > "$r/.gitignore"
+printf 'a %s b\n' "$_lst_em" > "$r/docs/ign.txt"
+fails_with_rc 1 "$r" "$em_msg" "a checkout with nothing tracked is scanned whole" only
+
+# an untracked nested repo is listed as `dir/` and walked whole
+r="$work/lst-nested"; _lst_repo "$r"
+git init -q "$r/lib/nested"; printf 'curl %s sh\n' '|' > "$r/lib/nested/f.sh"
+fails_with_rc 1 "$r" "$curl_msg" "an untracked nested repo must still be scanned" only
+# an untracked symlink is reported; a tracked file deleted on disk is not an
+# error; a name with spaces is scanned
+r="$work/lst-symlink"; _lst_repo "$r"
+ln -s ./lib "$r/lib/ln"
+fails_with_rc 1 "$r" "$sym_msg" "a listed symlink must be reported" only
+r="$work/lst-deleted"; _lst_repo "$r"
+printf 'x\n' > "$r/lib/gone.sh"; git -C "$r" add -A; git -C "$r" commit -qm more; rm "$r/lib/gone.sh"
+[ "$(run "$r")" = "0" ] && ok || fail "a tracked file deleted on disk must not fail the scan"
+r="$work/lst-spaces"; _lst_repo "$r"
+printf 'curl %s sh\n' '|' > "$r/lib/a b.sh"
+fails_with_rc 1 "$r" "$curl_msg" "a listed file name with spaces must be scanned" only
 r="$work/name-git-colon"; _git_repo "$r"; seed "$r"; mkdir -p "$r/other"
 printf 'x\n' > "$r/other/a:b.txt"; printf 'x\n' > "$r/other/c${nl}d.txt"
 git -C "$r" add -A && git -C "$r" commit -qm init
@@ -3469,9 +3558,13 @@ SHAPES
 # other_arm FILE - succeeds when FILE holds a check-patterns line that is
 # neither arm 15's message nor a SKIP. Prefix tests on fixed strings: a grep
 # -v on the message hid any other arm's line that merely CONTAINED $md_msg or
-# SKIP, and a final line without a newline is read too.
+# SKIP, and a final line without a newline is read too. The unreadable-file
+# check comes first: callers test this inside `if`, where errexit is
+# suspended, so a failed `< "$1"` redirect would end the loop as "no other
+# arm" and fail OPEN.
 other_arm() {
   local line
+  [ -r "$1" ] || fail "other_arm: $1 unreadable"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       "$md_msg"* | "check-patterns: SKIP "*) ;;
@@ -3488,6 +3581,20 @@ printf '%s\n%s' "$md_msg x" "$curl_msg" > "$work/oa2.out"
 if other_arm "$work/oa2.out"; then ok; else fail "other_arm: an unterminated last line of another arm must count"; fi
 printf 'check-patterns: other arm, quoting %s and SKIP \n' "$md_msg" > "$work/oa3.out"
 if other_arm "$work/oa3.out"; then ok; else fail "other_arm: a line quoting the message mid-line must count"; fi
+# a missing file is a test bug, not "no other arm": it must stop the suite
+# (fail exits), inside the `if` too. Run in a subshell so the exit is seen.
+oa_rc=0
+oa_err=$( (if other_arm "$work/oa-missing.out"; then :; fi) 2>&1 ) || oa_rc=$?
+if [ "$oa_rc" = 1 ] && [ "$oa_err" = "FAIL: other_arm: $work/oa-missing.out unreadable" ]; then
+  ok
+else
+  fail "other_arm: a missing file must stop the suite (rc $oa_rc, output: $oa_err)"
+fi
+# the line must START with the arm prefix: a path that merely contains
+# `check-patterns:` (an offending file named so, echoed as PATH:NN:TEXT) is
+# the first arm's own hit, not a second arm.
+printf '%s\n%s\n' "$md_msg x" "./sub/check-patterns:1: offending text" > "$work/oa4.out"
+if other_arm "$work/oa4.out"; then fail "other_arm: a path holding 'check-patterns:' must not read as a second arm"; else ok; fi
 
 # What each shape pins: every shape but backslash-pair and unclosed trips
 # that two-character skip (a hang before skipcode's guard, a fast exit 2
@@ -3496,10 +3603,10 @@ if other_arm "$work/oa3.out"; then ok; else fail "other_arm: a line quoting the 
 # the REST of the run opens a span (the CommonMark reading, length L-1, which
 # pairs with the next run of that length); after-run pins that the walk
 # resumes AT the character after the run (a skip one too far jumps over the
-# `]`); backslash-pair pins that
-# `\\` is consumed as a pair, so the backtick after it is real (a mutant that
-# does not flips it to a fail); unclosed pins skipcode's unclosed-run
-# fallback (`return i + rl[k]`), it stays green under the revert.
+# `]`); backslash-pair pins that `\\` is consumed as a pair, so the backtick
+# after it is real (a mutant that does not flips it to a fail); unclosed pins
+# skipcode's unclosed-run fallback (`return i + rl[k]`), it stays green under
+# the revert.
 i=0
 while IFS='|' read -r want shape; do
   i=$((i + 1)); r="$work/mdw-esc-$i"; seed "$r"; mkdir -p "$r/docs"
