@@ -42,7 +42,11 @@
 # page, runs of white space read as one space since the page may wrap them. A
 # finding passed on from the identity step (RELAYED below) is that step's
 # line, quoted under its own section, not a literal of doctor's; any other
-# argument that is no literal fails the test.
+# argument that is no literal fails the test. A local name counts as a
+# literal only when every binding of it is a plain `name = ...` of one; a
+# `+=`, a loop target or any other binding fails the test. Only calls on
+# `self` are read: a finding printed through another name for the Doctor
+# (`d = self; d.problem(...)`) is not scanned, and none exists today.
 #
 # Bash 3.2 compatible (the macOS CI legs run tests under /bin/bash).
 set -euo pipefail
@@ -143,10 +147,20 @@ def resolve(node, func):
         a, b = resolve(node.body, func), resolve(node.orelse, func)
         return a + b if a is not None and b is not None else None
     if isinstance(node, ast.Name):
-        bound = [n.value for n in ast.walk(func) if isinstance(n, ast.Assign)
-                 and any(isinstance(t, ast.Name) and t.id == node.id for t in n.targets)]
-        out = [resolve(v, func) for v in bound]
-        return sum(out, []) if bound and None not in out else None
+        assigns = [n for n in ast.walk(func) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == node.id for t in n.targets)]
+        plain = set(id(t) for n in assigns for t in n.targets)
+        # Every other binding of the name (`+=`, an annotated or a walrus
+        # assignment, a loop or `with` target, a tuple target, a parameter)
+        # gives it text this scan cannot read, so the name is no literal.
+        stores = [n for n in ast.walk(func) if isinstance(n, ast.Name) and n.id == node.id
+                  and isinstance(n.ctx, ast.Store)]
+        params = ([a.arg for a in ast.walk(func.args) if isinstance(a, ast.arg)]
+                  + [h.name for h in ast.walk(func) if isinstance(h, ast.ExceptHandler)])
+        if any(id(n) not in plain for n in stores) or node.id in params:
+            return None
+        out = [resolve(n.value, func) for n in assigns]
+        return sum(out, []) if assigns and None not in out else None
     return None
 
 
@@ -191,8 +205,8 @@ EOF
 found="$(python3 -I -B "$work/findings.py" "$repo_root/lib/host_identity.py" "$doc")" \
   || fail "the code-to-docs scan did not run: $found"
 nfound="$(printf '%s\n' "$found" | sed -n 1p)"
-# About 60 findings today: a scan that stops finding them fails here.
-[ "$nfound" -ge 50 ] || fail "found only $nfound doctor findings in lib/host_identity.py (scan rot?)"
+# About 65 findings today: a scan that stops finding them fails here.
+[ "$nfound" -ge 60 ] || fail "found only $nfound doctor findings in lib/host_identity.py (scan rot?)"
 missing="$(printf '%s\n' "$found" | sed 1d)"
 [ -z "$missing" ] || fail "$missing"
 

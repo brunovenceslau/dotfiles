@@ -675,8 +675,11 @@ install: doctor: gh: GitHub refuses gh's token for github.com (HTTP <status>) - 
 install: doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key
 install: doctor: credential helper: cannot read credential.helper (<error>) - check the file git -C ~ config --show-origin --get-regexp credential names
 install: doctor: credential helper: git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh
+install: doctor: credential helper: git's credential helper for github.com runs <path>, set in <path>, which is not an executable file, so fetching or pushing over HTTPS fails - point it at your gh: GIT_CONFIG_GLOBAL=<path> gh auth setup-git
 install: doctor: credential helper: git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login
-install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but a later file sets <helper>, which git uses - remove that one
+install: doctor: credential helper: git asks <helper>, set in <path>, before gh for github.com, and uses its answer when it has one - to ask only gh, run: GIT_CONFIG_GLOBAL=<path> gh auth setup-git, which clears the list first
+install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but a later file, <path>, sets <helper>, which git uses - remove that one
+install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but an empty credential.helper in <path>, read later, clears it, so git uses none - remove that empty one
 install: doctor: credential helper: gh is the credential helper git uses for github.com, but <path> does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md
 install: doctor: credential helper: gh is logged in, but git has no credential helper for github.com, so a push over HTTPS asks for a username - run: GIT_CONFIG_GLOBAL=<path> gh auth setup-git
 ```
@@ -708,7 +711,7 @@ touch submodules. A plugin whose commit cannot be read has a `.git` that
 names a gitdir that is gone, or a `HEAD` git cannot use. Moving the
 directory aside lets the installer initialize it again; when its git
 directory still exists, git would reuse it, so the line names that one to
-move aside too, but only one inside the checkout's own `.git/modules`.
+move aside too, but only one inside the checkout's own modules directory.
 Moved, not removed: either may hold the plugin's own commits. A plugin at
 another commit than its pin is not a problem: the installer leaves a local
 change alone on purpose, and `--verbose` prints a `note:` with the command
@@ -716,8 +719,9 @@ back to the pin. doctor fetches nothing into a partial clone. Its git is
 told not to (`GIT_NO_LAZY_FETCH`), which git honours from 2.45.0, and in the
 older lines from 2.39.4, 2.40.2, 2.41.1, 2.42.2, 2.43.4 and 2.44.1 on; a
 partial clone missing the trees the pins are in is then a `note:` under
-`--verbose`. With an older git a partial clone is not read at all, and the
-`note:` says so.
+`--verbose`, while any other failure to list them there, such as a
+`HEAD` with no commit yet, is still a problem. With an older git a
+partial clone is not read at all, and the `note:` says so.
 
 Homebrew is checked on macOS only, where `./install.sh packages` and the
 zshrc's `PATH` need it. doctor never runs brew: it looks for `brew` on
@@ -732,8 +736,11 @@ The `gh` check is doctor's one network access. It asks GitHub, through
 telemetry, update notices and prompts off and gh's state directories in a
 temporary directory, so nothing it writes stays. Only GitHub refusing the
 token (HTTP 401 or 403) is a problem. No answer, offline included, is a
-`note:` and the run still exits `0`. The framework needs no token scope:
-`gh auth login` grants all a push uses. The one scope that is a problem is
+`note:` and the run still exits `0`; so is GitHub's rate limit, a 403 or
+a 429 whose `x-ratelimit-remaining` header is `0` or that carries a
+`retry-after` header, which says nothing about the token. The framework
+needs no token scope: `gh auth login` grants all a push uses. The one
+scope that is a problem is
 `admin:ssh_signing_key` kept after
 [registering a signing key](new-mac-host.md#5-set-identity-and-signing),
 since a token holding it can add signing keys to the account.
@@ -743,6 +750,18 @@ over HTTPS: see [git prompts for a username](#git-prompts-for-a-username).
 `dotfiles-upgrade` reads only the XDG config, so the helper belongs in
 `config.local`. A helper other than gh is fine, and so is no helper while
 gh is not logged in: fetching the public upstream needs none.
+
+doctor reads the helpers the way git does (see `gitcredentials(7)`): every
+`credential.helper`, and every `credential.<url>.helper` whose `<url>`
+matches `https://github.com`, in the order git reads the files. Each one
+adds a helper to a list git asks in turn, until one answers, and an empty
+one clears the list. That is how `gh auth setup-git` writes it: an empty
+helper, then gh. gh's helper is judged by the path it names, so a path
+left from an old gh fails even when another gh is on `PATH`. A helper is
+named by its program and the file that sets it, never by its arguments,
+which can hold a secret; a helper that is a shell snippet is named
+`a shell snippet`. `<error>` in the first line is git's own error, or
+`a credential helper with no value in <path>`, which git also refuses.
 
 With `--verbose`, doctor also prints these `note:` lines. None is a
 problem, and none changes the exit status:

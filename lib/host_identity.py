@@ -84,6 +84,7 @@ import os
 import platform
 import pwd
 import re
+import selectors
 import shlex
 import shutil
 import signal
@@ -94,6 +95,7 @@ import sys
 import tempfile
 import time
 import unicodedata
+import urllib.parse
 
 PREFIX = "install: "
 
@@ -825,13 +827,15 @@ class Refusal(Exception):
     is found and returned by _isolate()."""
 
 
-def _run_git(args, cwd, env):
+def _run_git(args, cwd, env, data=None):
+    """Run git; DATA, when given, is its standard input (bytes), else it
+    reads none."""
     try:
         p = subprocess.run(
             ["git"] + args,
             cwd=cwd,
             env=env,
-            stdin=subprocess.DEVNULL,
+            **({"stdin": subprocess.DEVNULL} if data is None else {"input": data}),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=30,
@@ -970,13 +974,14 @@ def git_release():
         _git_place = None
 
 
-def git(args):
-    """Run git outside any repository (git_isolate()); return (rc, stdout
-    without the final newline, stderr)."""
+def git(args, data=None):
+    """Run git outside any repository (git_isolate()), DATA as its standard
+    input when given; return (rc, stdout without the final newline,
+    stderr)."""
     reason = git_isolate()
     if reason is not None:
         return 127, "", reason
-    return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling))
+    return _run_git(args, _git_place.cwd, git_env(_git_place.ceiling), data)
 
 
 def repo_git(checkout, args):
@@ -2487,7 +2492,8 @@ def lazy_fetch_off(checkout):
 def _git_bool(value):
     """VALUE as git's boolean parser reads it (git_parse_maybe_bool()): None
     for a key with no `=` (true), "" for an empty value (false). A value git
-    would refuse counts as true here, the side that reads nothing."""
+    would refuse counts as true here: for a promisor key that errs toward a
+    partial clone, so doctor skips reading rather than risk a fetch."""
     if value is None:
         return True
     v = value.strip().lower()
@@ -2518,6 +2524,15 @@ def partial_clone(checkout):
         if key.startswith("extensions.") or _git_bool(value if newline else None):
             return True
     return False
+
+
+# What ls-tree prints when an object it needs is not in the repository
+# (git 2.53, neither translated): the tree HEAD names (builtin/ls-tree.c,
+# "not a tree object") or a tree under it (tree.c repo_parse_tree_gently(),
+# "Could not read <oid>"). In a partial clone under GIT_NO_LAZY_FETCH that
+# is a tree git did not fetch; any other failure (an unborn HEAD: "Not a
+# valid object name HEAD") is a problem like anywhere else.
+LS_TREE_MISSING = re.compile(r"^(?:fatal: not a tree object|error: Could not read [0-9a-f]{40,64})$", re.M)
 
 
 def plugin_pins(checkout):
@@ -2586,28 +2601,82 @@ def _gh_answer(rc, out, err):
     scopes or None when GitHub lists none), ("out", None) for gh's exit 4
     (no token: `gh help exit-codes`), ("refused", the HTTP status) for a 401
     or a 403, or ("unknown", why, unescaped) for anything else (no network,
-    another status, a gh that failed). --include prints the status line
-    (`HTTP/2.0 401 Unauthorized`) and the headers first, also for an error
-    status, which gh then exits 1 on (cli/cli v2.102.0,
-    pkg/cmd/api/api.go processResponse)."""
+    a rate limit, another status, a gh that failed). --include prints the
+    status line (`HTTP/2.0 401 Unauthorized`) and the headers first, also
+    for an error status, which gh then exits 1 on (cli/cli v2.102.0,
+    pkg/cmd/api/api.go processResponse).
+
+    A 403 or a 429 is GitHub's rate limit, not a bad token, when it says
+    so the way its REST docs describe ("Rate limits for the REST API",
+    "Exceeding the rate limit"): x-ratelimit-remaining is 0 (the primary
+    limit), or a retry-after header is present (a secondary one). That
+    is neither a refused token nor a missing login, so it is a note (D3)."""
     rows = out.splitlines()
     m = re.match(r"HTTP/[^ ]+ ([0-9]{3})(?: |$)", rows[0]) if rows else None
     status = int(m.group(1)) if m else None
     if status is None and rc == 4:
         return "out", None
+    headers = {}
+    for line in rows[1:]:
+        name, colon, value = line.partition(":")
+        if colon:
+            headers.setdefault(name.strip().lower(), value.strip())
+    if status in (403, 429) and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers):
+        return "unknown", "rate limited, HTTP %d" % status
     if status in (401, 403):
         return "refused", status
     if rc == 0 and status is not None and 200 <= status < 300:
-        scopes = None
-        for line in rows[1:]:
-            name, colon, value = line.partition(":")
-            if colon and name.strip().lower() == "x-oauth-scopes":
-                scopes = [s.strip() for s in value.split(",") if s.strip()] or None
-        return "in", scopes
+        scopes = [s.strip() for s in headers.get("x-oauth-scopes", "").split(",") if s.strip()]
+        return "in", scopes or None
     if status is not None:
         return "unknown", "HTTP %d" % status
     errs = [line for line in err.splitlines() if line.strip()]
     return "unknown", (errs[0][:200] if errs else "gh exited %d" % rc)
+
+
+# gh's answer is a status line and its headers (--silent drops the body), a
+# few kilobytes: a gh that prints more than this on either stream is cut
+# off, and its answer is not read.
+GH_OUTPUT_CAP = 65536
+
+
+def _end_group(p):
+    """Kill the process group of P, which gh_token() starts in a session of
+    its own, so the group is gh and every process it started that stayed
+    in it (a wrapper's children); then reap P. The signals held: one that
+    lands here waits until P is reaped, so no gh is left running."""
+    with _Held():
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass  # the whole group is gone already
+        p.wait()
+
+
+def _bounded_output(p, timeout, cap):
+    """P's standard output and error, read until both close and P exits.
+    Raises subprocess.TimeoutExpired once TIMEOUT seconds have passed, and
+    OverflowError once either stream passes CAP bytes; P is then still
+    running, and the caller ends it (_end_group())."""
+    deadline = time.monotonic() + timeout
+    got = {p.stdout.fileno(): bytearray(), p.stderr.fileno(): bytearray()}
+    with selectors.DefaultSelector() as sel:
+        for fd in got:
+            sel.register(fd, selectors.EVENT_READ)
+        while sel.get_map():
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise subprocess.TimeoutExpired(p.args, timeout)
+            for key, _ in sel.select(left):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    sel.unregister(key.fd)
+                    continue
+                got[key.fd] += chunk
+                if len(got[key.fd]) > cap:
+                    raise OverflowError(cap)
+    p.wait(max(deadline - time.monotonic(), 0))
+    return bytes(got[p.stdout.fileno()]), bytes(got[p.stderr.fileno()])
 
 
 def gh_token(path):
@@ -2615,32 +2684,47 @@ def gh_token(path):
     GitHub accepts the token it holds for GH_HOST. gh runs non-interactively
     in a temporary directory that is its working directory and its state
     (gh_env()), made and removed like krl_revokes()'s key file: recorded in
-    _left, removed by the finally on every way out, a signal included."""
+    _left, removed by the finally on every way out, a signal included.
+
+    gh runs in a session of its own, so that no answer within GH_TIMEOUT,
+    an answer past GH_OUTPUT_CAP, or a signal here ends its whole process
+    group (_end_group()): a gh that is a wrapper leaves no child behind. A
+    ^C at the terminal then no longer reaches gh directly; it reaches this
+    process, whose KeyboardInterrupt ends the group on its way out."""
     state = None
     try:
         with _Held():
             state = tempfile.mkdtemp(prefix="host_identity.gh.")
             _left.add(state)
-        p = subprocess.run(
-            [path, "api", "--hostname", GH_HOST, "--include", "--silent", "user"],
-            cwd=state,
-            env=gh_env(state),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=GH_TIMEOUT,
-        )
+        try:
+            p = subprocess.Popen(
+                [path, "api", "--hostname", GH_HOST, "--include", "--silent", "user"],
+                cwd=state,
+                env=gh_env(state),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,
+            )
+        except OSError as e:
+            return "unknown", e.strerror or str(e)
+        with p.stdout, p.stderr:
+            try:
+                out, err = _bounded_output(p, GH_TIMEOUT, GH_OUTPUT_CAP)
+            except BaseException:
+                _end_group(p)
+                raise
     except subprocess.TimeoutExpired:
         return "unknown", "no answer within %d seconds" % GH_TIMEOUT
-    except OSError as e:
-        return "unknown", e.strerror or str(e)
+    except OverflowError:
+        return "unknown", "gh printed more than %d bytes" % GH_OUTPUT_CAP
     finally:
         # Held: a signal that lands mid-cleanup waits for it to finish.
         with _Held():
             if state is not None:
                 shutil.rmtree(state, ignore_errors=True)
                 _left.discard(state)
-    return _gh_answer(p.returncode, p.stdout.decode("utf-8", "replace"), p.stderr.decode("utf-8", "replace"))
+    return _gh_answer(p.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
 
 
 def gh_helper(value):
@@ -2654,6 +2738,130 @@ def gh_helper(value):
     except ValueError:
         return False
     return len(words) == 3 and os.path.basename(words[0]) == "gh" and words[1:] == ["auth", "git-credential"]
+
+
+def _helper_word(value):
+    """The first word of the credential helper VALUE, the program git's
+    shell runs (gitcredentials(7), git 2.53: a leading `!` makes the rest a
+    shell snippet; otherwise an absolute path runs as written, and a name
+    gets `git credential-` before it), or None when it does not split."""
+    try:
+        words = shlex.split(value[1:] if value.startswith("!") else value)
+    except ValueError:
+        return None
+    return words[0] if words else None
+
+
+def helper_program(value):
+    """What a message names of the credential helper VALUE: its program
+    (_helper_word()), never its arguments, which can hold a secret. A word
+    that is no plain command name or path (a function definition, a
+    variable assignment) is named "a shell snippet"; gh's own helper is
+    named by its path, whatever characters the path holds."""
+    word = _helper_word(value)
+    if word is not None and (gh_helper(value) or re.match(r"[A-Za-z0-9_./~+-]+\Z", word)):
+        return word
+    return "a shell snippet"
+
+
+def helper_runs(value):
+    """True when the program of gh's helper VALUE (gh_helper()) is one this
+    host can run, judged by the path `gh auth setup-git` wrote, not by the
+    gh on PATH: an absolute path (a leading ~ expanded, as the shell does)
+    must be an executable file, and a bare name must be on PATH, the PATH
+    git hands its shell."""
+    word = os.path.expanduser(_helper_word(value))
+    if os.path.isabs(word):
+        return os.path.isfile(word) and os.access(word, os.X_OK)
+    return shutil.which(word) is not None
+
+
+def _partial_match(subsection, host):
+    """True when SUBSECTION, a credential.<url>.* pattern that is no full
+    URL, matches https://HOST the way git's fallback matches one
+    (credential.c, git 2.53: match_partial_url() through
+    credential_from_potentially_partial_url() and credential_match()): each
+    part the pattern names (protocol, user, host, path) must equal the
+    context's, and https://HOST has no user and no path. For a full URL
+    git's own matcher decides (github_helpers()); one it refuses, this
+    refuses too, since this compares each part exactly."""
+    proto_end = subsection.find("://")
+    protocol = subsection[:proto_end] if proto_end > 0 else None
+    rest = subsection[proto_end + 3:] if proto_end >= 0 else subsection
+    cut = min([i for i in (rest.find(c) for c in "/?#") if i >= 0] or [len(rest)])
+    authority, path = rest[:cut], rest[cut:].strip("/")
+    if "@" in authority:
+        return False  # a user the context does not have
+    return ((protocol is None or protocol == "https")
+            and (not authority or urllib.parse.unquote(authority) == host) and not path)
+
+
+def _probe_config(subs):
+    """A config file, as bytes, that sets credential.<sub>.p<i> = 1 for the
+    I-th pattern of SUBS: github_helpers() hands it to git on standard
+    input. Config text, never a message: each pattern is quoted the way a
+    config file quotes a subsection (a backslash and a double quote
+    escaped), not escaped for a terminal."""
+    return "".join('[credential "%s"]\n\tp%d = 1\n' % (sub.replace("\\", "\\\\").replace('"', '\\"'), i)
+                   for i, sub in enumerate(subs)).encode("utf-8")
+
+
+def github_helpers():
+    """(helpers, cleared, None): the credential helpers git runs for
+    https://GH_HOST, as [(origin, value)] in the order it asks them, and
+    the origin of the last empty helper that cleared the list (None when
+    none did); or ([], None, why) when git cannot read them.
+
+    git's own rules (gitcredentials(7), git 2.53, and credential.c's
+    credential_apply_config()): every credential.helper and every
+    credential.<url>.helper whose <url> matches is read, in config order,
+    however specific the <url>; each adds a helper to the list, and an
+    empty one clears it. `git config --get-urlmatch`, which keeps only the
+    best match, does not say that. Which <url> matches is git's own
+    answer: each pattern goes, under a key of its own, into a config read
+    from standard input, and `--get-urlmatch credential` names the keys
+    that match; a pattern that is no full URL is matched as git's fallback
+    does (_partial_match())."""
+    rc, out, err = git(["config", "--includes", "--show-origin", "--null", "--get-regexp",
+                        r"^credential\.(.+\.)?helper$"])
+    if rc == 1:
+        return [], None, None
+    if rc != 0:
+        return [], None, err or "git exited %d" % rc
+    parts = out.split("\0")
+    entries = []
+    for origin, item in zip(parts[0::2], parts[1::2]):
+        key, newline, value = item.partition("\n")
+        if not newline:
+            return [], None, "a credential helper with no value in %s" % _shown(_origin_file(origin))
+        sub = key[len("credential."):-len(".helper")] if key != "credential.helper" else None
+        entries.append((origin, sub, value))
+    subs = sorted(set(s for _, s, _ in entries if s is not None))
+    matched = set()
+    if subs:
+        prc, pout, perr = git(["config", "--file", "-", "--get-urlmatch", "credential", "https://" + GH_HOST],
+                              data=_probe_config(subs))
+        if prc not in (0, 1):
+            return [], None, perr or "git exited %d" % prc
+        for line in pout.splitlines():
+            m = re.match(r"credential\.p([0-9]+) ", line)
+            if m:
+                matched.add(subs[int(m.group(1))])
+    helpers, cleared = [], None
+    for origin, sub, value in entries:
+        if sub is not None and sub not in matched and not _partial_match(sub, GH_HOST):
+            continue
+        if value:
+            helpers.append((origin, value))
+        else:
+            helpers, cleared = [], origin
+    return helpers, cleared, None
+
+
+def _origin_file(origin):
+    """A `--show-origin` ORIGIN as a message names it: the path of a file,
+    else the origin as git spells it (`command line:`, a blob)."""
+    return origin[len("file:"):] if origin.startswith("file:") else origin
 
 
 class Doctor(object):
@@ -2945,7 +3153,7 @@ class Doctor(object):
                       % _shown(checkout))
             return
         pins, err = plugin_pins(checkout)
-        if pins is None and partial:
+        if pins is None and partial and LS_TREE_MISSING.search(err):
             # GIT_NO_LAZY_FETCH stopped a fetch: the trees are not here.
             self.info("%s is a partial clone without the trees the plugin pins are in (%s) - not checked"
                       % (_shown(checkout), _shown(err)))
@@ -3030,38 +3238,57 @@ class Doctor(object):
                     % (_shown(path), _shown(", ".join(detail)) if detail else "none listed"))
 
     def credential_helper(self):
-        # The helper git uses for https://github.com, as dotfiles-upgrade
-        # resolves it (install.sh: --get-urlmatch), and whether config.local
-        # sets it: the upgrade reads only the XDG config, so a helper in
-        # ~/.gitconfig never reaches it.
+        # The helpers git runs for https://github.com, in the order it asks
+        # them (github_helpers()), and whether config.local sets gh, read
+        # as dotfiles-upgrade reads it (install.sh: --get-urlmatch): the
+        # upgrade reads only the XDG config, so a helper in ~/.gitconfig
+        # never reaches it. A helper is named by its program and the file
+        # that sets it (helper_program()), never by its whole value, which
+        # can hold a secret. One chain: each run prints one line here.
         host = self.host
         url = "https://" + GH_HOST
-        rc, value, err = git(["config", "--includes", "--get-urlmatch", "credential.helper", url])
-        if rc not in (0, 1):
+        helpers, cleared, err = github_helpers()
+        if err is not None:
             self.problem("cannot read credential.helper (%s) - check the file git -C ~ config --show-origin --get-regexp credential names"
-                         % _shown(err or "exit %d" % rc))
+                         % _shown(err))
             return
         local = ""
         if os.path.lexists(host.config_local):
-            lrc, lvalue, _ = git(["config", "--file", host.config_local, "--get-urlmatch", "credential.helper", url])
+            # --includes: the upgrade reaches config.local through the XDG
+            # config's [include], where git follows config.local's own
+            # includes too, so a helper they set reaches the upgrade.
+            lrc, lvalue, _ = git(["config", "--includes", "--file", host.config_local, "--get-urlmatch",
+                                  "credential.helper", url])
             local = lvalue if lrc == 0 else ""
-        uses_gh = rc == 0 and gh_helper(value)
-        if uses_gh and self.gh_state == "absent":
+        origin, value = helpers[0] if helpers else (None, "")
+        uses_gh = gh_helper(value)
+        if uses_gh and not helper_runs(value) and "/" not in helper_program(value):
             self.problem("git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh")
+        elif uses_gh and not helper_runs(value):
+            self.problem("git's credential helper for github.com runs %s, set in %s, which is not an executable file, so fetching or pushing over HTTPS fails - point it at your gh: GIT_CONFIG_GLOBAL=%s gh auth setup-git"
+                         % (_shown(helper_program(value)), _shown(_origin_file(origin)), shell_word(host.config_local)))
         elif uses_gh and self.gh_state == "out":
             self.problem("git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login")
-        # A config.local helper git does not read at all (no include) is
-        # the git check's line; here it reads as no helper.
-        if gh_helper(local) and rc == 0 and not uses_gh:
-            self.problem("%s sets gh as the credential helper for github.com, but a later file sets %s, which git uses - remove that one"
-                         % (_shown(host.config_local), _shown(value)))
         elif uses_gh and not gh_helper(local):
             self.problem('gh is the credential helper git uses for github.com, but %s does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md'
                          % _shown(host.config_local))
         elif uses_gh:
-            self.ok("gh is the credential helper git uses for github.com, from %s" % _shown(host.config_local))
-        elif rc == 0 and value:
-            self.ok("git's credential helper for github.com is %s" % _shown(value))
+            self.ok("gh is the credential helper git uses for github.com, from %s" % _shown(_origin_file(origin)))
+        elif any(gh_helper(v) for _, v in helpers):
+            # git asks each helper in turn and stops at the first answer.
+            self.problem("git asks %s, set in %s, before gh for github.com, and uses its answer when it has one - to ask only gh, run: GIT_CONFIG_GLOBAL=%s gh auth setup-git, which clears the list first"
+                         % (_shown(helper_program(value)), _shown(_origin_file(origin)), shell_word(host.config_local)))
+        elif gh_helper(local) and helpers:
+            self.problem("%s sets gh as the credential helper for github.com, but a later file, %s, sets %s, which git uses - remove that one"
+                         % (_shown(host.config_local), _shown(_origin_file(origin)), _shown(helper_program(value))))
+        elif gh_helper(local) and cleared is not None:
+            self.problem("%s sets gh as the credential helper for github.com, but an empty credential.helper in %s, read later, clears it, so git uses none - remove that empty one"
+                         % (_shown(host.config_local), _shown(_origin_file(cleared))))
+        # A config.local helper git does not read at all (no include) is
+        # the git check's line; here it reads as no helper.
+        elif helpers:
+            self.ok("git's credential helper for github.com is %s, from %s"
+                    % (_shown(helper_program(value)), _shown(_origin_file(origin))))
         elif self.gh_state == "in":
             self.problem("gh is logged in, but git has no credential helper for github.com, so a push over HTTPS asks for a username - run: GIT_CONFIG_GLOBAL=%s gh auth setup-git"
                          % shell_word(host.config_local))

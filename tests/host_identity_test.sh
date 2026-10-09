@@ -27,6 +27,10 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 installer="$repo_root/install.sh"
 module="$repo_root/lib/host_identity.py"
 fail() { echo "FAIL: $*" >&2; exit 1; }
+# sh_quote WORD - WORD in single quotes for a /bin/sh script this suite
+# writes (a stub), each ' in it spelled '\'': a path spliced into a stub
+# stays one word whatever it holds.
+sh_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 pass=0; ok() { pass=$((pass + 1)); }
 for t in git python3 ssh-keygen ssh-agent ssh-add; do
   if ! command -v "$t" >/dev/null 2>&1; then
@@ -108,11 +112,14 @@ chmod u+x "$work/fakebin/ssh-add"
 # waits). Like gh without GH_TELEMETRY=0, it first writes a device id under
 # its state directory, so a run that leaves that directory in HOME shows the
 # write. FAKE_GH_LOG, when set, receives its arguments, its working
-# directory and its environment.
+# directory and the GH_*, XDG_* and colour lines of its environment, never
+# the rest: a failing case prints the log, and a CI log must not show the
+# caller's other variables.
 cat > "$work/fakebin/gh" <<'EOF'
 #!/bin/sh
 if [ -n "${FAKE_GH_LOG:-}" ]; then
-  { printf 'argv:'; printf ' %s' "$@"; printf '\ncwd: %s\n' "$(pwd -P)"; env; } > "$FAKE_GH_LOG"
+  { printf 'argv:'; printf ' %s' "$@"; printf '\ncwd: %s\n' "$(pwd -P)"
+    env | grep -E '^(GH_|XDG_|NO_COLOR=|CLICOLOR=)' | grep -v TOKEN; } > "$FAKE_GH_LOG"
 fi
 state="${XDG_STATE_HOME:-$HOME/.local/state}/gh"
 mkdir -p "$state" && echo fake-device > "$state/device-id"
@@ -1994,7 +2001,7 @@ printf '[includeIf "onbranch:main"]\n\tpath = %s\n' "$HOME/cond" >> "$XDG_CONFIG
 doc; expect_rc 0 "doctor ignores includeIf"; [ -z "$out" ] || fail "doctor read an includeIf: $out"
 # A git too old to sign with SSH keys.
 mkdir -p "$work/oldgit"
-printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "git version 2.30.1"; exit 0; fi\nexec "%s" "$@"\n' "$(command -v git)" > "$work/oldgit/git"
+printf '#!/bin/sh\nif [ "$1" = --version ]; then echo "git version 2.30.1"; exit 0; fi\nexec %s "$@"\n' "$(sh_quote "$(command -v git)")" > "$work/oldgit/git"
 chmod u+x "$work/oldgit/git"
 rc=0; out="$(PATH="$work/oldgit:$PATH" "$installer" doctor 2>&1)" || rc=$?
 expect_rc 1 "doctor, git 2.30"; one "doctor, git 2.30"
@@ -2169,7 +2176,7 @@ mkdir -p "$work/oldgit"
 printf '#!/bin/sh
 [ "$1" = --version ] && { echo "git version 2.44.0"; exit 0; }
 exec %s "$@"
-' "$(command -v git)" > "$work/oldgit/git"
+' "$(sh_quote "$(command -v git)")" > "$work/oldgit/git"
 chmod u+x "$work/oldgit/git"
 honours="$(python3 -I -B -c '
 import importlib.util, sys
@@ -2198,6 +2205,16 @@ if [ "$honours" = yes ]; then
   has "doctor: plugins: zsh/plugins/demo is not initialized" "a partial clone holding its trees is checked"
 fi
 [ "$(objects "$work/pc2")" = "$before" ] || fail "doctor fetched into a blob:none clone"
+# Only a missing tree is the partial clone's note: an unborn HEAD there is
+# the problem it is anywhere else.
+fx init -q -b main "$work/pc-unborn"; mkcheckout "$work/pc-unborn"
+fx -C "$work/pc-unborn" remote add origin "file://$work/super.git"
+fx -C "$work/pc-unborn" config remote.origin.promisor true
+pdoc "$work/pc-unborn"
+if [ "$honours" = yes ]; then
+  expect_rc 1 "doctor, an unborn HEAD in a partial clone"; one "doctor, an unborn HEAD in a partial clone"
+  has "doctor: plugins: cannot list the plugin pins of $work/pc-unborn (fatal: " "doctor names an unborn HEAD in a partial clone"
+fi
 # A promisor set through the repository's include chain counts too.
 fx clone -q "$co" "$work/inc"
 printf '[remote "origin"]\n\tpromisor = true\n' > "$work/inc.gitconfig"
@@ -2232,7 +2249,7 @@ ok
 # helper is staged in config.local or ~/.gitconfig. Homebrew is checked only
 # on macOS: off macOS, a python3 that reports darwin (a wrapper first on
 # PATH, never a switch in the module) stands in for a Mac.
-helper_cfg() { git config --file "$1" 'credential.https://github.com.helper' "${2:-!/usr/bin/gh auth git-credential}"; }
+helper_cfg() { git config --file "$1" --add 'credential.https://github.com.helper' "${2-!gh auth git-credential}"; }
 # without CMD - a PATH holding every command of this one but CMD: a
 # directory of links, for a case that needs CMD missing.
 without() {
@@ -2287,9 +2304,12 @@ has "doctor: homebrew: " "doctor runs the Homebrew check"
 for scopes in "" "read:org"; do
   FAKE_GH_SCOPES="$scopes" doc; expect_rc 0 "doctor, token scopes [$scopes]"; [ -z "$out" ] || fail "doctor, scopes [$scopes]: $out"
 done
-# The signing-key scope, kept after registering a key, is a problem.
-FAKE_GH_SCOPES="admin:ssh_signing_key, repo" doc; expect_rc 1 "doctor, signing scope kept"; one "doctor, signing scope kept"
-has "doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key" "doctor names the kept signing scope"
+# The signing-key scope, kept after registering a key, is a problem,
+# wherever GitHub lists it.
+for scopes in "admin:ssh_signing_key, repo" "gist, admin:ssh_signing_key, repo" "repo, admin:ssh_signing_key"; do
+  FAKE_GH_SCOPES="$scopes" doc; expect_rc 1 "doctor, signing scope kept [$scopes]"; one "doctor, signing scope kept [$scopes]"
+  has "doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key" "doctor names the kept signing scope [$scopes]"
+done
 # GitHub refusing the token is a problem; no answer is a note.
 for status in 401 403; do
   FAKE_GH=$status doc; expect_rc 1 "doctor, HTTP $status"; one "doctor, HTTP $status"
@@ -2304,6 +2324,8 @@ has "('offline \\x1b]0;PWNED\\x07 here')" "doctor escapes and quotes gh's error"
 # Logged out, or no gh at all, while config.local names gh as the helper.
 FAKE_GH=out doc; expect_rc 1 "doctor, helper with gh logged out"; one "doctor, helper with gh logged out"
 has "doctor: credential helper: git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login" "doctor names a helper gh cannot serve"
+FAKE_GH=out doc --verbose
+[ "$(grep -c '^install: doctor: credential helper: ' <<<"$out")" -eq 1 ] || fail "doctor --verbose prints one credential helper line: $out"
 rc=0; out="$(PATH="$(without gh)" "$installer" doctor 2>&1)" || rc=$?
 expect_rc 1 "doctor, helper without gh"; one "doctor, helper without gh"
 has "doctor: credential helper: git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh" "doctor names a helper with no gh"
@@ -2314,12 +2336,51 @@ git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper
 helper_cfg "$HOME/.gitconfig"
 doc; expect_rc 1 "doctor, helper in ~/.gitconfig"; one "doctor, helper in ~/.gitconfig"
 has "doctor: credential helper: gh is the credential helper git uses for github.com, but $local_cfg does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see \"Git prompts for a username\" in docs/troubleshooting.md" "doctor names a helper outside config.local"
-# config.local's gh helper overridden by a later file.
+# A helper a later file adds after gh is asked after it: healthy. Only an
+# empty helper clears the list git asks (gitcredentials(7)), and then the
+# later file's helper is the one git uses. The whole list counts, not the
+# one value --get-urlmatch keeps: an unscoped reset and store in a later
+# file replace config.local's scoped gh.
 helper_cfg "$local_cfg"
 helper_cfg "$HOME/.gitconfig" osxkeychain
-doc; expect_rc 1 "doctor, helper overridden"; one "doctor, helper overridden"
-has "doctor: credential helper: $local_cfg sets gh as the credential helper for github.com, but a later file sets osxkeychain, which git uses - remove that one" "doctor names an overridden helper"
+doc; expect_rc 0 "doctor, a helper after gh"; [ -z "$out" ] || fail "doctor, a helper after gh: $out"
 rm -f "$HOME/.gitconfig"
+helper_cfg "$HOME/.gitconfig" ""
+helper_cfg "$HOME/.gitconfig" osxkeychain
+doc; expect_rc 1 "doctor, helper overridden"; one "doctor, helper overridden"
+has "doctor: credential helper: $local_cfg sets gh as the credential helper for github.com, but a later file, $HOME/.gitconfig, sets osxkeychain, which git uses - remove that one" "doctor names an overridden helper"
+rm -f "$HOME/.gitconfig"
+git config --file "$HOME/.gitconfig" credential.helper ""
+git config --file "$HOME/.gitconfig" --add credential.helper store
+doc; expect_rc 1 "doctor, gh replaced by an unscoped helper"; one "doctor, gh replaced by an unscoped helper"
+has "doctor: credential helper: $local_cfg sets gh as the credential helper for github.com, but a later file, $HOME/.gitconfig, sets store, which git uses - remove that one" "doctor reads git's whole helper list"
+# A helper's arguments can hold a secret: only its program is named.
+git config --file "$HOME/.gitconfig" --add credential.helper '!f() { echo password=ghp_doctorsecret; }; f'
+doc --verbose; expect_rc 1 "doctor, a helper holding a secret"
+lacks "ghp_doctorsecret" "doctor prints a helper's secret"
+has "doctor: credential helper: $local_cfg sets gh as the credential helper for github.com, but a later file, $HOME/.gitconfig, sets store" "doctor names the first helper of the list"
+rm -f "$HOME/.gitconfig"
+helper_cfg "$HOME/.gitconfig" ""
+doc; expect_rc 1 "doctor, gh cleared by a later file"; one "doctor, gh cleared by a later file"
+has "doctor: credential helper: $local_cfg sets gh as the credential helper for github.com, but an empty credential.helper in $HOME/.gitconfig, read later, clears it, so git uses none - remove that empty one" "doctor names a cleared helper list"
+rm -f "$HOME/.gitconfig"
+# A helper git asks before gh answers first when it can.
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+git config --file "$local_cfg" credential.helper osxkeychain
+helper_cfg "$local_cfg"
+doc; expect_rc 1 "doctor, a helper before gh"; one "doctor, a helper before gh"
+has "doctor: credential helper: git asks osxkeychain, set in $local_cfg, before gh for github.com, and uses its answer when it has one - to ask only gh, run: GIT_CONFIG_GLOBAL=$local_cfg gh auth setup-git, which clears the list first" "doctor names a helper asked before gh"
+git config --file "$local_cfg" --unset-all credential.helper
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+# gh's helper is judged by the path `gh auth setup-git` wrote: a stale one
+# fails whatever gh is on PATH, and a real one works with no gh on PATH.
+helper_cfg "$local_cfg" "!$work/gone/gh auth git-credential"
+doc; expect_rc 1 "doctor, a stale gh path"; one "doctor, a stale gh path"
+has "doctor: credential helper: git's credential helper for github.com runs $work/gone/gh, set in $local_cfg, which is not an executable file, so fetching or pushing over HTTPS fails - point it at your gh: GIT_CONFIG_GLOBAL=$local_cfg gh auth setup-git" "doctor names a stale gh path"
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+helper_cfg "$local_cfg" "!$work/fakebin/gh auth git-credential"
+rc=0; out="$(PATH="$(without gh)" "$installer" doctor 2>&1)" || rc=$?
+expect_rc 0 "doctor, gh's helper by path, gh off PATH"; [ -z "$out" ] || fail "doctor, gh's helper by path, gh off PATH: $out"
 # Another helper alone is fine: gh is not the only way to push.
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
 helper_cfg "$local_cfg" osxkeychain
@@ -2363,12 +2424,18 @@ ok
 # the tool it waits on. Sent while gh waits (its temporary directory exists)
 # and while `ssh-keygen -Q` reads a KRL (its key file exists); each run must
 # end by SIGINT (install.sh's INT trap exits 130) and leave TMPDIR as it
-# found it.
+# found it. The run starts with SIGINT, SIGHUP and SIGQUIT at their
+# defaults: a suite run under nohup or as a `&` job inherits them ignored,
+# and a shell that starts with a signal ignored can neither trap nor reset
+# it.
 interrupt() {
   python3 -I -B -c '
 import os, signal, subprocess, sys, time
 started, args = sys.argv[1], sys.argv[2:]
-p = subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
+def default_signals():
+    for sig in (signal.SIGINT, signal.SIGHUP, signal.SIGQUIT):
+        signal.signal(sig, signal.SIG_DFL)
+p = subprocess.Popen(args, start_new_session=True, preexec_fn=default_signals, stdin=subprocess.DEVNULL,
                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 for _ in range(200):
     if os.path.exists(started) or p.poll() is not None:
@@ -2396,7 +2463,7 @@ ssh-keygen -q -k -f "$work/doctor.krl" 2>/dev/null || fail "could not make an em
 git config --file "$local_cfg" gpg.ssh.revocationFile "$work/doctor.krl"
 real_keygen="$(command -v ssh-keygen)"
 mkdir -p "$work/hangkeygen"
-printf '#!/bin/sh\nif [ "$1" = -Q ]; then : > "%s"; exec sleep 30; fi\nexec "%s" "$@"\n' "$work/keygen.started" "$real_keygen" > "$work/hangkeygen/ssh-keygen"
+printf '#!/bin/sh\nif [ "$1" = -Q ]; then : > %s; exec sleep 30; fi\nexec %s "$@"\n' "$(sh_quote "$work/keygen.started")" "$(sh_quote "$real_keygen")" > "$work/hangkeygen/ssh-keygen"
 chmod u+x "$work/hangkeygen/ssh-keygen"
 rm -f "$work/keygen.started"
 out="$(PATH="$work/hangkeygen:$PATH" interrupt "$work/keygen.started" "$installer" doctor)"
