@@ -139,52 +139,74 @@ by step 5.
    survivor's base branch, step 5). The primary check is local: git must verify
    the signature against the allowed-signers file (`gpg.ssh.allowedSignersFile`,
    see [the signing key page](signing-key.md)) and the signer must be the
-   maintainer. The allowed-signers entry the check relies on lists ONE
-   principal per line, the maintainer's email: with several principals on a
-   line, `%GS` never equals `user.email`, and the check fails closed. GitHub's
-   flag is a second signal that must print `true`. The subshell stops at the
-   first bad commit and exits nonzero. Each of these is a failure, not a pass:
-   a ref git cannot resolve (the base already pruned by step 1's `--prune`, for
-   one), a failing `git rev-list`, an empty range, a gh error, or an empty or
-   other answer from gh:
+   maintainer. Keep exactly ONE principal per allowed-signers line, the
+   maintainer's email: `%GS` is the first principal on the matching line, so a
+   line shared with another principal can pass for a key that is not the
+   maintainer's alone. GitHub's flag is a second signal that must print `true`.
+   The snippet stops at the first bad commit and exits nonzero. Each of these
+   is a failure, not a pass: a ref git cannot resolve (the base already pruned
+   by step 1's `--prune`, for one), a failing `git rev-list`, an empty range, a
+   gh error, or an empty or other answer from gh.
+
+   The block is POSIX sh, run in a child shell by `sh -eu`: a bare `set -e`
+   is ignored when the code runs as the condition of an `if`, `&&` or `||`,
+   and an `exit` here cannot close your own shell. So every step that can
+   fail carries its own `|| { ...; exit 1; }`, and it fails closed in every
+   context, zsh included. Fill in the three placeholders on the first lines:
 
    ```sh
-   (
-     set -eu
-     me=$(git config user.email)     # the signer principal in allowed_signers
-     base=$(git rev-parse --verify --quiet "origin/<baseRefName>^{commit}")
-     tip=$(git rev-parse --verify --quiet "origin/<branch>^{commit}")
-     list=$(git rev-list "$base..$tip")
-     [ -n "$list" ] || { echo "empty range $base..$tip" >&2; exit 1; }
-     for c in $list; do
-       st=$(git log -1 --format=%G? "$c")
-       who=$(git log -1 --format=%GS "$c")
-       if [ "$st" != G ] || [ "$who" != "$me" ]; then
-         echo "not signed by $me: $c ($st $who)" >&2; exit 1
-       fi
-       ok=$(gh api "repos/<owner>/<repo>/commits/$c" \
-         --jq .commit.verification.verified) || ok=
-       [ "$ok" = true ] || { echo "not verified by GitHub: $c" >&2; exit 1; }
-     done
-   )                                 # want: exit status 0
+   sh -eu <<'EOF'
+   base_ref=<baseRefName>            # fill in: the survivor's base branch
+   branch=<branch>                   # fill in: the survivor's branch
+   repo=<owner>/<repo>               # fill in: the GitHub repository
+   me=$(git config user.email) ||
+     { echo "git user.email is not set" >&2; exit 1; }
+   base=$(git rev-parse --verify --quiet "origin/$base_ref^{commit}") ||
+     { echo "cannot resolve origin/$base_ref" >&2; exit 1; }
+   tip=$(git rev-parse --verify --quiet "origin/$branch^{commit}") ||
+     { echo "cannot resolve origin/$branch" >&2; exit 1; }
+   list=$(git rev-list "$base..$tip") ||
+     { echo "git rev-list failed for $base..$tip" >&2; exit 1; }
+   [ -n "$list" ] || { echo "empty range $base..$tip" >&2; exit 1; }
+   for c in $list; do
+     st=$(git log -1 '--format=%G?' "$c") ||
+       { echo "git log failed for $c" >&2; exit 1; }
+     who=$(git log -1 '--format=%GS' "$c") ||
+       { echo "git log failed for $c" >&2; exit 1; }
+     if [ "$st" != G ] || [ "$who" != "$me" ]; then
+       echo "not signed by $me: $c ($st $who)" >&2; exit 1
+     fi
+     ok=$(gh api "repos/$repo/commits/$c" \
+       --jq .commit.verification.verified) || ok=
+     [ "$ok" = true ] || { echo "not verified by GitHub: $c" >&2; exit 1; }
+   done
+   EOF
    ```
+
+   Want: exit status 0.
 
 4. Before each rebase, refuse to continue if the local branch holds commits
    that are not on the remote, because `git checkout -B` discards them. Then
    check the branch out at the remote tip. Steps 5 and 6 run only if this
-   subshell exits 0:
+   block exits 0. Run them as separate commands after it, not chained: step 5
+   or step 6 applies to a given survivor, never both.
 
    ```sh
-   (
-     set -eu
-     if git show-ref --verify --quiet refs/heads/<branch> &&
-        [ -n "$(git rev-list origin/<branch>..<branch>)" ]; then
-       echo "<branch> has unpushed commits: stop and decide" >&2
-       exit 1
-     fi
-     git checkout -B <branch> origin/<branch>
-   )                                 # want: exit status 0
+   sh -eu <<'EOF'
+   branch=<branch>                   # fill in: the survivor's branch
+   git rev-parse --verify --quiet "origin/$branch^{commit}" >/dev/null ||
+     { echo "cannot resolve origin/$branch" >&2; exit 1; }
+   if git show-ref --verify --quiet "refs/heads/$branch"; then
+     ahead=$(git rev-list "origin/$branch..$branch") ||
+       { echo "git rev-list failed for $branch" >&2; exit 1; }
+     [ -z "$ahead" ] ||
+       { echo "$branch has unpushed commits: stop and decide" >&2; exit 1; }
+   fi
+   git checkout -B "$branch" "origin/$branch"
+   EOF
    ```
+
+   Want: exit status 0.
 
 5. Work bottom-up. The lowest survivor whose commits fail verification is
    re-signed onto its own `baseRefName` (`main` for the lowest survivor, the
@@ -205,7 +227,8 @@ by step 5.
    ```
 
    A survivor needs no rebase only when no survivor below it was rewritten.
-7. Re-run the verification of step 3 on every survivor.
+7. Re-run the step 3 block on every survivor (set its three placeholders for
+   each one).
 
 `gh stack sync` and `gh stack rebase` also cascade-rebase a stack, but they are
 not part of this recipe: it needs the explicit signed commands above, and the
