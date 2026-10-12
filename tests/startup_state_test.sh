@@ -4,6 +4,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# run_suites: serial
+# tests/run_suites.py runs this suite alone, before the pool: its zsh loads the
+# checkout's own zshrc, which compiles each plugin's .zwc beside it on a fresh
+# checkout. A suite running alongside could load or copy a half-written .zwc.
+
 #
 # The fork-elimination shims steer VENDORED code at
 # runtime (a scoped mv builtin, a hidden `commands` view, a uname function).

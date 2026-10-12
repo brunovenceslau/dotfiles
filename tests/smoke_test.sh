@@ -4,6 +4,12 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# run_suites: serial
+# tests/run_suites.py runs this suite alone, before the pool: it writes its
+# scratch tree under the checkout's .smoke/ and runs `git status` there, which
+# may rewrite the index. A suite copying the checkout (cp -a) or reading its
+# index alongside would see either half-written.
+
 #
 # Unit tests for the fresh-install smoke - `make smoke`
 # installs into a scratch HOME, proves `zsh -i -c exit` is clean, and re-runs the

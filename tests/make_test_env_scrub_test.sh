@@ -149,20 +149,21 @@ stub_case_py() {
 }
 stub_case_py
 
-# --- TMPDIR behind a symlink: the recipe hands every suite a TMPDIR that is a
-# symlink, as macOS's is (/var -> /private/var), so a path assumption that only
-# breaks there fails on Linux too. The probe records what it saw into a file
+# --- TMPDIR behind a symlink: the recipe hands every suite a TMPDIR whose path
+# runs through a symlink, as macOS's does (/var -> /private/var), so a path
+# assumption that only breaks there fails on Linux too. The probe records what it saw into a file
 # named by PROBE_OUT, and a directory made under that TMPDIR must resolve to
 # a different physical path.
 tprobe="$work/tmpdir_probe_test.sh"
 cat > "$tprobe" <<'EOF'
 #!/usr/bin/env bash
 set -eu
-[ -L "${TMPDIR:-}" ] || { echo "NOT-A-LINK: TMPDIR=${TMPDIR:-unset}"; exit 5; }
-case "$TMPDIR" in
+case "${TMPDIR:-}" in
   /*) ;;
-  *) echo "NOT-ABSOLUTE: TMPDIR=$TMPDIR"; exit 7 ;;
+  *) echo "NOT-ABSOLUTE: TMPDIR=${TMPDIR:-unset}"; exit 7 ;;
 esac
+# Behind a link, as macOS's /var/folders/... is: the physical path differs.
+[ "$(cd -P "$TMPDIR" && pwd -P)" != "$TMPDIR" ] || { echo "NOT-BEHIND-A-LINK: TMPDIR=$TMPDIR"; exit 5; }
 d="$(mktemp -d "$TMPDIR/probe.XXXXXX")"
 phys="$(cd -P "$d" && pwd -P)"
 rm -rf "$d"
@@ -197,13 +198,13 @@ rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$work/
 [ "$rc" != 0 ] && ok || fail "make test must fail when a suite fails: $(last)"
 [ -z "$(ls -A "$work/tmp-parent")" ] && ok \
   || fail "make test must remove its TMPDIR link and directory after a failing suite: $(ls -A "$work/tmp-parent")"
-# a signal ends the recipe's shell: the suite signals its parent (the recipe's
-# shell) and then exits, so the shell runs its trap as it would on a Ctrl-C or
-# a kill, and the EXIT trap must still remove the directory. Portable: no
-# setsid, which macOS lacks.
-# The recipe's own traps turn each signal into the conventional 128+N exit, which
-# make reports as "Error N"; without them the shell would die by the signal
-# itself and make would name the signal instead, so the number pins the trap.
+# a signal ends the run: the suite signals its parent (tests/run_suites.py, which
+# the recipe execs, so it IS the recipe's process) as a Ctrl-C or a kill would,
+# and the runner must still remove the directory. Portable: no setsid, which
+# macOS lacks.
+# The runner turns each signal into the conventional 128+N exit, which make
+# reports as "Error N"; dying by the signal itself would make make name the
+# signal instead, so the number pins the handler.
 for sig in HUP:129 INT:130 TERM:143; do
   code="${sig#*:}"; sig="${sig%:*}"
   printf '#!/usr/bin/env bash\nkill -%s "$PPID"\nsleep 1\n' "$sig" > "$work/sig_test.sh"
@@ -250,13 +251,15 @@ mutant no-def sed 's/^GIT_ENV_SCRUB =/GIT_ENV_SCRUBBED =/'
 mutant no-recipe sed 's/^test:/tests-renamed:/'
 mutant no-py-recipe sed 's/^py-syntax:/py-syntax-renamed:/'
 # shellcheck disable=SC2016
-mutant test-unscrubbed sed '/^test:/,/^$/s/^\([[:space:]]*\)\$(GIT_ENV_SCRUB) \\$/\1: \\/'
+mutant test-unscrubbed sed '/^test:/,/^$/s/^\([[:space:]]*\)@\$(GIT_ENV_SCRUB) \\$/\1@: \\/'
 # shellcheck disable=SC2016
 mutant py-unscrubbed sed '/^py-syntax:/,/^$/s/^\([[:space:]]*\)@\$(GIT_ENV_SCRUB) \\$/\1@: \\/'
 # The scrub moved behind the first git call / suite loop: a line inserted
 # ahead of it in each recipe.
 # shellcheck disable=SC2016
 mutant test-after-loop awk '/^test:/ { t = 1 } t && /GIT_ENV_SCRUB\)/ && !d { print "\t  for t in $(TEST_FILES); do bash \"$$t\"; done; \\"; d = 1 } { print }'
+# shellcheck disable=SC2016
+mutant test-after-runner awk '/^test:/ { t = 1 } t && /GIT_ENV_SCRUB\)/ && !d { print "\t@python3 -I tests/run_suites.py $(TEST_FILES); \\"; d = 1 } { print }'
 # shellcheck disable=SC2016
 mutant py-after-git awk '/^py-syntax:/ { t = 1 } t && /GIT_ENV_SCRUB\)/ && !d { print "\t@git status; \\"; d = 1 } { print }'
 
