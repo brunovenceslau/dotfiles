@@ -152,13 +152,36 @@ by step 5.
    is ignored when the code runs as the condition of an `if`, `&&` or `||`,
    and an `exit` here cannot close your own shell. So every step that can
    fail carries its own `|| { ...; exit 1; }`, and it fails closed in every
-   context, zsh included. Fill in the three placeholders on the first lines:
+   context, zsh included. Fill in only the survivor's PR number and the
+   repository on the first lines. The block reads both branch names from gh,
+   so it never pastes a branch name into shell text, where a `;`, a `$(...)`
+   or a pair of quotes, all legal in a git branch name, could run code or
+   check the wrong branch. The `case` checks refuse anything but a number and
+   a plain `owner/repo`, and a branch name with any character outside
+   `A-Za-z0-9._/-`, so the names that steps 5 and 6 ask you to type are safe
+   to paste once this block has passed.
 
    ```sh
    sh -eu <<'EOF'
-   base_ref=<baseRefName>            # fill in: the survivor's base branch
-   branch=<branch>                   # fill in: the survivor's branch
-   repo=<owner>/<repo>               # fill in: the GitHub repository
+   pr='<number>'                     # fill in: the survivor's PR number
+   repo='<owner>/<repo>'             # fill in: the GitHub repository
+   case $pr in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 1;; esac
+   case $repo in
+     */*/*|*[!A-Za-z0-9._/-]*|/*|*/|'') echo "bad repo: $repo" >&2; exit 1;;
+     */*) ;;
+     *) echo "bad repo: $repo" >&2; exit 1;;
+   esac
+   branch=$(gh pr view "$pr" --repo "$repo" --json headRefName \
+     --jq .headRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   base_ref=$(gh pr view "$pr" --repo "$repo" --json baseRefName \
+     --jq .baseRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   [ -n "$branch" ] && [ -n "$base_ref" ] || { echo "empty ref name" >&2; exit 1; }
+   for n in "$branch" "$base_ref"; do
+     case $n in *[!A-Za-z0-9._/-]*|-*)
+       echo "unsafe branch name: $n" >&2; exit 1;; esac
+   done
    me=$(git config user.email) ||
      { echo "git user.email is not set" >&2; exit 1; }
    base=$(git rev-parse --verify --quiet "origin/$base_ref^{commit}") ||
@@ -193,7 +216,20 @@ by step 5.
 
    ```sh
    sh -eu <<'EOF'
-   branch=<branch>                   # fill in: the survivor's branch
+   pr='<number>'                     # fill in: the survivor's PR number
+   repo='<owner>/<repo>'             # fill in: the GitHub repository
+   case $pr in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 1;; esac
+   case $repo in
+     */*/*|*[!A-Za-z0-9._/-]*|/*|*/|'') echo "bad repo: $repo" >&2; exit 1;;
+     */*) ;;
+     *) echo "bad repo: $repo" >&2; exit 1;;
+   esac
+   branch=$(gh pr view "$pr" --repo "$repo" --json headRefName \
+     --jq .headRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   [ -n "$branch" ] || { echo "empty ref name" >&2; exit 1; }
+   case $branch in *[!A-Za-z0-9._/-]*|-*)
+     echo "unsafe branch name: $branch" >&2; exit 1;; esac
    git rev-parse --verify --quiet "origin/$branch^{commit}" >/dev/null ||
      { echo "cannot resolve origin/$branch" >&2; exit 1; }
    if git show-ref --verify --quiet "refs/heads/$branch"; then
@@ -227,7 +263,7 @@ by step 5.
    ```
 
    A survivor needs no rebase only when no survivor below it was rewritten.
-7. Re-run the step 3 block on every survivor (set its three placeholders for
+7. Re-run the step 3 block on every survivor (set its two fill-ins for
    each one).
 
 `gh stack sync` and `gh stack rebase` also cascade-rebase a stack, but they are
