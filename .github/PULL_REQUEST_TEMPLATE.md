@@ -25,7 +25,9 @@ not testable. "The gates are green" is not a verification. -->
 - [ ] Every commit is signed, and the subject is a Conventional Commit of 72
       characters or fewer. No trailers.
 - [ ] This pull request targets `main`. If it is stacked, the body says
-      "stacked on #N, review only the last K commits".
+      "stacked on #N, review only the last K commits". The exception is a
+      GitHub stack that `gh stack view` shows with a stack number and that is
+      merged as a stack, described in `docs/stacked-prs.md`.
 - [ ] Documentation that describes changed behaviour is updated in the same
       commit, and no claim in it is unsupported by the tree.
 - [ ] No em dash anywhere in the diff.
@@ -44,12 +46,17 @@ If it touches any of them, tick the ones it touches and link the issue where
 the maintainer agreed to the approach. A pull request that changes one of these
 without that agreement is closed on the question, not on the code.
 
-- [ ] The plugin pins, the `.gitmodules` entries, or the static plugin loader.
-- [ ] The SSH signing setup.
-- [ ] `fsckObjects` on any fetch, including the detached update sentinel.
-- [ ] The `vgit` wrapper or anything else on the `install.sh` upgrade path.
-- [ ] The neutralized fast-syntax-highlighting runtime download.
-- [ ] A link convention or the exceptions table in `lib/link.sh`.
-- [ ] A new submodule or any new binary dependency.
+- [ ] `security-model`: The plugin pins, the `.gitmodules` entries, or the
+      static plugin loader.
+- [ ] `security-model`: The SSH signing setup.
+- [ ] `security-model`: `fsckObjects` on any fetch, including the detached
+      update sentinel.
+- [ ] `security-model`: The `vgit` wrapper or anything else on the
+      `install.sh` upgrade path.
+- [ ] `security-model`: The neutralized fast-syntax-highlighting runtime
+      download.
+- [ ] `link-convention`: A link convention or the exceptions table in
+      `lib/link.sh`.
+- [ ] `dependency`: A new submodule or any new binary dependency.
 - [ ] An `install.sh` subcommand name. Subcommands are a cross-version
       interface and are retired as no-ops, never deleted.

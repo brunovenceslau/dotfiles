@@ -1540,6 +1540,11 @@ for pair in "/a/b-c_d.e@f%g+h=i:j,k|/a/b-c_d.e@f%g+h=i:j,k" "|''" "\\|'\\'" "a b
   want="${pair##*|}"; got="$(sw "${pair%|*}")"
   [ "$got" = "$want" ] || fail "_shell_word: [$got], want [$want]"
 done
+# Several values: one word each, space-separated, an empty one kept as '',
+# and nothing of one carried into the next (a bare word after a quoted one,
+# a quoted word after another).
+got="$(bash -c '. "$1"; _shell_word a "" b "c d" "e f"' _ "$installer")"
+[ "$got" = "a '' b 'c d' 'e f'" ] || fail "_shell_word with several values: [$got], want [a '' b 'c d' 'e f']"
 bash -c '. "$1"; unset LC_ALL; _shell_word "$(printf "\351")" >/dev/null; [ -z "${LC_ALL+x}" ]' _ "$installer" \
   || fail "_shell_word leaked its LC_ALL=C into the caller"
 # Under a UTF-8 caller locale the helper still works on bytes: without its
@@ -2313,7 +2318,8 @@ has "doctor: gh: $work/fakebin/gh is logged in to github.com, and GitHub accepts
 has "doctor: credential helper: gh is the credential helper git uses for github.com, from $local_cfg" "doctor finds the helper in config.local"
 has "doctor: homebrew: " "doctor runs the Homebrew check"
 # Scopes the framework does not need are not missing: none listed, or one.
-for scopes in "" "read:org"; do
+# read:ssh_signing_key only lists signing keys, so it is fine too.
+for scopes in "" "read:org" "read:ssh_signing_key, repo"; do
   FAKE_GH_SCOPES="$scopes" doc; expect_rc 0 "doctor, token scopes [$scopes]"; [ -z "$out" ] || fail "doctor, scopes [$scopes]: $out"
 done
 # The signing-key scope, kept after registering a key, is a problem,
@@ -2321,6 +2327,17 @@ done
 for scopes in "admin:ssh_signing_key, repo" "gist, admin:ssh_signing_key, repo" "repo, admin:ssh_signing_key"; do
   FAKE_GH_SCOPES="$scopes" doc; expect_rc 1 "doctor, signing scope kept [$scopes]"; one "doctor, signing scope kept [$scopes]"
   has "doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key" "doctor names the kept signing scope [$scopes]"
+done
+# write:ssh_signing_key is what creating a signing key needs (GitHub's REST
+# docs, "REST API endpoints for SSH signing keys"): it is flagged the same.
+FAKE_GH_SCOPES="repo, write:ssh_signing_key" doc; expect_rc 1 "doctor, write signing scope kept"; one "doctor, write signing scope kept"
+has "doctor: gh: gh's token still holds the write:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes write:ssh_signing_key" "doctor names the kept write signing scope"
+# Both: a line for each, with its own command.
+FAKE_GH_SCOPES="write:ssh_signing_key, repo, admin:ssh_signing_key" doc; expect_rc 1 "doctor, both signing scopes kept"
+[ "$(grep -c "^install: doctor: gh: gh's token still holds the " <<<"$out")" -eq 2 ] \
+  || fail "doctor, both signing scopes kept: want two lines: $out"
+for scope in admin:ssh_signing_key write:ssh_signing_key; do
+  has "doctor: gh: gh's token still holds the $scope scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes $scope" "doctor names the kept $scope with both kept"
 done
 # GitHub refusing the token is a problem; no answer is a note.
 for status in 401 403; do
@@ -2347,7 +2364,7 @@ has "doctor: gh: note: gh is not on PATH - GitHub access is not checked; gh is n
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
 helper_cfg "$HOME/.gitconfig"
 doc; expect_rc 1 "doctor, helper in ~/.gitconfig"; one "doctor, helper in ~/.gitconfig"
-has "doctor: credential helper: gh is the credential helper git uses for github.com, but $local_cfg does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see \"Git prompts for a username\" in docs/troubleshooting.md" "doctor names a helper outside config.local"
+has "doctor: credential helper: gh is the credential helper git uses for github.com, but $local_cfg does not set it, so dotfiles-upgrade, which reads the XDG config and never ~/.gitconfig, does not use it - see \"Git prompts for a username\" in docs/troubleshooting.md" "doctor names a helper outside config.local"
 # A helper a later file adds after gh is asked after it: healthy. Only an
 # empty helper clears the list git asks (gitcredentials(7)), and then the
 # later file's helper is the one git uses. The whole list counts, not the
@@ -2419,7 +2436,7 @@ GIT_CONFIG_SYSTEM="$work/system.gitconfig" doc; expect_rc 0 "doctor, gh by setup
 # Patterns that do not match https://github.com (another host, a user
 # github.com lacks, one whose quoting a probe could break) do not apply,
 # not even an empty helper under them, which would clear gh.
-for pattern in 'https://gitlab.com' 'https://u@github.com' 'https://ex"a\mple.com'; do
+for pattern in 'https://gitlab.com' 'https://u@github.com' 'u@github.com' 'https://ex"a\mple.com'; do
   git config --file "$HOME/.gitconfig" "credential.$pattern.helper" ""
   git config --file "$HOME/.gitconfig" --add "credential.$pattern.helper" store
 done
@@ -2434,8 +2451,35 @@ helper_cfg "$local_cfg"
 doc; expect_rc 1 "doctor, a host-only pattern before gh"; one "doctor, a host-only pattern before gh"
 has "doctor: credential helper: git asks store, set in $local_cfg, before gh for github.com" "doctor reads a host-only pattern in order"
 git config --file "$local_cfg" --unset-all 'credential.github.com.helper'
+# config.local sets gh when gh is the first helper of the list it sets, by
+# git's rules: gh's reset and gh, then store under https://github.com/, is
+# gh first. One --get-urlmatch value would be store, the best match's last.
+git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+helper_cfg "$local_cfg" ""
+helper_cfg "$local_cfg"
+git config --file "$local_cfg" 'credential.https://github.com/.helper' store
+doc; expect_rc 0 "doctor, gh first in config.local's list"; [ -z "$out" ] || fail "doctor, gh first in config.local's list: $out"
+git config --file "$local_cfg" --unset-all 'credential.https://github.com/.helper'
 # Another helper alone is fine: gh is not the only way to push.
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+# config.local reaches git through the XDG config's [include], and its own
+# [include]s are followed too: gh set in a file config.local includes counts
+# as config.local setting it. Reading the file without --includes would call
+# that a missing helper.
+helper_cfg "$work/helper.inc"
+git config --file "$local_cfg" include.path "$work/helper.inc"
+doc; expect_rc 0 "doctor, gh in a file config.local includes"; [ -z "$out" ] || fail "doctor, gh in a file config.local includes: $out"
+git config --file "$local_cfg" --unset-all include.path
+rm -f "$work/helper.inc"
+# A config.local that is a link to nothing cannot be read: git ignores it, so
+# the helper in ~/.gitconfig is not in the file the upgrade reads.
+mv "$local_cfg" "$work/config.local.kept"
+ln -s "$work/nowhere" "$local_cfg"
+helper_cfg "$HOME/.gitconfig"
+doc; expect_rc 1 "doctor, config.local is a dangling link"
+has "doctor: credential helper: gh is the credential helper git uses for github.com, but $local_cfg does not set it, so dotfiles-upgrade" "doctor reads a dangling config.local as one that sets no helper"
+rm -f "$local_cfg" "$HOME/.gitconfig"
+mv "$work/config.local.kept" "$local_cfg"
 helper_cfg "$local_cfg" osxkeychain
 doc; expect_rc 0 "doctor, another helper"; [ -z "$out" ] || fail "doctor, another helper: $out"
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'

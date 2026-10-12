@@ -76,7 +76,7 @@ if command -v zsh >/dev/null 2>&1; then
     stat_mode=(-f '%Lp %N'); echo "smoke_test: stat branch BSD (-f '%Lp %N')"
   fi
   snap_submodules() {
-    local gm common cw
+    local gm common cw cfg
     gm="$(git -C "$repo_root" rev-parse --path-format=absolute --git-path modules)" || return 1
     common="$(git -C "$repo_root" rev-parse --path-format=absolute --git-common-dir)" || return 1
     cw="$(git -C "$repo_root" rev-parse --path-format=absolute --git-path config.worktree)" || return 1
@@ -91,7 +91,14 @@ if command -v zsh >/dev/null 2>&1; then
     else
       echo "no modules gitdir: $gm"
     fi
-    echo "== common config"; cat "$common/config" || return 1
+    # Every key but branch.<name>.*: the common config is shared by every
+    # worktree, and a sibling worktree that makes a branch writes those,
+    # which is no finding of this run. Everything else stays watched, from
+    # the core.bare a leaked `git init` rewrites to remote, user, url,
+    # include and credential settings. Exit 1 from grep is nothing left.
+    echo "== common config"
+    cfg="$(git config --file "$common/config" --list)" || return 1
+    grep -v '^branch\.' <<<"$cfg" || [ $? -eq 1 ] || return 1
     if [ -f "$cw" ]; then echo "== worktree config"; cat "$cw"; fi
     echo "== HEAD"; git -C "$repo_root" rev-parse HEAD || return 1
     git -C "$repo_root" symbolic-ref -q HEAD || :

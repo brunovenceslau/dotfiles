@@ -34,7 +34,12 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 
 # STRICT=1 (set by CI) turns a missing tool from a skip-with-warning into a hard
 # failure, so a local gate never reports green on a check it did not run.
+# Exported so a recipe reads it as "$${STRICT:-}" even when it was set by a
+# target-specific assignment or in this file, not only when it came from the
+# environment or the command line (make exports those on its own). A recipe
+# never splices $(STRICT) into shell text.
 STRICT ?=
+export STRICT
 
 .DEFAULT_GOAL := help
 .PHONY: help lint check-patterns check-patterns-gawk py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
@@ -64,7 +69,7 @@ lint: check-patterns py-syntax
 	  if [ -n "$(strip $(SH_FILES))" ]; then \
 	    echo "shellcheck $(SH_FILES)"; shellcheck $(SH_FILES); \
 	  else echo "shellcheck: no shell files yet, skipping"; fi; \
-	elif [ -n "$(STRICT)" ]; then \
+	elif [ -n "$${STRICT:-}" ]; then \
 	  echo "ERROR: shellcheck not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	else \
 	  echo "WARN: shellcheck not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
@@ -339,7 +344,7 @@ py-syntax:
 	      '        bad = 1' \
 	      'sys.exit(bad)') "$$top" '$(PY_SYNTAX_MAX_BYTES)' "$$git_dir" "$$common_dir" < "$$py_list"; \
 	    exit $$?; \
-	  elif [ -n "$(STRICT)" ]; then \
+	  elif [ -n "$${STRICT:-}" ]; then \
 	    echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	  else \
 	    echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
@@ -354,9 +359,30 @@ py-syntax:
 # py-syntax): a leaked GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would otherwise steer
 # each suite's own fixture `git` calls at THAT repository, committing or configuring
 # into it.
+# Every suite also runs with TMPDIR behind a symlink. macOS's default TMPDIR
+# (/var/folders/...) is a symlink (/var -> /private/var), so a path assumption
+# that breaks there (a comparison of a logical path against a physical one, a
+# `[ -ef ]`, a "does it start with" test) never fails on Linux, where /tmp is a
+# real directory, and surfaces only on the macOS CI legs. A symlink made here
+# fails on Linux too. The link and its target live in one directory this recipe
+# creates (mktemp -d, mode 0700), never at a name next to it in a shared TMPDIR
+# where another user could pre-create the name; one rm -rf of that directory
+# on exit removes both, and the signal traps exit so the EXIT trap runs. A
+# relative TMPDIR is made absolute (cd -P + pwd, CDPATH cleared) before suites
+# see it; tmp_root keeps its old value if that fails, so the EXIT trap still
+# removes the directory. The link target is the relative name `real`, resolved
+# against the link's own directory: a target built from a relative tmp_root
+# would dangle.
 test:
 	@if [ -n "$(strip $(TEST_FILES))" ]; then \
 	  $(GIT_ENV_SCRUB) \
+	  tmp_root=""; \
+	  trap '[ -z "$$tmp_root" ] || rm -rf "$$tmp_root"' EXIT; \
+	  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
+	  tmp_root="$$(mktemp -d "$${TMPDIR:-/tmp}/make-test-tmp.XXXXXX")" || { echo "ERROR: mktemp failed - failing closed" >&2; exit 1; }; \
+	  abs_root="$$(CDPATH= cd -P -- "$$tmp_root" && pwd)" || { echo "ERROR: could not resolve the TMPDIR directory - failing closed" >&2; exit 1; }; tmp_root="$$abs_root"; \
+	  mkdir "$$tmp_root/real" && ln -s real "$$tmp_root/link" || { echo "ERROR: could not make the TMPDIR link - failing closed" >&2; exit 1; }; \
+	  export TMPDIR="$$tmp_root/link"; \
 	  failed=""; ran=0; \
 	  for t in $(TEST_FILES); do echo "run $$t"; ran=$$((ran+1)); bash "$$t" || failed="$$failed $$t"; done; \
 	  if [ -n "$$failed" ]; then echo "test: FAILED:$$failed" >&2; exit 1; fi; \
@@ -407,7 +433,7 @@ test-env-scrub:
 reuse:
 	@if command -v reuse >/dev/null 2>&1; then \
 	  echo "reuse lint"; reuse lint; \
-	elif [ -n "$(STRICT)" ]; then \
+	elif [ -n "$${STRICT:-}" ]; then \
 	  echo "ERROR: reuse not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	else \
 	  echo "WARN: reuse not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
@@ -427,7 +453,7 @@ reuse:
 gitleaks:
 	@if command -v gitleaks >/dev/null 2>&1; then \
 	  echo "gitleaks dir ."; gitleaks dir . --no-banner --redact; \
-	elif [ -n "$(STRICT)" ]; then \
+	elif [ -n "$${STRICT:-}" ]; then \
 	  echo "ERROR: gitleaks not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	else \
 	  echo "WARN: gitleaks not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
@@ -452,9 +478,8 @@ secret-scan:
 # The startup-fork gate - PATH-first logging shims around a hermetic
 #   `zsh -i -c exit` prove the startup path invokes no external binary. A
 #   BLOCKING gate: the log-derived assertion is deterministic.
-#   STRICT reaches the gate through the environment (make exports it when set
-#   on the command line or in the environment), so a missing zsh fails closed
-#   in CI.
+#   STRICT reaches the gate through the environment (this Makefile exports
+#   it), so a missing zsh fails closed in CI.
 forkgate:
 	@bin/startup-fork-gate
 
@@ -473,7 +498,7 @@ linkcheck:
 	@$(GIT_ENV_SCRUB) \
 	if command -v python3 >/dev/null 2>&1; then \
 	  echo "python3 -I tests/linkcheck.py"; python3 -I tests/linkcheck.py .; \
-	elif [ -n "$(STRICT)" ]; then \
+	elif [ -n "$${STRICT:-}" ]; then \
 	  echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	else \
 	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \
@@ -494,7 +519,7 @@ commit-identity:
 	@$(GIT_ENV_SCRUB) \
 	if command -v python3 >/dev/null 2>&1; then \
 	  echo "python3 -I .githooks/commit_identity.py check"; python3 -I .githooks/commit_identity.py check </dev/null; \
-	elif [ -n "$(STRICT)" ]; then \
+	elif [ -n "$${STRICT:-}" ]; then \
 	  echo "ERROR: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
 	else \
 	  echo "WARN: python3 not installed - skipping (set STRICT=1 to fail; CI enforces it)"; \

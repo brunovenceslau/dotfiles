@@ -150,9 +150,9 @@ Add the new key before you remove the old one, so the host can always sign.
    register it on GitHub as a signing key:
 
    ```sh
-   gh auth refresh -h github.com -s admin:ssh_signing_key
+   gh auth refresh -h github.com -s write:ssh_signing_key
    gh ssh-key add ~/.ssh/id_signing_new.pub --type signing --title "$(hostname -s) signing"
-   gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key
+   gh auth refresh -h github.com --remove-scopes write:ssh_signing_key
    ```
 
    The last command drops the extra scope again once the key is added. No

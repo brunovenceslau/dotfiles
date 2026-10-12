@@ -672,7 +672,7 @@ install: doctor: plugins: cannot read which commit <plugin> is at (<reason>) - m
 install: doctor: homebrew: Homebrew is not installed: brew is not on PATH, and there is no <path> or <path> - install it as docs/new-mac-host.md shows
 install: doctor: homebrew: <path> is installed, but brew is not on PATH - start a new zsh (exec zsh): its zshrc puts it there
 install: doctor: gh: GitHub refuses gh's token for github.com (HTTP <status>) - run: gh auth login -h github.com
-install: doctor: gh: gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key
+install: doctor: gh: gh's token still holds the <scope> scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes <scope>
 install: doctor: credential helper: cannot read credential.helper (<error>) - check the file git -C ~ config --show-origin --get-regexp credential names
 install: doctor: credential helper: git's credential helper for github.com is gh, which is not on PATH, so fetching or pushing over HTTPS fails - install gh: brew install gh
 install: doctor: credential helper: git's credential helper for github.com runs <path>, set in <path>, which is not an executable file, so fetching or pushing over HTTPS fails - point it at your gh: GIT_CONFIG_GLOBAL=<path> gh auth setup-git
@@ -680,7 +680,7 @@ install: doctor: credential helper: git's credential helper for github.com is gh
 install: doctor: credential helper: git asks <helper>, set in <path>, before gh for github.com, and uses its answer when it has one - to ask only gh, run: GIT_CONFIG_GLOBAL=<path> gh auth setup-git, which clears the list first
 install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but a later file, <path>, sets <helper>, which git uses - remove that one
 install: doctor: credential helper: <path> sets gh as the credential helper for github.com, but an empty credential.helper in <path>, read later, clears it, so git uses none - remove that empty one
-install: doctor: credential helper: gh is the credential helper git uses for github.com, but <path> does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md
+install: doctor: credential helper: gh is the credential helper git uses for github.com, but <path> does not set it, so dotfiles-upgrade, which reads the XDG config and never ~/.gitconfig, does not use it - see "Git prompts for a username" in docs/troubleshooting.md
 install: doctor: credential helper: gh is logged in, but git has no credential helper for github.com, so a push over HTTPS asks for a username - run: GIT_CONFIG_GLOBAL=<path> gh auth setup-git
 ```
 
@@ -739,17 +739,21 @@ token (HTTP 401 or 403) is a problem. No answer, offline included, is a
 `note:` and the run still exits `0`; so is GitHub's rate limit, a 403 or
 a 429 whose `x-ratelimit-remaining` header is `0` or that carries a
 `retry-after` header, which says nothing about the token. The framework
-needs no token scope: `gh auth login` grants all a push uses. The one
-scope that is a problem is
-`admin:ssh_signing_key` kept after
+needs no token scope: `gh auth login` grants all a push uses. The scopes
+that are a problem are `admin:ssh_signing_key` and `write:ssh_signing_key`
+kept after
 [registering a signing key](new-mac-host.md#5-set-identity-and-signing),
-since a token holding it can add signing keys to the account.
+since a token holding either can add signing keys to the account: GitHub's
+[SSH signing keys API](https://docs.github.com/en/rest/users/ssh-signing-keys)
+lets `write:ssh_signing_key` create one, and `admin:ssh_signing_key` holds
+it too. Each one the token holds has its own line and command;
+`read:ssh_signing_key`, which only lists keys, is fine.
 
 The credential helper lines are about pushing, or fetching a private fork,
 over HTTPS: see [git prompts for a username](#git-prompts-for-a-username).
-`dotfiles-upgrade` reads only the XDG config, so the helper belongs in
-`config.local`. A helper other than gh is fine, and so is no helper while
-gh is not logged in: fetching the public upstream needs none.
+`dotfiles-upgrade` reads the XDG config and never `~/.gitconfig`, so the
+helper belongs in `config.local`. A helper other than gh is fine, and so is
+no helper while gh is not logged in: fetching the public upstream needs none.
 
 doctor reads the helpers the way git does (see `gitcredentials(7)`): every
 `credential.helper`, and every `credential.<url>.helper` whose `<url>`
@@ -934,7 +938,9 @@ install: upgrade: another upgrade appears to be in progress
 trap releases it on exit and on Ctrl-C, but a hard kill can orphan it.
 
 **Fix.** If no upgrade is running, remove the lock directory. The message prints
-its exact path:
+its exact path, and the `rmdir` command to run; a path with a space or another
+unusual character prints quoted for the shell, ready to paste. With the default
+state directory:
 
 ```sh
 rmdir ~/.local/state/dotfiles/upgrade.lock
@@ -949,10 +955,18 @@ install: upgrade: fetch failed
 **Cause.** The network is unreachable, or the remote needs credentials the
 upgrade cannot see. The upgrade's fetch scrubs ambient git configuration, to
 neutralize a hostile `url.insteadOf` or `gpg.ssh.program`. It then re-injects
-only the credential helper it can read from the XDG config. A helper that lives
-anywhere else is not seen, and the fetch runs with `GIT_TERMINAL_PROMPT=0`, so
-it fails instead of prompting. Credentials only matter when the remote is a
-private fork or an SSH URL; the upstream HTTPS remote fetches without them.
+only the credential settings it can read from the XDG config. A helper that
+lives anywhere else is not seen, and the fetch runs with
+`GIT_TERMINAL_PROMPT=0`, so it fails instead of prompting. Credentials only
+matter when the remote is a private fork or an SSH URL; the upstream HTTPS
+remote fetches without them.
+
+A credential setting whose name holds `=` (a URL with a query) cannot be passed
+on to the fetch, and the upgrade refuses it before fetching:
+
+```
+install: upgrade: the credential setting <name> holds =, which the fetch cannot pass on - rename that URL in your git config
+```
 
 **Fix.** Check the network first. If the remote needs credentials, put the
 helper where the upgrade reads it:

@@ -97,7 +97,10 @@ class PinnedPwd(object):
     container's often does not), so a check that read it would pass on one
     platform and fail on the other. The pinned name is never the
     placeholder, so a check that assumes the placeholder fails on every
-    host, not only where the account happens to have a name."""
+    host, not only where the account happens to have a name. The pin holds
+    in this process only: a module that tests/host_identity_test.sh runs,
+    or that a unit here starts as a subprocess, reads the host's own
+    account."""
 
     class _Entry(object):
         pw_name, pw_gecos = "units", ACCOUNT_NAME + ",Room 1"
@@ -737,9 +740,14 @@ def escaping_units(mod, scratch):
             rc, text = h.said(mode, *extra)
             check(printable(text) and "Traceback" not in text and h.home not in text,
                   "hostile HOME and TMPDIR, row %d, %s: nothing printed raw (%r)" % (n, mode, text))
+    before = guard_calls()
     rc, text = h.said("doctor", "--verbose")
     check("('file:%s/.config/git/config.local')" % os.path.join(scratch, "home" + OSC_SHOWN) in text,
           "a hostile HOME prints quoted and escaped in an origin (%r)" % text)
+    # doctor's gh check ran the guard, never the host's gh.
+    check(guard_calls() == before + 1 and "gh: note: gh is not logged in to github.com" in text,
+          "doctor's gh check under a hostile HOME runs the guard stub, not the host's gh (%d call(s))"
+          % (guard_calls() - before))
     check(os.listdir(tmpdir) == [], "a hostile TMPDIR is left empty")
     mod.tempfile.tempdir = None
 
@@ -1102,6 +1110,45 @@ def killed_units(mod, scratch):
                        stderr=subprocess.PIPE, timeout=60)
     check(p.returncode == 0, "a SIGTERM the caller ignores stays ignored (rc %d, %r)" % (p.returncode, p.stderr))
 
+    # A SIGCHLD the caller ignores is put back to the default: ignored, the
+    # kernel reaps each child at once, every exit status reads 0 and gh's
+    # group id is free before gh's group is ended. Under entry(), a child's
+    # exit 1 reads 1, and gh_token() reads gh's answer and signals no group
+    # whose leader is reaped.
+    stub(scratch, "gh-sigchld", 'printf "HTTP/2.0 200 OK\\r\\n\\r\\n"\n')
+    reaped = (
+        "import importlib.util, os, signal, subprocess, sys\n"
+        "signal.signal(signal.SIGCHLD, signal.SIG_IGN)\n"
+        "spec = importlib.util.spec_from_file_location('m', sys.argv[1])\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "freed, real_killpg = [], os.killpg\n"
+        "def killpg(pgid, sig):\n"
+        "    # A leader this process can no longer wait for is reaped: its id is\n"
+        "    # free, so the signal is recorded, never sent (no os.waitid: not judged).\n"
+        "    try:\n"
+        "        if hasattr(os, 'waitid'):\n"
+        "            os.waitid(os.P_PID, pgid, os.WEXITED | os.WNOWAIT | os.WNOHANG)\n"
+        "    except ChildProcessError:\n"
+        "        freed.append(pgid)\n"
+        "        return\n"
+        "    real_killpg(pgid, sig)\n"
+        "os.killpg = killpg\n"
+        "def run(*a, **k):\n"
+        "    status = subprocess.run(['sh', '-c', 'exit 1']).returncode\n"
+        "    got = m.gh_token(sys.argv[3])\n"
+        "    print('%d %r %r' % (status, got, freed))\n"
+        "    return (0 if status == 1 and got == ('in', None) and not freed else 1), None\n"
+        "m.run = run\n"
+        "sys.exit(m.entry(['--config-local', sys.argv[2], '--mode', 'check']))\n"
+    )
+    p = subprocess.run([sys.executable, "-I", "-B", "-c", reaped, mod.__file__, os.path.join(scratch, "c.local"),
+                        os.path.join(scratch, "gh-sigchld")],
+                       env=dict(os.environ, HOME=scratch), preexec_fn=default_signals, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+    check(p.returncode == 0 and p.stderr == b"",
+          "a SIGCHLD the caller ignores is put back: exit statuses read true and gh's group is ended while it "
+          "is unreaped (rc %d, %r, %r)" % (p.returncode, p.stdout, p.stderr))
+
 
 # --- every value a message puts in is escaped: a static check ---------------
 #
@@ -1140,8 +1187,14 @@ def killed_units(mod, scratch):
 #    a plain assignment; setattr() and globals() are never called.
 #
 # Not covered, so kept by review: a trusted container changed through an
-# alias of it (`l = lines; l.append(p)`), and a file other than the
-# standard streams written to directly.
+# alias of it (`l = lines; l.append(p)`); a file other than the standard
+# streams written to directly; a module reached as another module's
+# attribute (`subprocess.os.write`); a descriptor reopened from a name that
+# holds its number (`fd = 2; os.fdopen(fd, 'w')`) or through another opener
+# (io.FileIO, os.dup2); and the dynamic routes to a printer or
+# a stream: exec() and eval(), __import__(), importlib, sys.modules other
+# than in getattr() (`sys.modules['os'].write`), vars(), locals() and
+# __dict__, object.__setattr__(), and the logging module.
 #
 # A name or a function joins a list here only with the reason it holds
 # message text, and the rules above then hold every binding of it to that.
@@ -1205,9 +1258,10 @@ SKIPPED = {"escape", "quoted", "_shown", "shell_word", "warn", "note", "log", "o
 # and a Refusal, whose text is shown later through str().
 SINK_FUNCS = {"warn", "note", "log", "print", "Refusal"}
 SINK_METHODS = {"ok", "info", "problem"}
-SINK_STREAMS = {"sys.stderr", "sys.stdout"}
 STREAM_NAMES = {"stderr", "stdout", "__stderr__", "__stdout__"}
 STREAMS = set("sys." + n for n in STREAM_NAMES)
+# Each stream is a printer: sys.__stderr__ writes to the same terminal.
+SINK_STREAMS = frozenset(STREAMS)
 # Printers of every argument after the first (a file descriptor).
 SINK_DOTTED = {"os.write", "os.writev"}
 NOT_MESSAGE_KEYWORDS = {"signing"}  # Doctor.problem(signing=...) is a flag
@@ -1524,11 +1578,26 @@ def unescaped_values(source):
                 bad(node, "%s used, not called" % seg(node))
         if isinstance(node, ast.Attribute) and _dotted(node) in STREAMS and node not in stream_ok:
             bad(node, "%s used other than by write() or print(file=)" % seg(node))
-        if isinstance(node, ast.Import) and any(a.name == "sys" and a.asname for a in node.names):
-            bad(node, "sys imported under another name")
-        if isinstance(node, ast.ImportFrom) and node.module in ("sys", "os") and any(
-                a.name in STREAM_NAMES or a.name in ("write", "writev") for a in node.names):
+        # `import os.path as q` is flagged too, on purpose: q.os is os.
+        if isinstance(node, ast.Import) and any(a.name.split(".")[0] in ("sys", "os") and a.asname
+                                                for a in node.names):
+            bad(node, "sys or os imported under another name")
+        # posix (nt on Windows) is the C module behind os: its write() is
+        # os.write() under another name.
+        if (isinstance(node, ast.Import) and any(a.name.split(".")[0] in ("posix", "nt") for a in node.names)
+                or isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in ("posix", "nt")):
+            bad(node, "posix or nt imported")
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in ("sys", "os") and any(
+                a.name in STREAM_NAMES or a.name in ("write", "writev", "*") for a in node.names):
             bad(node, "a stream or os.write imported by name")
+        # A descriptor given as a number (2 is stderr) reopened as a file
+        # writes to the terminal; one held in a name is not judged (the
+        # Not covered note).
+        if (isinstance(node, ast.Call) and (_callee(node) == "open" and isinstance(node.func, ast.Name)
+                                            or _dotted(node.func) in ("io.open", "os.fdopen"))
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, int) and not isinstance(node.args[0].value, bool)):
+            bad(node, "a descriptor reopened by its number")
         if isinstance(node, ast.Call) and _callee(node) in ("setattr", "globals"):
             bad(node, "%s() called" % _callee(node))
         if isinstance(node, ast.Call) and _callee(node) == "getattr" and any(
@@ -1612,6 +1681,14 @@ EVASIONS = (
     "def _x(p):\n    sys.stdout.buffer.write(p)\n",
     "def _x(p):\n    from sys import stderr\n    stderr.write(p)\n",
     "def _x(p):\n    import sys as s\n    s.stderr.write(p)\n",
+    "def _x(p):\n    sys.__stderr__.write(p)\n",
+    "def _x(p):\n    import os as o\n    o.write(2, p)\n",
+    "def _x(p):\n    import posix\n    posix.write(2, p)\n",
+    "def _x(p):\n    from nt import write\n    write(2, p)\n",
+    "def _x(p):\n    from os import *\n    write(2, p)\n",
+    "def _x(p):\n    io.open(2, 'w').write(p)\n",
+    "def _x(p):\n    os.fdopen(2, 'w').write(p)\n",
+    "def _x(p):\n    open(2, 'w').write(p)\n",
     "def _x(p):\n    os.write(2, p)\n",
     "def _x(p):\n    w = os.write\n    w(2, p)\n",
     "def _x(p):\n    _, why = subprocess.run(p)\n    warn(why)\n",
@@ -1770,6 +1847,8 @@ def doctor_deps_units(mod, scratch):
     ok_head = "HTTP/2.0 200 OK\r\nX-Oauth-Scopes: repo, admin:ssh_signing_key\r\n\r\n"
     for args, want in (
             ((0, ok_head, ""), ("in", ["repo", "admin:ssh_signing_key"])),
+            ((0, "HTTP/2.0 200 OK\r\nX-Oauth-Scopes: write:ssh_signing_key, read:ssh_signing_key\r\n\r\n", ""),
+             ("in", ["write:ssh_signing_key", "read:ssh_signing_key"])),
             ((0, "HTTP/1.1 200 OK\r\nx-oauth-scopes: \r\n\r\n", ""), ("in", None)),
             ((0, "HTTP/2.0 200 OK\r\n\r\n", ""), ("in", None)),
             ((4, "", "To get started with GitHub CLI, please run:  gh auth login\n"), ("out", None)),
@@ -1906,8 +1985,100 @@ def doctor_deps_units(mod, scratch):
                   "a gh that answers leaves no child behind (%r)" % (got,))
         else:
             os.kill(child, signal.SIGKILL)
-            check(got == ("in", None) and os.listdir(tmpdir) == [],
-                  "a gh that answers is read (no os.waitid: its child is not killed) (%r)" % (got,))
+        # Without os.waitid (macOS before Python 3.13), forced off where it
+        # exists so every host runs this way out: P is reaped first, its
+        # group id is free to be reused then, and so no group is signalled:
+        # the child is left alive. A gh that does not answer in time still
+        # takes its child with it: that group is signalled before the reap.
+        real_unreaped = mod._CAN_WAIT_UNREAPED
+        try:
+            mod._CAN_WAIT_UNREAPED = False
+            got = mod.gh_token(os.path.join(ghdir, "gh-quick"))
+            with open(pidfile) as fh:
+                child = int(fh.read())
+            # Nothing kills it, so one look is enough: alive() would wait
+            # out its whole budget on a child that is meant to live.
+            try:
+                os.kill(child, signal.SIGKILL)
+                left = True
+            except ProcessLookupError:
+                left = False
+            check(got == ("in", None) and left and os.listdir(tmpdir) == [],
+                  "a gh that answers is read, and without os.waitid its child is not signalled (%r, alive %r)"
+                  % (got, left))
+            began = time.monotonic()
+            got = mod.gh_token(os.path.join(ghdir, "gh-slow"))
+            took = time.monotonic() - began
+            with open(pidfile) as fh:
+                child = int(fh.read())
+            check(got == ("unknown", "no answer within 1 seconds") and took < 10 and not alive(child)
+                  and os.listdir(tmpdir) == [],
+                  "without os.waitid, a gh that does not answer in time still goes with its child (%r, %.1f s)"
+                  % (got, took))
+            # A signal waits at most one poll of the reap, never the whole
+            # wait: a gh that let go of its pipes but runs on is waited for
+            # poll by poll, and a SIGTERM then unwinds at once. Measured on
+            # an idle 10-core Linux host, the signal-to-Terminated time was
+            # at most 5 ms over 60 runs, and 21 ms with twice as many busy
+            # processes as cores; 2 s leaves room for a loaded CI runner and
+            # stays far below GH_TIMEOUT (20 s here), which a wait held whole
+            # would last. The signal comes from another process, as a real
+            # one does: a thread of this one could take a signal the main
+            # thread holds (the hold is per thread), and so prove nothing.
+            stub(ghdir, "gh-mute", 'echo $$ > "%s"\nexec >/dev/null 2>&1 </dev/null\nexec sleep 30\n' % pidfile)
+            mod.GH_TIMEOUT = 20
+            old_term = signal.signal(signal.SIGTERM, mod._unwind)
+            mod._unwinding = False
+            # time.monotonic() is the system-wide monotonic clock on Linux
+            # and macOS, so the sender's reading compares with this one's.
+            # The sender waits for an observable state, never a fixed
+            # sleep: a pidfile this run's stub wrote (a stale one from an
+            # earlier stub is removed first), then that pid showing as
+            # `sleep` in ps, which is gh-mute after its last exec, so gh
+            # has let go of its pipes and the signal lands in the reap's
+            # polling.
+            os.unlink(pidfile)
+            killer = subprocess.Popen(
+                [sys.executable, "-I", "-c",
+                 "import os, signal, subprocess, sys, time\n"
+                 "end = time.monotonic() + 30\n"
+                 "pid = None\n"
+                 "while time.monotonic() < end:\n"
+                 "    try:\n"
+                 "        pid = int(open(sys.argv[2]).read())\n"
+                 "    except (OSError, ValueError):\n"
+                 "        pid = None\n"
+                 "    if pid is not None:\n"
+                 "        comm = subprocess.run(['ps', '-o', 'comm=', '-p', str(pid)], stdout=subprocess.PIPE,\n"
+                 "                              stdin=subprocess.DEVNULL).stdout.decode().strip()\n"
+                 "        if os.path.basename(comm) == 'sleep':\n"
+                 "            break\n"
+                 "    time.sleep(0.01)\n"
+                 "else:\n"
+                 "    sys.exit('gh-mute never reached exec sleep')\n"
+                 "print(repr(time.monotonic()), flush=True)\n"
+                 "os.kill(int(sys.argv[1]), signal.SIGTERM)\n",
+                 str(os.getpid()), pidfile], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                preexec_fn=default_signals)
+            got, waited = None, None
+            try:
+                mod.gh_token(os.path.join(ghdir, "gh-mute"))
+            except mod.Terminated as e:
+                got, waited = e.signum, time.monotonic()
+            finally:
+                sent = killer.communicate(timeout=60)[0]
+                signal.signal(signal.SIGTERM, old_term)
+                mod._unwinding = False
+            if waited is not None:
+                waited -= float(sent)
+            with open(pidfile) as fh:
+                child = int(fh.read())
+            check(got == signal.SIGTERM and waited is not None and waited < 2 and not alive(child)
+                  and os.listdir(tmpdir) == [],
+                  "without os.waitid, a SIGTERM while gh runs on unwinds within one poll and ends gh (%r, %s s)"
+                  % (got, "%.3f" % waited if waited is not None else None))
+        finally:
+            mod._CAN_WAIT_UNREAPED = real_unreaped
         mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = 20, 100
         stub(ghdir, "gh-loud", 'sleep 30 &\necho $! > "%s"\nprintf "%%0200d" 0\nwait\n' % pidfile)
         got = mod.gh_token(os.path.join(ghdir, "gh-loud"))
@@ -1920,6 +2091,76 @@ def doctor_deps_units(mod, scratch):
               "a gh that is not executable is no answer (%r)" % (got,))
     finally:
         mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = real_timeout, real_cap
+
+def reap_race_units(mod):
+    """A signal that lands after Popen reaps gh and before it sets
+    returncode unwinds into _end_group(), which then must not signal gh's
+    group id: with gh reaped, that id may already be another process's.
+    The signal is a real one, sent at that point (Popen's
+    _handle_exitstatus, which wait() and poll() both call right after the
+    reap) and handled by entry()'s handler, so a held block delays it as it
+    would one from outside; a raised exception would pass any hold. Every
+    UNWINDING signal: Popen.wait() catches a KeyboardInterrupt and waits
+    once more, which happens to set returncode, but lets Terminated (SIGTERM,
+    SIGHUP) through.
+    Each way out of _bounded_output() is run: with os.waitid (P left a
+    zombie first) and without it (_CAN_WAIT_UNREAPED off, as on macOS
+    before Python 3.13)."""
+    real_unreaped, real_killpg = mod._CAN_WAIT_UNREAPED, os.killpg
+    # A suite run as a `&` job inherits SIGINT ignored, and the signal
+    # would then never arrive: the test installs entry()'s handler.
+    old = dict((sig, signal.getsignal(sig)) for sig in mod.UNWINDING)
+    try:
+        for sig in mod.UNWINDING:
+            signal.signal(sig, mod._unwind)
+            for unreaped in sorted(set([real_unreaped, False])):
+                mod._CAN_WAIT_UNREAPED = unreaped
+                mod._unwinding = False
+                p = subprocess.Popen(["sh", "-c", "exit 0"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.PIPE, start_new_session=True)
+                reaped, held, freed = [], [], []
+                handle = p._handle_exitstatus
+
+                def interrupted(*args, **kwargs):
+                    if not reaped:
+                        reaped.append(True)
+                        held.append(sig in signal.pthread_sigmask(signal.SIG_BLOCK, []))
+                        os.kill(os.getpid(), sig)
+                    return handle(*args, **kwargs)
+
+                def killpg(pgid, signum):
+                    if reaped and pgid == p.pid:
+                        freed.append(pgid)  # never sent on: the id may be reused
+                        return
+                    real_killpg(pgid, signum)
+
+                p._handle_exitstatus = interrupted
+                os.killpg = killpg
+                got = None
+                try:
+                    with p.stdout, p.stderr:
+                        try:
+                            mod._bounded_output(p, 10, 100)
+                        except BaseException:
+                            mod._end_group(p)
+                            raise
+                except KeyboardInterrupt:
+                    got = int(signal.SIGINT)
+                except mod.Terminated as e:
+                    got = e.signum
+                finally:
+                    os.killpg = real_killpg
+                check(got == sig and reaped and held == [True] and p.returncode == 0 and not freed,
+                      "a %s between gh's reap and its returncode is held, and no reaped gh's group is signalled "
+                      "(os.waitid %s: unwound by %r, held %r, signalled %r)"
+                      % (signal.Signals(sig).name, "used" if unreaped else "off", got, held, freed))
+    finally:
+        os.killpg = real_killpg
+        mod._CAN_WAIT_UNREAPED = real_unreaped
+        mod._unwinding = False
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
 
 def ls_tree_missing_units(mod):
     """LS_TREE_MISSING reads both ways git 2.53's ls-tree says an object is
@@ -1971,8 +2212,64 @@ def static_units(source):
           "each escaper call site turned into str() is found (%r; missed %r)" % (counts, missed))
 
 
+# The host's own credential tools never run here: a unit reads no account
+# of the host and reaches no network. GUARDED is each tool a stub stands in
+# for, first on PATH for the whole run; a unit that needs another behaviour
+# puts its own stub before it. Each call of a guard appends to GUARD_LOG,
+# so a check can prove the stub ran, not the host's binary.
+GUARDED = ("gh",)
+GUARD_LOG = None
+
+
+def guard_host_tools(scratch):
+    """Put a stub for each GUARDED tool first on PATH, a HOME of this run's
+    own, and none of the caller's tokens, agent or git configuration
+    variables."""
+    global GUARD_LOG
+    bindir = os.path.join(scratch, "guard-bin")
+    os.mkdir(bindir)
+    GUARD_LOG = os.path.join(scratch, "guard.log")
+    for name in GUARDED:
+        # As gh says when it holds no token (`gh help exit-codes`: 4).
+        stub(bindir, name, 'echo "%s $*" >> %s\necho "To get started with GitHub CLI, please run:  gh auth login" >&2\n'
+             'exit 4\n' % (name, shlex.quote(GUARD_LOG)))
+    home = os.path.join(scratch, "units-home")
+    os.mkdir(home)
+    for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR",
+              "SSH_AUTH_SOCK", "SSH_AGENT_PID", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+        os.environ.pop(k, None)
+    # git's own configuration channels: a caller's GIT_CONFIG_GLOBAL or
+    # GIT_CONFIG_COUNT pair would steer every git read of the run to the
+    # host's settings, so none survives (GIT_CONFIG_COUNT with its _KEY_<n>
+    # and _VALUE_<n> pairs, any n).
+    for k in [k for k in os.environ
+              if k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+              or re.match(r"GIT_CONFIG_(KEY|VALUE)_[0-9]+$", k)]:
+        del os.environ[k]
+    os.environ.update({"HOME": home, "PATH": bindir + os.pathsep + os.environ["PATH"]})
+
+
+def guard_calls():
+    """How many times a GUARDED stub has run so far."""
+    try:
+        with open(GUARD_LOG) as fh:
+            return len(fh.readlines())
+    except OSError:
+        return 0
+
+
 def main(argv):
     module, scratch = argv
+    # What a caller may have set, which the guard must drop (checked below).
+    decoys = {"GIT_CONFIG_GLOBAL": "/nonexistent/global", "GIT_CONFIG_SYSTEM": "/nonexistent/system",
+              "GIT_CONFIG_PARAMETERS": "'user.name=decoy'", "GIT_CONFIG_COUNT": "1",
+              "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "decoy",
+              "GIT_CONFIG_KEY_12": "user.email", "GIT_CONFIG_VALUE_12": "decoy"}
+    os.environ.update(decoys)
+    guard_host_tools(scratch)
+    check(not [k for k in decoys if k in os.environ],
+          "the guard drops the caller's git configuration variables (left: %r)"
+          % sorted(k for k in decoys if k in os.environ))
     with open(module, encoding="utf-8") as fh:
         source = fh.read()
     # The Python 3.9 floor (the macOS Command Line Tools python3): newer
@@ -2521,6 +2818,7 @@ def main(argv):
     submodule_units(mod, scratch)
     doctor_parse_units(mod)
     doctor_deps_units(mod, scratch)
+    reap_race_units(mod)
     ls_tree_missing_units(mod)
 
     print("%d failure(s)" % len(failures))

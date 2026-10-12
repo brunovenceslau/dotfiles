@@ -567,41 +567,66 @@ _do_upgrade() {
   # AUTH re-inject: vgit scrubs the global config to kill a hostile
   # url.insteadOf / gpg.ssh.program - which ALSO drops the credential helper the
   # operator configured for an HTTPS remote, so the upgrade fetch would prompt
-  # `Username for github.com` on the startup-adjacent path. Re-inject ONLY
-  # credential.helper (resolved for THIS remote from the trusted local/global config)
-  # and run non-interactively: GIT_TERMINAL_PROMPT=0 makes a missing/failing
-  # credential fail LOUDLY instead of hanging on a prompt. This authenticates the
-  # fetch of the FIXED remote URL - it neither rewrites the remote (url.insteadOf
-  # stays scrubbed in vgit).
+  # `Username for github.com` on the startup-adjacent path. Re-inject ONLY the
+  # credential section, read from the trusted XDG config (and the checkout's own
+  # config), and run non-interactively: GIT_TERMINAL_PROMPT=0 makes a
+  # missing/failing credential fail LOUDLY instead of hanging on a prompt. This
+  # authenticates the fetch of the FIXED remote URL - it neither rewrites the
+  # remote (url.insteadOf stays scrubbed in vgit).
   #
-  # The helper READ MUST use the same env discipline as vgit, or it re-opens the
-  # very config-injection channel vgit closes: a `credential.helper` beginning with
+  # git, not this script, decides which helpers apply: every credential.* entry
+  # is handed back as `-c`, in the order git read them, after an empty
+  # credential.helper that clears what the fetch reads from the checkout's own
+  # config (re-added here in its place). git then builds its helper list by its
+  # own rules (gitcredentials(7)): every matching credential.helper and
+  # credential.<url>.helper adds one, an empty one clears the list, and
+  # credential.useHttpPath decides which <url> patterns match. One value from
+  # `--get-urlmatch` cannot stand for that list: it keeps only the best-matching
+  # key, so a generic helper, an empty reset, gh and a helper for the repository
+  # URL would fetch with that last helper alone, where git asks gh first.
+  # lib/host_identity.py's github_helpers() reads the same list for doctor, but
+  # for https://github.com only and through python3, which this fetch does not
+  # need; handing the entries to git needs neither. A key holding `=` (a <url>
+  # with a query) cannot pass through `-c`, which splits at the first `=` and
+  # would set another key, so the upgrade refuses it by name.
+  #
+  # The READ MUST use the same env discipline as vgit, or it re-opens the very
+  # config-injection channel vgit closes: a `credential.helper` beginning with
   # `!` is an arbitrary command git runs during auth.
   # So scrub the ambient config-injection env families and PIN GIT_CONFIG_GLOBAL to
-  # the known XDG config (its `[include] config.local` is still processed, so a real
-  # helper is honored) - a poisoned GIT_CONFIG_PARAMETERS / GIT_CONFIG_GLOBAL env can
-  # no longer supply the helper. `config --get remote.origin.url` reads the RAW url
-  # (immune to url.insteadOf, unlike `remote get-url`), so remote_url is unsteerable.
-  local remote_url cred_all cred_helper h
-  remote_url="$(git -C "$DOTFILES" config --get remote.origin.url 2>/dev/null || true)"
-  cred_all="$(env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_CONFIG \
+  # the known XDG config (--includes: its `[include] config.local` is still
+  # processed, so a real helper is honored) - a poisoned GIT_CONFIG_PARAMETERS /
+  # GIT_CONFIG_GLOBAL env can no longer supply a helper. The system config stays
+  # out, as it does in vgit.
+  local cred_entry cred_key cred_args
+  cred_args=(-c credential.helper=)
+  while IFS= read -r -d '' cred_entry; do
+    # --null prints "<key>\n<value>", or "<key>" alone for a key with no value
+    # (a bare boolean such as useHttpPath), which `-c <key>` sets as git read
+    # it: true.
+    cred_key="${cred_entry%%$'\n'*}"
+    case $cred_key in
+      *=*)
+        warn "upgrade: the credential setting $(_shell_word "$cred_key") holds =, which the fetch cannot pass on - rename that URL in your git config"
+        return 1 ;;
+    esac
+    case $cred_entry in
+      *$'\n'*) cred_args+=(-c "$cred_key=${cred_entry#*$'\n'}") ;;
+      *) cred_args+=(-c "$cred_key") ;;
+    esac
+  done < <(env -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_CONFIG \
     GIT_CONFIG_GLOBAL="$xdg_config/git/config" GIT_CONFIG_SYSTEM=/dev/null \
-    git -C "$DOTFILES" config --get-urlmatch credential.helper "$remote_url" 2>/dev/null || true)"
-  cred_helper=""
-  while IFS= read -r h; do
-    [ -n "$h" ] && { cred_helper="$h"; break; }   # first non-empty (gh writes an empty reset first)
-  done <<EOF
-$cred_all
-EOF
-  if ! GIT_TERMINAL_PROMPT=0 vgit -c credential.helper="$cred_helper" fetch origin; then
+    git -C "$DOTFILES" config --includes --null --get-regexp '^credential\.' 2>/dev/null || true)
+  if ! GIT_TERMINAL_PROMPT=0 vgit "${cred_args[@]}" fetch origin; then
     warn "upgrade: fetch failed"
     warn "  Network unreachable? Check that first: the upstream HTTPS remote needs"
     warn "  no credentials to fetch."
     warn "  Credentials needed (a private fork, or an SSH remote)? The upgrade"
-    warn "  fetch scrubs ~/.gitconfig and reads only the XDG config, so put a"
-    warn "  credential helper there (gh writes an empty helper first, which"
-    warn "  keeps a system helper such as osxkeychain from being asked first):"
-    warn "    GIT_CONFIG_GLOBAL=\"\$HOME/.config/git/config.local\" gh auth setup-git"
+    warn "  fetch never reads ~/.gitconfig: it reads the XDG config and the"
+    warn "  checkout's own, so put a credential helper in the XDG config (gh"
+    warn "  writes an empty helper first, which keeps a system helper such as"
+    warn "  osxkeychain from being asked first):"
+    warn "    GIT_CONFIG_GLOBAL=$(_shell_word "$xdg_config/git/config.local") gh auth setup-git"
     return 1
   fi
   if [ "$(vgit rev-parse FETCH_HEAD)" = "$(vgit rev-parse HEAD)" ]; then

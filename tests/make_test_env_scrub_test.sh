@@ -5,15 +5,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 #
-# Tests for the Makefile `test` recipe's git env scrub, and for the
-# `test-env-scrub` static check that holds the recipe to it. A git hook or a
-# `git rebase --exec` that runs `make test` hands every suite a GIT_DIR,
-# GIT_WORK_TREE or GIT_INDEX_FILE, and each suite's own fixture `git` calls
-# would then commit or configure into THAT repository. Behaviour is proven by
-# running the real recipe, with TEST_FILES pointed at a probe suite, under a
+# Tests for the Makefile `test` recipe's git env scrub and its symlinked TMPDIR,
+# and for the `test-env-scrub` static check that holds the recipe to it. A git
+# hook or a `git rebase --exec` that runs `make test` hands every suite a
+# GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE, and each suite's own fixture `git`
+# calls would then commit or configure into THAT repository. Behaviour is proven
+# by running the real recipe, with TEST_FILES pointed at a probe suite, under a
 # leaked GIT_DIR aimed at a scratch sentinel repository under $TMPDIR, never a
-# real checkout. The probe is a fresh process, so what it sees is what a
-# suite sees.
+# real checkout. The probe is a fresh process, so what it sees is what a suite
+# sees.
 set -euo pipefail
 set -E
 trap '_err_rc=$?; [ "${BASH_SUBSHELL:-0}" -ne 0 ] || echo "ERR: unexpected failure at line $LINENO (rc $_err_rc): $BASH_COMMAND" >&2' ERR
@@ -148,6 +148,72 @@ stub_case_py() {
   esac
 }
 stub_case_py
+
+# --- TMPDIR behind a symlink: the recipe hands every suite a TMPDIR that is a
+# symlink, as macOS's is (/var -> /private/var), so a path assumption that only
+# breaks there fails on Linux too. The probe records what it saw into a file
+# named by PROBE_OUT, and a directory made under that TMPDIR must resolve to
+# a different physical path.
+tprobe="$work/tmpdir_probe_test.sh"
+cat > "$tprobe" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+[ -L "${TMPDIR:-}" ] || { echo "NOT-A-LINK: TMPDIR=${TMPDIR:-unset}"; exit 5; }
+case "$TMPDIR" in
+  /*) ;;
+  *) echo "NOT-ABSOLUTE: TMPDIR=$TMPDIR"; exit 7 ;;
+esac
+d="$(mktemp -d "$TMPDIR/probe.XXXXXX")"
+phys="$(cd -P "$d" && pwd -P)"
+rm -rf "$d"
+case "$phys" in
+  "$TMPDIR"/*) echo "NOT-RESOLVED: $phys still under $TMPDIR"; exit 6 ;;
+esac
+echo "TMPDIR LINK OK"
+EOF
+rm -rf "$work/tmp-parent"; mkdir -p "$work/tmp-parent"
+rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$tprobe")"
+[ "$rc" = 0 ] && ok || fail "a suite under 'make test' must see TMPDIR behind a symlink (rc $rc): $(last)"
+case "$(last)" in
+  *"TMPDIR LINK OK"*) ok ;;
+  *) fail "the TMPDIR probe must report a symlinked TMPDIR: $(last)" ;;
+esac
+# the link and its target are removed, whether the suites pass or not
+[ -z "$(ls -A "$work/tmp-parent")" ] && ok \
+  || fail "make test must remove its TMPDIR link and directory: $(ls -A "$work/tmp-parent")"
+# A RELATIVE TMPDIR (a caller's `TMPDIR=tmp make test`) must still give the
+# suites a working absolute link: the link target is the name `real` beside
+# the link, so it cannot dangle, and a suite may change directory freely.
+rc="$(TMPDIR="tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$tprobe")"
+[ "$rc" = 0 ] && ok || fail "a suite under 'make test' must see a working TMPDIR link when TMPDIR is relative (rc $rc): $(last)"
+case "$(last)" in
+  *"TMPDIR LINK OK"*) ok ;;
+  *) fail "the TMPDIR probe must report a working link for a relative TMPDIR: $(last)" ;;
+esac
+[ -z "$(ls -A "$work/tmp-parent")" ] && ok \
+  || fail "make test must remove its TMPDIR link and directory for a relative TMPDIR: $(ls -A "$work/tmp-parent")"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$work/failing_test.sh"
+rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$work/failing_test.sh")"
+[ "$rc" != 0 ] && ok || fail "make test must fail when a suite fails: $(last)"
+[ -z "$(ls -A "$work/tmp-parent")" ] && ok \
+  || fail "make test must remove its TMPDIR link and directory after a failing suite: $(ls -A "$work/tmp-parent")"
+# a signal ends the recipe's shell: the suite signals its parent (the recipe's
+# shell) and then exits, so the shell runs its trap as it would on a Ctrl-C or
+# a kill, and the EXIT trap must still remove the directory. Portable: no
+# setsid, which macOS lacks.
+# The recipe's own traps turn each signal into the conventional 128+N exit, which
+# make reports as "Error N"; without them the shell would die by the signal
+# itself and make would name the signal instead, so the number pins the trap.
+for sig in HUP:129 INT:130 TERM:143; do
+  code="${sig#*:}"; sig="${sig%:*}"
+  printf '#!/usr/bin/env bash\nkill -%s "$PPID"\nsleep 1\n' "$sig" > "$work/sig_test.sh"
+  rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$work/sig_test.sh")"
+  [ "$rc" != 0 ] && ok || fail "make test must fail when its shell gets $sig: $(last)"
+  grep -q "Error $code\$" <<<"$(last)" && ok \
+    || fail "make test must exit $code on $sig through its own trap: $(last)"
+  [ -z "$(ls -A "$work/tmp-parent")" ] && ok \
+    || fail "make test must remove its TMPDIR link and directory after $sig: $(ls -A "$work/tmp-parent")"
+done
 
 # --- the static check: green on the real Makefile, red on each mutated copy.
 # A copy is written with sed into $work, never over the real file.

@@ -104,7 +104,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make check-patterns-gawk` | `python3 -I tests/check_patterns_gawk.py`, which runs `bin/check-patterns` with `CHECK_PATTERNS_AWK` set to the `gawk` on PATH and `CHECK_PATTERNS_AWK_LC_ALL` to the first of `en_US.UTF-8` and `C.UTF-8` under which it counts characters | The Markdown width check also passes on an awk that counts characters. The other legs run an awk that counts bytes, so this is the only run of the character-counting path on a real awk. Prints one verdict line, `PASS` or `SKIP`: it skips when `python3`, `gawk`, or a locale where `gawk` counts characters is missing, and fails instead under `STRICT=1`. `local-ci` runs it from its summary, so that line is the summary's. `tests/check_patterns_gawk_test.sh` holds the fixtures. |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
-| `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
+| `make test` | every `tests/*.sh`, with git's local environment variables unset and `TMPDIR` behind a symlink | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. `TMPDIR` is a symlink to a scratch directory, as macOS's is, so a path assumption that only breaks there fails on Linux too. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
 | `make smoke` | `bin/smoke` | A fresh install into a scratch home works, an interactive shell starts cleanly, a re-run is a no-op, the dev gates are not linked onto `PATH`, and `--purge` leaves no trace except the documented machine-local `~/.config/git/config`. |
 | `make secret-scan` | `bin/secret-scan --git .` | No secret-shaped content in the tracked tree. |
@@ -497,10 +497,24 @@ link-convention change.
   code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. In a
   heading, a backtick opens a code span only outside a link's destination
   and title. In any text, a backtick opens a span only when no backslash
-  escapes it, and not inside an `<a>` or `<img>` tag. A backtick in the
-  destination or title of a body link is a known miss: it can pair with a
-  later one, which hides the link and any anchor between the two backticks.
-  A backtick in any other tag's quoted value is a known miss too. An
+  escapes it, and not inside an `<a>` or `<img>` tag. A heading's id keeps
+  the padding a code span holds, reads a link whose `[` a backslash escapes
+  as text, and renders an autolink (`<https://example.com>`) as its address,
+  where any other `<...>` is a tag and renders as nothing. A backtick in the
+  destination or title of a body link fails the gate: it can pair with a
+  later backtick, which would hide the link and any anchor between the two,
+  so the report names the line; write a destination's backtick as `%60` and
+  drop a title's. A reference definition is held to the same rule. A link
+  inside a code span or an HTML comment is not reported. A heading link (ATX,
+  at any block quote or list depth) is read with the same span rule as the
+  heading's id: it is code, and not reported, when a span covers its `[` or
+  its `]`, as in `` [`a](u`) ``, where a span opens in the link text and takes
+  the `](`. Any other heading link whose destination or title holds a
+  backtick is reported like a body link, because a later backtick can pair
+  with it and hide it from the link pass. Body and heading lines differ here:
+  a body `` [`a](gone.md`) here. `` is still reported (fail closed), while the
+  heading form is skipped when spans cover the brackets.
+  A backtick in any other tag's quoted value is a known miss. An
   anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
@@ -524,11 +538,12 @@ link-convention change.
   newline inside it, as the URL standard strips them. A link whose text wraps
   across lines is still found, and a CRLF file reads exactly like its LF
   twin. A link destination ends at ASCII whitespace only, may hold
-  balanced parentheses (up to 3 levels deep), backslash escapes and
-  character references such as `&amp;`, or be written `<...>` with spaces,
-  and its title may be double- or single-quoted or in parentheses, holding
-  its own delimiter escaped. Neither has a length limit. Every other URL
-  scheme is out of scope, since the gate never touches the network.
+  balanced parentheses (up to 32 levels deep, GitHub's limit), backslash
+  escapes and character references such as `&amp;`, or be written `<...>`
+  with spaces, and its title may be double- or single-quoted or in
+  parentheses, holding its own delimiter escaped. Neither has a length
+  limit. Every other URL scheme is out of scope, since the gate never touches
+  the network.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target`. The target
 is printed through `tty_safe`, which escapes by Unicode category (see
@@ -836,13 +851,16 @@ The canonical list, with what to do instead, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). The
 list below is the maintainer's working copy. An item on either list needs a
 maintainer decision; CONTRIBUTING's list is the fuller statement of the
-security model.
+security model. The code span before an item is its surface id, the name a pull
+request's approval checklist uses for it; `tests/community_files_test.sh` holds
+the ids of this list, CONTRIBUTING.md, CLAUDE.md and the pull request template
+equal.
 
-- Adding a submodule or a binary dependency.
-- Any change to the security model: the plugin pinning scheme, the
-  fast-syntax-highlighting neutralization, the git config scrubbing on the
-  upgrade path, or the fsck settings.
-- Changing the link conventions or the exceptions table.
+- `dependency`: Adding a submodule or a binary dependency.
+- `security-model`: Any change to the security model: the plugin pinning
+  scheme, the fast-syntax-highlighting neutralization, the git config
+  scrubbing on the upgrade path, or the fsck settings.
+- `link-convention`: Changing the link conventions or the exceptions table.
 - Running a remote interactive installer, such as the Homebrew bootstrap.
 - Writing anything outside `~/.config/dotfiles`.
 
@@ -965,6 +983,8 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Wire `.githooks/` as git hooks on the Mac (`core.hooksPath`, or a dispatcher like the sandbox's) | Not wired: a hook directory a sandbox can write would then run on the host, outside the sandbox. On the Mac the rule runs only as `make commit-identity` | An identity incident happens on the Mac |
 | Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
 | Close the refspec-source LF forgery in the identity guard: a source holding an LF splits its ref line, and the first half can name any oid as one the remote holds, so the guard skips the commits behind it | Not closed (decided on 2026-10-09): only the pusher can do it, it is self-inflicted, and it is harder than `git push --no-verify`, which the guard already allows. The module docstring of `.githooks/commit_identity.py` states it, and `ref_lines()` cannot undo the split | The guard runs where the pusher is not trusted, such as CI or a server hook. Sketch of the fix: refuse an excluded oid that no remote-tracking ref reaches |
+| Split `lib/host_identity.py` into parts | One file (decided on 2026-10-11). A refutation found that a split buys little review relief (4 of 6 doctor commits also touched the core), adds about seven concepts, and opens a fail-open class in every consumer that reads the whole file. A split, if chosen, ships with: the concatenation of the parts and a coverage floor in every whole-file consumer, `rb` reads, ASCII-only parts, a gate that no name is bound twice, the parts list checked against `git ls-files`, and a byte-identity proof of the move | The doctor section passes 1500 lines (1133 on 2026-10-12), counted from its `# --- doctor: read-only checks` heading up to `def run(`: `awk '/^# --- doctor: read-only checks/{f=1} /^def run\(/{f=0} f' lib/host_identity.py \| wc -l` |
+| Accept a socketpair as the stdin of the pre-push guard in `.githooks/commit_identity.py`, as well as git's pipe | Refused: the guard accepts only a pipe (`S_ISFIFO`) and stops with "stdin is not git's pipe" on anything else, so what is pushed is never guessed. No hook runner wired here hands over a socketpair | A hook runner that passes the ref lines on a socketpair is wired: accepting `S_ISSOCK` is then the change to make |
 
 ## Landing a change
 
@@ -1004,7 +1024,8 @@ heredocs, `$#`/`${#v}`, a `#` inside a word).
 
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack
-targets `main`.
+targets `main` by default, and the one exception (a GitHub stack merged as a
+stack).
 
 ## Cutting a release
 

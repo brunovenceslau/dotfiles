@@ -15,11 +15,31 @@ each other, each reviewed and gated independently, landed bottom-up. Stacking
 keeps every PR small enough to review honestly while a large piece of work keeps
 moving.
 
-## The rule: every PR targets `main`
+## The rule: every PR targets `main`, with one exception
 
-Every pull request in a stack opens against `main`. The dependency is stated in
-the PR body ("stacked on #N, review only the last K commits"), never in
-`--base`.
+By default every pull request in a stack opens against `main`. The dependency
+is stated in the PR body ("stacked on #N, review only the last K commits"),
+never in `--base`.
+
+The one exception is a **GitHub stack**: each child PR is based on its parent's
+branch and GitHub links the PRs into a native stack (the `gh-stack` extension
+does this; `gh stack --help` and <https://gh.io/stacks> document it). It is
+allowed only while both conditions hold:
+
+1. `gh stack view` shows a stack number for the stack on GitHub. Linking is
+   best-effort, so a stack that is not linked remotely falls back to the
+   default: retarget every PR to `main`.
+2. The maintainer merges it as a stack: `gh stack merge --merge`, or the stacked
+   PR's Merge button with **Create a merge commit**. That is one atomic
+   operation, and GitHub retargets the remaining PRs as part of it.
+
+Squash and rebase merges are excluded, because each makes new commits on the
+server and loses the signed commits (see
+[Merges use a merge commit](../CONTRIBUTING.md#pull-requests)). So is any other
+merge, for example `gh pr merge` on the bottom PR: it deletes the parent's
+branch without the atomic retarget, which is the race described next. For a
+headless run, `gh stack merge --merge --yes` skips the confirmation prompt
+(`--yes` merges the whole stack, or everything up to a given PR number).
 
 ### Why not chain the bases
 
@@ -29,32 +49,37 @@ GitHub's automatic retarget of the child races that deletion. The child can lose
 that race and be **closed**, which is unrecoverable: a closed PR cannot be
 retargeted (`gh pr edit --base` silently does nothing) and cannot be reopened
 (`gh pr reopen` fails). The review thread is lost and the only way forward is a
-replacement PR.
+replacement PR. The atomic stack merge removes the race, which is why it is the
+only merge the exception admits.
+
+There is one rejected alternative: keep base-chaining and its native stack
+rendering by turning `delete_branch_on_merge` **off**, so a child's base
+survives its parent's merge. The price is stale parent branches to prune after
+the whole stack lands. Adopt it only as a deliberate repository-setting change.
+Until then, the rule above stands.
 
 ### What targeting `main` costs
 
 Two things. GitHub does not render a native stack, and each PR's diff is
 cumulative, showing the commits of the PRs below it. The "review only the last K
 commits" note in the body mitigates the second, because GitHub's per-commit view
-honors it. That cost is worth paying to make the unrecoverable close impossible.
-
-There is one documented alternative: keep base-chaining and its native stack
-rendering by turning `delete_branch_on_merge` **off**, so a child's base
-survives its parent's merge. The price is stale parent branches to prune after
-the whole stack lands. Adopt it only as a deliberate repository-setting change.
-Until then, base is `main`.
+honors it. That cost is worth paying to make the unrecoverable close impossible
+whenever the stack merge conditions above do not hold.
 
 ## The workflow
 
 One change is one branch off `main`. Each entry earns the full workflow.
 
 1. Branch off `main`, or off the previous entry's HEAD when it genuinely builds
-   on it. The commits stack even though the PR base stays `main`.
+   on it. On the default path the commits stack even though the PR base stays
+   `main`.
 2. Write a failing test, then the implementation, then get the gates green.
 3. Review the final bytes before opening the PR. A reviewer's read covers every
    branch below the one under review, so batch parent amendments until the
    child's review is done, or accept that the reviewer re-reads.
-4. `gh pr create --base main`, with the dependency stated in the body.
+4. `gh pr create --base main`, with the dependency stated in the body. For a
+   GitHub stack, `gh stack submit` opens the chain instead, and `gh stack view`
+   must then show the stack number before the exception applies.
 5. Repeat for the next change.
 
 Keep stacks shallow and land the bottom fast. Every change requested on a parent
@@ -64,8 +89,12 @@ alone.
 
 ## Re-syncing after a merge
 
-Land bottom-up, one PR at a time. After each land, rebase each surviving branch
-onto the new `main`, dropping the merged parent's commits:
+Land bottom-up. What happens next depends on how the bottom landed.
+
+### After any merge other than a stack merge
+
+Every PR targets `main`, so rebase each surviving branch onto the new `main`,
+dropping the merged parent's commits:
 
 ```sh
 git fetch --all --prune
@@ -91,6 +120,156 @@ is always correct.
 Because the PR base was already `main`, the parent's merge does not touch the
 child's pull request. Only the branch contents need the rebase.
 
+### After a stack merge
+
+GitHub rebases the surviving PRs server-side, so the recipe above does not
+apply to them. Their commits are rewritten on the server, so check each
+survivor before trusting it. GitHub's "verified" flag is not enough on its own:
+it is also true for a commit that GitHub signs with its own key, which is what a
+server-side rewrite can produce. The check below looks at the SIGNER, and a
+survivor commit signed by GitHub's own key counts as unsigned and is re-signed
+by step 5.
+
+1. `git fetch --all --prune`.
+2. Right after that fetch, and before any push moves the tracking ref, record
+   each survivor's old tip with `git rev-parse origin/<branch>`. Run no other
+   fetch in between: the `--force-with-lease=<branch>:<old-tip>` pushes below
+   rely on that value.
+3. Verify every survivor commit, not only the tip (`<baseRefName>` is the
+   survivor's base branch, step 5). The primary check is local: git must verify
+   the signature against the allowed-signers file (`gpg.ssh.allowedSignersFile`,
+   see [the signing key page](signing-key.md)) and the signer must be the
+   maintainer. Keep exactly ONE principal per allowed-signers line, the
+   maintainer's email: `%GS` is the first principal on the matching line, so a
+   line shared with another principal can pass for a key that is not the
+   maintainer's alone. GitHub's flag is a second signal that must print `true`.
+   The snippet stops at the first bad commit and exits nonzero. Each of these
+   is a failure, not a pass: a ref git cannot resolve (the base already pruned
+   by step 1's `--prune`, for one), a failing `git rev-list`, an empty range, a
+   gh error, or an empty or other answer from gh.
+
+   The block is POSIX sh, run in a child shell by `sh -eu`: a bare `set -e`
+   is ignored when the code runs as the condition of an `if`, `&&` or `||`,
+   and an `exit` here cannot close your own shell. So every step that can
+   fail carries its own `|| { ...; exit 1; }`, and it fails closed in every
+   context, zsh included. Fill in only the survivor's PR number and the
+   repository on the first lines. The block reads both branch names from gh,
+   so it never pastes a branch name into shell text, where a `;`, a `$(...)`
+   or a pair of quotes, all legal in a git branch name, could run code or
+   check the wrong branch. The `case` checks refuse anything but a number and
+   a plain `owner/repo`, and a branch name with any character outside
+   `A-Za-z0-9._/-`, so the names that steps 5 and 6 ask you to type are safe
+   to paste once this block has passed.
+
+   ```sh
+   sh -eu <<'EOF'
+   pr='<number>'                     # fill in: the survivor's PR number
+   repo='<owner>/<repo>'             # fill in: the GitHub repository
+   case $pr in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 1;; esac
+   case $repo in
+     */*/*|*[!A-Za-z0-9._/-]*|/*|*/|'') echo "bad repo: $repo" >&2; exit 1;;
+     */*) ;;
+     *) echo "bad repo: $repo" >&2; exit 1;;
+   esac
+   branch=$(gh pr view "$pr" --repo "$repo" --json headRefName \
+     --jq .headRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   base_ref=$(gh pr view "$pr" --repo "$repo" --json baseRefName \
+     --jq .baseRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   [ -n "$branch" ] && [ -n "$base_ref" ] || { echo "empty ref name" >&2; exit 1; }
+   for n in "$branch" "$base_ref"; do
+     case $n in *[!A-Za-z0-9._/-]*|-*)
+       echo "unsafe branch name: $n" >&2; exit 1;; esac
+   done
+   me=$(git config user.email) ||
+     { echo "git user.email is not set" >&2; exit 1; }
+   base=$(git rev-parse --verify --quiet "origin/$base_ref^{commit}") ||
+     { echo "cannot resolve origin/$base_ref" >&2; exit 1; }
+   tip=$(git rev-parse --verify --quiet "origin/$branch^{commit}") ||
+     { echo "cannot resolve origin/$branch" >&2; exit 1; }
+   list=$(git rev-list "$base..$tip") ||
+     { echo "git rev-list failed for $base..$tip" >&2; exit 1; }
+   [ -n "$list" ] || { echo "empty range $base..$tip" >&2; exit 1; }
+   for c in $list; do
+     st=$(git log -1 '--format=%G?' "$c") ||
+       { echo "git log failed for $c" >&2; exit 1; }
+     who=$(git log -1 '--format=%GS' "$c") ||
+       { echo "git log failed for $c" >&2; exit 1; }
+     if [ "$st" != G ] || [ "$who" != "$me" ]; then
+       echo "not signed by $me: $c ($st $who)" >&2; exit 1
+     fi
+     ok=$(gh api "repos/$repo/commits/$c" \
+       --jq .commit.verification.verified) || ok=
+     [ "$ok" = true ] || { echo "not verified by GitHub: $c" >&2; exit 1; }
+   done
+   EOF
+   ```
+
+   Want: exit status 0.
+
+4. Before each rebase, refuse to continue if the local branch holds commits
+   that are not on the remote, because `git checkout -B` discards them. Then
+   check the branch out at the remote tip. Steps 5 and 6 run only if this
+   block exits 0. Run them as separate commands after it, not chained: step 5
+   or step 6 applies to a given survivor, never both.
+
+   ```sh
+   sh -eu <<'EOF'
+   pr='<number>'                     # fill in: the survivor's PR number
+   repo='<owner>/<repo>'             # fill in: the GitHub repository
+   case $pr in ''|*[!0-9]*) echo "PR must be a number" >&2; exit 1;; esac
+   case $repo in
+     */*/*|*[!A-Za-z0-9._/-]*|/*|*/|'') echo "bad repo: $repo" >&2; exit 1;;
+     */*) ;;
+     *) echo "bad repo: $repo" >&2; exit 1;;
+   esac
+   branch=$(gh pr view "$pr" --repo "$repo" --json headRefName \
+     --jq .headRefName) ||
+     { echo "cannot read PR $pr" >&2; exit 1; }
+   [ -n "$branch" ] || { echo "empty ref name" >&2; exit 1; }
+   case $branch in *[!A-Za-z0-9._/-]*|-*)
+     echo "unsafe branch name: $branch" >&2; exit 1;; esac
+   git rev-parse --verify --quiet "origin/$branch^{commit}" >/dev/null ||
+     { echo "cannot resolve origin/$branch" >&2; exit 1; }
+   if git show-ref --verify --quiet "refs/heads/$branch"; then
+     ahead=$(git rev-list "origin/$branch..$branch") ||
+       { echo "git rev-list failed for $branch" >&2; exit 1; }
+     [ -z "$ahead" ] ||
+       { echo "$branch has unpushed commits: stop and decide" >&2; exit 1; }
+   fi
+   git checkout -B "$branch" "origin/$branch"
+   EOF
+   ```
+
+   Want: exit status 0.
+
+5. Work bottom-up. The lowest survivor whose commits fail verification is
+   re-signed onto its own `baseRefName` (`main` for the lowest survivor, the
+   lower survivor's branch above it). A plain rebase would say "up to date" and
+   sign nothing, hence `--force-rebase`:
+
+   ```sh
+   git -c commit.gpgsign=true rebase --force-rebase origin/<baseRefName> <branch>
+   git push --force-with-lease=<branch>:<old-tip> origin <branch>
+   ```
+
+6. Each higher survivor is replayed onto the rewritten branch below it, cutting
+   at that branch's old tip:
+
+   ```sh
+   git -c commit.gpgsign=true rebase --onto origin/<lower-branch> <old-lower-tip> <branch>
+   git push --force-with-lease=<branch>:<old-tip> origin <branch>
+   ```
+
+   A survivor needs no rebase only when no survivor below it was rewritten.
+7. Re-run the step 3 block on every survivor (set its two fill-ins for
+   each one).
+
+`gh stack sync` and `gh stack rebase` also cascade-rebase a stack, but they are
+not part of this recipe: it needs the explicit signed commands above, and the
+verification, to stay auditable.
+
 ### Signing must survive the rebase
 
 `git rebase` rewrites commits, which strips their signatures. With
@@ -101,8 +280,9 @@ but only where git reads that config, and a host may opt out, so always pass
 
 ## Retargeting a non-compliant PR
 
-If an open PR is still based on a branch that just landed, retarget it
-**first**, while it is still open, and only then rebase:
+If an open PR is still based on a branch that just landed, and the stack merge
+conditions did not hold for that landing, retarget it **first**, while it is
+still open, and only then rebase:
 
 ```sh
 gh pr edit <n> --base main
@@ -111,7 +291,7 @@ gh pr edit <n> --base main
 The rebase fixes the branch contents. Only the retarget removes the base
 coupling that the branch's deletion turns into an unrecoverable close.
 
-## `gh stack` is for viewing only
+## `gh stack` and this workflow
 
 `gh-stack` is installed by the packages phase, pinned to a reviewed release tag
 in `packages/gh-extensions.txt`. If it is missing, install it with the tag from
@@ -122,9 +302,11 @@ gh extension install --pin <tag> -- github/gh-stack
 gh stack view
 ```
 
-Use `gh stack view` to see the chain. Do not use `gh stack submit` or
-`gh stack init` here. They set every base to the branch below, which is the
-base-chaining this document rejects.
+`gh stack view` shows the chain and whether GitHub knows it as a stack. Use
+`gh stack submit` or `gh stack link` only for a stack that will be merged as a
+stack: both base each PR on the branch below it, which is the base-chaining the
+default rule rejects. For a stack that will not be, open the PRs with
+`gh pr create --base main` instead.
 
 ## Requirements
 
