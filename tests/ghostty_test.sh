@@ -72,17 +72,22 @@ done
 pass=$((pass + 1))
 
 # --- every theme file (the framework's own and the third-party ones credited in
-# THIRD-PARTY-NOTICES.md) sets a background and exactly 16 palette entries, and
-# sets nothing BUT colours: an active line must start with one of the colour
-# keys below, so a downloaded theme cannot smuggle in a font, a command or an
-# include. Comments and blank lines are the only other lines allowed.
-colour_keys='palette|background|foreground|cursor-color|cursor-text|selection-background|selection-foreground|split-divider-color'
+# THIRD-PARTY-NOTICES.md) sets a background and exactly the palette indices
+# 0-15, and sets nothing BUT colours: an active line must be one of two exact
+# forms, so a downloaded theme cannot smuggle in a font, a command or an
+# include, and a trailing CR, a trailing space or a non-hex value is refused.
+# Comments and empty lines are the only other lines allowed. The '#' before a
+# hex colour is optional because some themes write bare hex.
+colour_keys='background|foreground|cursor-color|cursor-text|selection-background|selection-foreground|split-divider-color'
+hex6='[0-9a-fA-F]{6}'
 for tf in "$gd"/themes/*; do
   t="$(basename "$tf")"
-  ck "theme $t defines 16 palette colours" "$(grep -cE '^palette = [0-9]+=' "$tf")" "16"
+  ck "theme $t defines palette indices 0-15, each once" \
+    "$(sed -nE 's/^palette = ([0-9]+)=.*/\1/p' "$tf" | sort -n | tr '\n' ' ')" \
+    "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 "
   grep -q '^background = ' "$tf" || fail "theme $t has no background"
-  if grep -vE "^(#.*|[[:space:]]*|($colour_keys) = .+)\$" "$tf"; then
-    fail "theme $t has a line that is neither a comment nor a colour key ($colour_keys)"
+  if grep -vE "^(#.*|palette = ([0-9]|1[0-5])=#$hex6|($colour_keys) = #?$hex6)?\$" "$tf"; then
+    fail "theme $t has a line that is neither a comment, an empty line, a palette entry nor a colour key ($colour_keys)"
   fi
 done
 

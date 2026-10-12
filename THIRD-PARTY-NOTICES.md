@@ -214,12 +214,12 @@ statement of the site.
 Two cases are kept apart, and each file's header says which applies. A slot
 choice is the site's pick of which upstream colour fills a Ghostty slot: the
 slot mapping of `gotham-default` (the vim scheme has no terminal table), the
-selection pair of `gruvbox-dark`, and the background and bright black of both
-`rose-pine-*` files. The colours themselves are the upstream's. An invented
-value is in no upstream: only the two Rose Pine selection backgrounds
-(`#2f2c40`, `#f3eeea`). `gruvbox-light` and `srcery-default` have neither.
-This repository claims no copyright in those values, and records no claim by
-the site.
+selection pair of `gruvbox-dark`, and the background, cursor text and bright
+black of both `rose-pine-*` files. The colours themselves are the upstream's.
+An invented value is in no upstream: only the two Rose Pine selection
+backgrounds (`#2f2c40`, `#f3eeea`). `gruvbox-light` and `srcery-default` have
+neither. This repository claims no copyright in those values, and records no
+claim by the site.
 
 ### Catppuccin
 
@@ -276,8 +276,8 @@ the site.
   apart from the two selection backgrounds (`#2f2c40`, `#f3eeea`), which are
   not in it. The Ghostty files of `rose-pine/ghostty` at
   `d8b4ec06e0cde80fb2bfbf59021ff0a332c77388` (`Copyright (c) Rosé Pine`) and of
-  iTerm2-Color-Schemes match 18 of 22 each (a different background, bright
-  black and selection) and are not the source.
+  iTerm2-Color-Schemes match 18 of 22 each (a different background, cursor
+  text, bright black and selection background) and are not the source.
 - Credited in: `config/ghostty/themes/rose-pine-default` and
   `config/ghostty/themes/rose-pine-dawn`.
 
@@ -313,8 +313,9 @@ paragraph quoted above.
 For gruvbox, which has no `LICENSE` file, the MIT notice is applied on the
 strength of `package.json` (author `Pavel Pertsev`, `"license": "MIT"`) and the
 README, as the gruvbox entry under "Palette credit" above records; the block
-below therefore lists no `Pavel Pertsev` line, because no upstream file states
-one.
+below therefore lists no `Pavel Pertsev` line: no upstream file states a
+copyright line for him. The SPDX line in the two gruvbox headers names him as
+the author recorded in `package.json`.
 
 ```text
 Copyright (c) 2021 Catppuccin

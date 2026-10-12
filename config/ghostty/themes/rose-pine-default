@@ -5,8 +5,8 @@
 # Rose Pine: palette from https://github.com/rose-pine/palette at
 # commit 92af52b, laid out for Ghostty by terminalcolors.com.
 # Downloaded from https://terminalcolors.com/downloads/ghostty/rose-pine-default.
-# The background and bright black are the site's choice of the upstream's
-# colours; the selection background is the site's own invention.
+# The background, cursor text and bright black are the site's choice of the
+# upstream's colours; the selection background is the site's own invention.
 # See THIRD-PARTY-NOTICES.md.
 
 background = #1f1d2e
