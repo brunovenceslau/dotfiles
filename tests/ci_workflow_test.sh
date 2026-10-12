@@ -50,6 +50,16 @@ grep -qE '(^|[^[:alnum:]_])([Ll]inux|ubuntu-[a-z0-9.]+)([^[:alnum:]_]|$)' <<<"$c
 grep -Eq 'make[[:space:]]+local-ci[[:space:]]+STRICT=1' <<<"$commands" \
   || fail "ci.yml must run 'make local-ci STRICT=1' so a skipped check fails closed"
 
+# --- the gawk leg is part of the gate: local-ci's recipe runs it, and CI installs
+# gawk (the only run of arm 15's character-counting path; see the Makefile). It
+# runs from the recipe, not as a prerequisite, so its verdict line is the
+# summary's: the recipe is read from `local-ci:` to the first blank line.
+local_ci_recipe="$(awk '/^local-ci:/{p=1} p&&/^$/{exit} p' "$repo_root/Makefile")"
+grep -Eq '^[[:space:]]+@\$\(MAKE\)[[:space:]].*[[:space:]]check-patterns-gawk$' <<<"$local_ci_recipe" \
+  || fail "the Makefile's local-ci recipe must run \$(MAKE) check-patterns-gawk"
+grep -Eq '^[[:space:]]*for tool in .*[[:space:]]gawk[[:space:];]' <<<"$commands" \
+  || fail "ci.yml's gate-tools loop must install gawk"
+
 # --- the gate must not be exit-suppressed -------------------------
 # `make local-ci || true` (or `; true`) would green a failed lint/test/smoke.
 if grep -Eq '\|\|[[:space:]]*(true|:)' <<<"$(grep -E 'make[[:space:]]+local-ci' <<<"$commands")"; then
@@ -71,6 +81,8 @@ done <<'PATS'
 zsh[[:space:]]+-n
 (/bin/)?bash[[:space:]]+-n
 bin/(check-patterns|secret-scan|smoke|startup-fork-gate|repo-settings-check)
+CHECK_PATTERNS_AWK
+check_patterns_gawk\.py
 reuse[[:space:]]+lint
 gitleaks[[:space:]]+(dir|git|file|directory|stdin|detect|protect)
 PATS

@@ -6,12 +6,13 @@
 #
 # Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint +
 # test-env-scrub + test + reuse + gitleaks + secret-scan + smoke + forkgate +
-# linkcheck) - on both macOS legs, every leg on a GITHUB-HOSTED runner: macOS
-# arm64 + Intel. macOS is the only platform the framework installs on, so
-# there is no leg for any other OS. There is deliberately NO QEMU/container
-# emulation: each leg is real hardware of its own architecture, which is what
-# the Brewfile on_arm/on_intel blocks, the Homebrew-prefix detection and the
-# bash 3.2 + BSD-tools assumptions actually exercise.
+# linkcheck + commit-identity + check-patterns-gawk) - on both macOS legs,
+# every leg on a GITHUB-HOSTED runner: macOS arm64 + Intel. macOS is the only
+# platform the framework installs on, so there is no leg for any other OS.
+# There is deliberately NO QEMU/container emulation: each leg is real hardware
+# of its own architecture, which is what the Brewfile on_arm/on_intel blocks,
+# the Homebrew-prefix detection and the bash 3.2 + BSD-tools assumptions
+# actually exercise.
 #
 # Runner images: `macos-latest` is Apple Silicon. Intel has no rolling alias, so
 # that leg names `macos-15-intel` - GitHub's Intel image - explicitly; if it is
@@ -65,13 +66,17 @@ jobs:
           # no authenticated git after clone; don't leave GITHUB_TOKEN on the runner.
           persist-credentials: false
 
-      # Setup, not a gate: make local-ci invokes shellcheck, zsh, reuse and
-      # gitleaks. The hosted image already ships make, zsh, python3 and jq;
-      # install ONLY what this particular image is missing - a blanket
+      # Setup, not a gate: make local-ci invokes shellcheck, zsh, reuse,
+      # gitleaks and gawk. The hosted image already ships make, zsh, python3
+      # and jq; install ONLY what this particular image is missing - a blanket
       # `brew install` would re-link the image's preinstalled python3 and fail
       # the step. `reuse` and `gitleaks` are homebrew-core formulae; the reuse
       # one installs the reuse[charset-normalizer] extra the tool needs to
-      # detect file encodings. This loop is the single list of what CI
+      # detect file encodings. `gawk` (homebrew-core formula `gawk`,
+      # https://formulae.brew.sh/formula/gawk) is the character-counting awk
+      # that `make check-patterns-gawk` runs bin/check-patterns under: macOS's
+      # own awk counts bytes. It is a CI and contributor tool, not a
+      # dependency of the framework. This loop is the single list of what CI
       # provisions: tests/dev_docs_prereqs_test.sh holds docs/development.md's
       # Prerequisites section to it, so a tool added here without a docs entry
       # fails the gate rather than stranding a contributor.
@@ -79,7 +84,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           missing=''
-          for tool in make shellcheck zsh tmux fzf jq xz reuse gitleaks; do
+          for tool in make shellcheck zsh tmux fzf jq xz reuse gitleaks gawk; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
           done
           if [ -n "$missing" ]; then
@@ -110,6 +115,7 @@ jobs:
           jq --version
           xz --version | sed -n 1p
           reuse --version | sed -n 1p
+          gawk --version | sed -n 1p
           gitleaks version
           python3 -I -c 'import yaml, sys; print("python", sys.version.split()[0], "pyyaml", yaml.__version__)'
           # Two interpreters, printed, never compared: bin/ runs under the first
@@ -119,8 +125,8 @@ jobs:
 
       # STRICT=1: a skipped check (e.g. a missing tool) is a hard failure, so CI
       # can never report green on a gate it did not actually run. local-ci =
-      # lint + test + reuse + gitleaks + secret-scan + smoke + forkgate +
-      # linkcheck;
-      # `make test` runs this workflow's contract test.
+      # lint + test-env-scrub + test + reuse + gitleaks + secret-scan + smoke +
+      # forkgate + linkcheck + commit-identity + check-patterns-gawk; `make
+      # test` runs this workflow's contract test.
       - name: make local-ci
         run: make local-ci STRICT=1

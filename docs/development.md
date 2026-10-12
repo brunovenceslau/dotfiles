@@ -57,6 +57,10 @@ maintainer decision, and last the step-by-step recipes for common changes.
   `python3` already; if `python3 -c 'import yaml'` fails on your machine,
   install the pinned, hash-checked version with
   `python3 -m pip install --break-system-packages --require-hashes -r .github/ci-requirements.txt`.
+- `gawk`, the character-counting awk `make check-patterns-gawk` runs
+  `bin/check-patterns` under. macOS's own awk counts bytes, so without it the
+  character path of the width check would never run in CI. It is a gate tool
+  only: nothing in the framework needs it.
 - `reuse` and `gitleaks`, the licensing and secret-scanning gates. `reuse`
   needs a module that can detect file encodings, and the homebrew-core formula
   installs it as the `reuse[charset-normalizer]` extra. Install it another way
@@ -81,7 +85,7 @@ maintainer decision, and last the step-by-step recipes for common changes.
 One line covers the Homebrew-installable prerequisites:
 
 ```sh
-brew install shellcheck zsh tmux fzf jq xz reuse gitleaks
+brew install shellcheck zsh tmux fzf jq xz reuse gitleaks gawk
 ```
 
 Once a tool is missing, `STRICT=1` decides what happens: unset, a gate skips
@@ -98,6 +102,7 @@ in parity by construction. Run `make local-ci` before every push.
 | --- | --- | --- |
 | `make lint` | shellcheck over `install.sh`, `lib/*.sh`, `bin/`; `/bin/bash -n` over `install.sh`, `lib/` and `tests/`; `zsh -n` over `zsh/zshenv`, `zsh/zshrc` and `zsh/*.zsh`; plus `check-patterns` and `py-syntax` | The shell surface parses and passes static analysis. The `/bin/bash -n` pass uses the absolute path, which on the macOS runners is the real bash 3.2. The `zsh -n` glob is one level deep, so the pinned submodules under `zsh/plugins/` are not parsed. |
 | `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
+| `make check-patterns-gawk` | `python3 -I tests/check_patterns_gawk.py`, which runs `bin/check-patterns` with `CHECK_PATTERNS_AWK` set to the `gawk` on PATH and `CHECK_PATTERNS_AWK_LC_ALL` to the first of `en_US.UTF-8` and `C.UTF-8` under which it counts characters | The Markdown width check also passes on an awk that counts characters. The other legs run an awk that counts bytes, so this is the only run of the character-counting path on a real awk. Prints one verdict line, `PASS` or `SKIP`: it skips when `python3`, `gawk`, or a locale where `gawk` counts characters is missing, and fails instead under `STRICT=1`. `local-ci` runs it from its summary, so that line is the summary's. `tests/check_patterns_gawk_test.sh` holds the fixtures. |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
 | `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
@@ -108,7 +113,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make reuse` | `reuse lint` | Every tracked file states its copyright holder and SPDX licence, and every licence named has its full text in `LICENSES/`. The tree is [REUSE 3.3](https://reuse.software/spec-3.3/) compliant. |
 | `make linkcheck` | `python3 -I tests/linkcheck.py`, with git's local environment variables unset | Every relative link, image, reference link and definition, HTML `href` and `src`, and `#anchor` in a tracked Markdown file, and every absolute link back into this repository (the issue-form YAML included), resolves against the tracked tree. No network. See [What `make linkcheck` checks](#what-make-linkcheck-checks). |
 | `make commit-identity` | `python3 -I .githooks/commit_identity.py check`, with git's local environment variables unset | No commit identity (`email` or `name` under `user`, `author` or `committer`) is set inside this repository's own git config. See [What `make commit-identity` checks](#what-make-commit-identity-checks). |
-| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck, commit-identity | Everything CI runs. |
+| `make local-ci` | lint, test-env-scrub, test, reuse, gitleaks, secret-scan, smoke, forkgate, linkcheck, commit-identity, then check-patterns-gawk from its summary | Everything CI runs. |
 | `make repo-settings-check` | `bin/repo-settings-check` | The live GitHub settings match `.github/repo-settings.json`. Not part of `make local-ci` and never run by CI: it reads the live settings with the maintainer's `gh` login. See [Repository settings](#repository-settings). |
 
 `reuse lint` walks what git tracks and does not descend into the pinned plugin
@@ -238,6 +243,12 @@ paths, which ones. The rules:
   HTML block, an indented code block and front matter that never closes are
   read as prose and held to the limit. A TAB is one column, a CR before the LF
   is none, and an awk that miscounts UTF-8 characters fails the gate closed.
+  So does an awk that does not report an over-width control line, checked
+  before any file is read. `CHECK_PATTERNS_AWK` and `CHECK_PATTERNS_AWK_LC_ALL`
+  choose the awk and the locale this rule runs under (default `awk` and `C`);
+  a `CHECK_PATTERNS_AWK` that does not resolve to an executable file, or a
+  `CHECK_PATTERNS_AWK_LC_ALL` other than `C` or `POSIX` under which the awk
+  still counts bytes, is exit 2.
 - No symlink where a recursive scan reads (`find`, always, over the em-dash
   rule's surface; a recursive scan never follows one it meets while walking a
   directory), plus, when the root has its own `.git`, no tracked symlink and no
@@ -344,6 +355,9 @@ today.
 CI runs `make local-ci STRICT=1`, and `make` exports the variable into the test
 environment. With it set, a missing tool becomes a hard failure instead of a
 skip. Without it, a local run can report green on a gate that never executed.
+`make check-patterns-gawk` and `tests/check_patterns_gawk_test.sh` follow the
+rule: a missing `python3` or `gawk`, or no UTF-8 locale in which `gawk` counts
+characters, is a skip without `STRICT=1` and an error with it.
 
 Run the gates the way CI does before concluding that a change is safe:
 

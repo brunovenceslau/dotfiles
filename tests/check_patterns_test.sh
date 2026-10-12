@@ -1311,12 +1311,13 @@ fails_with_rc 1 "$r" "check-patterns: an em dash (U+2014) in repo prose" "a tree
 
 # --- a .git at $root with git absent from PATH fails CLOSED -----------------
 # PATH is an explicit allowlist: every external tool bin/check-patterns runs
-# on any path (bash for its shebang via env), resolved from the real PATH, and
-# never git. It is a superset of what the no-git path needs, so a tool only
-# the git pass would run (mktemp, rm) sits here too. A tool check-patterns
+# on any path (bash for its shebang via env; awk, since the width rule's
+# control line runs on every tree), resolved from the real PATH, and never
+# git. It is a superset of what the no-git path needs, so a tool only the git
+# pass would run (mktemp, rm) sits here too. A tool check-patterns
 # needs that is missing here makes it print "command not found", failed below.
 nogit_bin="$work/nogit-bin"; mkdir -p "$nogit_bin"
-for t in bash env grep sed find mktemp cat sort rm tr; do
+for t in bash env grep sed find mktemp cat sort rm tr awk; do
   # type -P: a PATH file only, never a builtin, function or alias of that name.
   t_path="$(type -P "$t" || true)"
   [ -n "$t_path" ] || fail "the git-less PATH fixture needs '$t', which is not on PATH"

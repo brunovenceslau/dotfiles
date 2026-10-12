@@ -37,11 +37,12 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help lint check-patterns py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
+.PHONY: help lint check-patterns check-patterns-gawk py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
 
 help:
 	@echo "Targets:"
 	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns + python3 -I syntax check"
+	@echo "  make check-patterns-gawk  the static patterns again, under gawk counting characters (a UTF-8 locale)"
 	@echo "  make test                 unit tests for the repo tooling (tests/*.sh), git's local env vars unset"
 	@echo "  make test-env-scrub       static check: test and py-syntax unset git's local env vars first"
 	@echo "  make reuse                REUSE 3.3 compliance: every file states its copyright and licence"
@@ -103,6 +104,33 @@ lint: check-patterns py-syntax
 #   silently disabled both checks. Kept a make target so lint/CI wire it unchanged.
 check-patterns:
 	@bin/check-patterns
+
+# The static patterns again, under a CHARACTER-counting awk. arm 15's width
+#   check picks its counting path by probing the awk it runs under. macOS's
+#   awk, the one the other legs use, counts bytes, and so may whatever `awk`
+#   a contributor's system has (a distro can ship mawk or gawk under that
+#   name), so the character path would never run in CI. gawk decodes UTF-8
+#   under a UTF-8 locale, so it takes it. tests/check_patterns_gawk.py is the
+#   ONE place that decides: it probes for a locale in which gawk counts
+#   characters, skips (or fails, under STRICT=1) when there is none or no gawk,
+#   runs bin/check-patterns, and prints one verdict line. With no python3 the
+#   recipe itself skips (or fails, under STRICT=1) in the same words. STRICT
+#   reaches the script through the environment: make exports a variable set
+#   on its command line or in its environment, and the recipe never splices
+#   $(STRICT) into shell text. `python3 -I` keeps the current directory and
+#   PYTHON* variables out, not PATH: PATH is trusted here, as it is for every
+#   gate, and it is what picks python3 and gawk. local-ci runs this
+#   target from its summary block, so that line IS the summary's, never a
+#   second read of the probe. tests/check_patterns_gawk_test.sh holds the
+#   fixtures and the STRICT branches; `make test` runs it.
+check-patterns-gawk:
+	@if command -v python3 >/dev/null 2>&1; then \
+	  python3 -I tests/check_patterns_gawk.py; \
+	elif [ -n "$${STRICT:-}" ]; then \
+	  echo "ERROR: check-patterns-gawk: python3 not installed and STRICT=1 - failing closed" >&2; exit 1; \
+	else \
+	  echo "check-patterns-gawk: SKIP (python3 not installed; set STRICT=1 to fail, CI enforces it)"; \
+	fi
 
 # Syntax-only gate over the repo's .py files. Tracked AND untracked-but-not-
 #   ignored files count (--others --exclude-standard): the other lint passes
@@ -408,9 +436,11 @@ gitleaks:
 # Fresh-install smoke - install into a scratch HOME (under .smoke/,
 #   in-repo), assert `zsh -i -c exit` is clean (exit 0, empty stderr), and prove a
 #   re-run is idempotent. A blocking gate, wired
-#   into local-ci below. STRICT is forwarded so a missing zsh fails closed in CI.
+#   into local-ci below. STRICT reaches bin/smoke through the environment (make
+#   exports it when set on the command line or in the environment), so a
+#   missing zsh fails closed in CI.
 smoke:
-	@STRICT='$(STRICT)' bin/smoke
+	@bin/smoke
 
 # High-confidence secret scan over the tracked tree - a blocking gate
 #   wired into local-ci below and run in CI. A planted-secret fixture in
@@ -422,9 +452,11 @@ secret-scan:
 # The startup-fork gate - PATH-first logging shims around a hermetic
 #   `zsh -i -c exit` prove the startup path invokes no external binary. A
 #   BLOCKING gate: the log-derived assertion is deterministic.
-#   STRICT is forwarded so a missing zsh fails closed in CI.
+#   STRICT reaches the gate through the environment (make exports it when set
+#   on the command line or in the environment), so a missing zsh fails closed
+#   in CI.
 forkgate:
-	@STRICT='$(STRICT)' bin/startup-fork-gate
+	@bin/startup-fork-gate
 
 # Link check over the tracked docs - every relative link, image, reference
 #   definition and #anchor in a tracked *.md file (and every absolute link back
@@ -487,6 +519,11 @@ local-ci: lint test-env-scrub test reuse gitleaks secret-scan smoke forkgate lin
 	else \
 	  echo "local-ci: SKIP reuse (not installed locally; enforced in CI)"; \
 	fi
+	@# check-patterns-gawk runs HERE, not as a prerequisite: its one stdout line
+	@# is its verdict (PASS, or SKIP when gawk or a locale where it counts
+	@# characters is missing), so the summary reports the run that decided it.
+	@# A failure stops local-ci here, as a failed prerequisite would.
+	@$(MAKE) -s --no-print-directory check-patterns-gawk
 	@if command -v gitleaks >/dev/null 2>&1; then \
 	  echo "local-ci: PASS gitleaks (maintained secret rule set)"; \
 	else \
