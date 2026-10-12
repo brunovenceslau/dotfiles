@@ -46,12 +46,17 @@ If it touches any of them, tick the ones it touches and link the issue where
 the maintainer agreed to the approach. A pull request that changes one of these
 without that agreement is closed on the question, not on the code.
 
-- [ ] The plugin pins, the `.gitmodules` entries, or the static plugin loader.
-- [ ] The SSH signing setup.
-- [ ] `fsckObjects` on any fetch, including the detached update sentinel.
-- [ ] The `vgit` wrapper or anything else on the `install.sh` upgrade path.
-- [ ] The neutralized fast-syntax-highlighting runtime download.
-- [ ] A link convention or the exceptions table in `lib/link.sh`.
-- [ ] A new submodule or any new binary dependency.
+- [ ] `security-model`: The plugin pins, the `.gitmodules` entries, or the
+      static plugin loader.
+- [ ] `security-model`: The SSH signing setup.
+- [ ] `security-model`: `fsckObjects` on any fetch, including the detached
+      update sentinel.
+- [ ] `security-model`: The `vgit` wrapper or anything else on the
+      `install.sh` upgrade path.
+- [ ] `security-model`: The neutralized fast-syntax-highlighting runtime
+      download.
+- [ ] `link-convention`: A link convention or the exceptions table in
+      `lib/link.sh`.
+- [ ] `dependency`: A new submodule or any new binary dependency.
 - [ ] An `install.sh` subcommand name. Subcommands are a cross-version
       interface and are retired as no-ops, never deleted.

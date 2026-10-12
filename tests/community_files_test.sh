@@ -118,20 +118,40 @@ grep -qE '^\*[[:space:]]+@[A-Za-z0-9-]+' .github/CODEOWNERS \
 ok "CODEOWNERS carries a catch-all rule"
 
 # --- The ask-first surface ids agree ------------------------------------------
-# A PR's approval checklist names a surface by its id, and two lists carry the
-# ids: CONTRIBUTING.md's canonical one and CLAUDE.md's. An id added to or
-# renamed in only one of them would leave a checklist line that one list does
-# not define, so the two sets must be equal, and neither may be empty.
-surface_ids() {  # FILE HEADING: the `id` of each "- `id`: " item in that section
+# A PR's approval checklist names a surface by its id, and four lists carry the
+# ids: CONTRIBUTING.md's canonical one, CLAUDE.md's, the maintainer's working
+# copy in docs/development.md and the pull request template's tick boxes. An id
+# added to or renamed in only one of them would leave a checklist line that
+# another list does not define, so the four sets must be equal, and none may
+# be empty.
+surface_ids() {  # FILE HEADING: the `id` of each "- `id`: " (or "- [ ] `id`: ") item in that section
   awk -v h="$2" '$0 == h { on = 1; next } on && /^## / { exit } on' "$1" \
-    | sed -n 's/^- `\([a-z0-9-]*\)`: .*/\1/p' | sort
+    | sed -n 's/^- \(\[ \] \)\{0,1\}`\([a-z0-9-]*\)`: .*/\2/p' | sort
 }
+work_dup="$(mktemp "${TMPDIR:-/tmp}/surface_ids.XXXXXX")"
+trap 'rm -f "$work_dup"' EXIT
 claude_ids="$(surface_ids CLAUDE.md '## Ask the user first')"
-contrib_ids="$(surface_ids CONTRIBUTING.md '## Ask before you build any of these')"
 [ -n "$claude_ids" ] || fail "CLAUDE.md's 'Ask the user first' list carries no surface id"
-[ "$claude_ids" = "$contrib_ids" ] \
-  || fail "the ask-first surface ids differ: CLAUDE.md has '$(tr '\n' ' ' <<<"$claude_ids")', CONTRIBUTING.md has '$(tr '\n' ' ' <<<"$contrib_ids")'"
-ok "CLAUDE.md and CONTRIBUTING.md carry the same ask-first surface ids"
+# dup_ids: ids listed twice. The PR template lists `security-model` once per
+# box on purpose, so only the template is collapsed (below); a repeat in any
+# other list is a defect that a plain set comparison would hide.
+dup_ids() { uniq -d; }
+surface_list() {  # FILE HEADING NAME [collapse]
+  local ids
+  ids="$(surface_ids "$1" "$2")"
+  [ "${4:-}" != collapse ] || ids="$(uniq <<<"$ids")"
+  [ -n "$ids" ] || fail "$3 carries no surface id"
+  [ -z "$(dup_ids <<<"$ids")" ] || fail "$3 lists a surface id twice: $(dup_ids <<<"$ids" | tr '\n' ' ')"
+  [ "$claude_ids" = "$ids" ] \
+    || fail "the ask-first surface ids differ: CLAUDE.md has '$(tr '\n' ' ' <<<"$claude_ids")', $3 has '$(tr '\n' ' ' <<<"$ids")'"
+}
+surface_list CONTRIBUTING.md '## Ask before you build any of these' "CONTRIBUTING.md"
+surface_list docs/development.md '## Ask before doing any of these' "docs/development.md"
+surface_list .github/PULL_REQUEST_TEMPLATE.md '## Ask-first surfaces' "the pull request template" collapse
+# the duplicate check must bite: a list with a repeated id is refused
+printf '## H\n\n- `dependency`: a\n- `dependency`: b\n' > "$work_dup"
+[ -n "$(surface_ids "$work_dup" '## H' | dup_ids)" ] && ok "a repeated surface id is caught" || fail "a repeated surface id goes unnoticed"
+ok "CLAUDE.md, CONTRIBUTING.md, docs/development.md and the pull request template carry the same ask-first surface ids"
 
 # --- The Code of Conduct keeps its upstream attribution -----------------------
 # CODE_OF_CONDUCT.md is the Contributor Covenant under CC BY-SA 4.0. That

@@ -1887,6 +1887,15 @@ fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a newline must fai
 r="$work/lst-crname"; _lst_repo "$r"
 printf 'x\n' > "$r/lib/lst-cr"$'\r'"name.sh"
 fails_with_rc 2 "$r" "$names_msg" "a listed file name holding a carriage return must fail closed with exit 2" only
+# a CR in a DIRECTORY name: the clause only `listed_names` applies. A file
+# with a CR in its base name is also caught by _name_pass (the file stays a
+# root, and find tests its name), so the case above does not pin the clause;
+# here the base name is clean and a listed root is a file, so find never sees
+# the directory (measured: with the `*$'\r'*` alternative removed from the case
+# in _add_root, the gate reports the Homebrew hit and exits 1, not 2).
+r="$work/lst-dircr"; _lst_repo "$r"
+mkdir -p "$r/lib/d"$'\r''x'; printf 'P=/opt/homebrew\n' > "$r/lib/d"$'\r''x/y.sh'
+fails_with_rc 2 "$r" "$names_msg" "an untracked file under a directory named with a CR must fail closed" only
 # the only scanned file has a bad name: scan ends up empty, the name is reported
 r="$work/lst-onlybad"; _git_repo "$r"; mkdir -p "$r/lib"; printf 'x\n' > "$r/lib/a:b.sh"
 git -C "$r" add -A; git -C "$r" commit -qm init
@@ -1895,6 +1904,9 @@ fails_with_rc 2 "$r" "$names_msg" "a checkout whose only scanned file has a bad 
 # every grep arm that walks file operands names the file in its hits (-H):
 # with ONE file operand GNU grep drops the PATH: prefix, and an anchor on it
 # (the gpg-agent.conf allowlist) silently misses.
+# This source-text pin stays beside the lone-operand behaviour cases (arms 1
+# and 11): those two exercise 2 of the 10 recursive greps, so a new arm, or a
+# pass that drops -H on an existing one, is only caught here.
 nohit="$(grep -nE 'grep -r[A-Za-z]*' "$cp" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE 'grep -r[A-Za-z]*H' || true)"
 [ -z "$nohit" ] && ok || fail "a recursive grep arm without -H: $nohit"
 

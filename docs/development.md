@@ -104,7 +104,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make check-patterns-gawk` | `python3 -I tests/check_patterns_gawk.py`, which runs `bin/check-patterns` with `CHECK_PATTERNS_AWK` set to the `gawk` on PATH and `CHECK_PATTERNS_AWK_LC_ALL` to the first of `en_US.UTF-8` and `C.UTF-8` under which it counts characters | The Markdown width check also passes on an awk that counts characters. The other legs run an awk that counts bytes, so this is the only run of the character-counting path on a real awk. Prints one verdict line, `PASS` or `SKIP`: it skips when `python3`, `gawk`, or a locale where `gawk` counts characters is missing, and fails instead under `STRICT=1`. `local-ci` runs it from its summary, so that line is the summary's. `tests/check_patterns_gawk_test.sh` holds the fixtures. |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
-| `make test` | every `tests/*.sh`, with git's local environment variables unset | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
+| `make test` | every `tests/*.sh`, with git's local environment variables unset and `TMPDIR` behind a symlink | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. `TMPDIR` is a symlink to a scratch directory, as macOS's is, so a path assumption that only breaks there fails on Linux too. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
 | `make smoke` | `bin/smoke` | A fresh install into a scratch home works, an interactive shell starts cleanly, a re-run is a no-op, the dev gates are not linked onto `PATH`, and `--purge` leaves no trace except the documented machine-local `~/.config/git/config`. |
 | `make secret-scan` | `bin/secret-scan --git .` | No secret-shaped content in the tracked tree. |
@@ -851,13 +851,16 @@ The canonical list, with what to do instead, is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#ask-before-you-build-any-of-these). The
 list below is the maintainer's working copy. An item on either list needs a
 maintainer decision; CONTRIBUTING's list is the fuller statement of the
-security model.
+security model. The code span before an item is its surface id, the name a pull
+request's approval checklist uses for it; `tests/community_files_test.sh` holds
+the ids of this list, CONTRIBUTING.md, CLAUDE.md and the pull request template
+equal.
 
-- Adding a submodule or a binary dependency.
-- Any change to the security model: the plugin pinning scheme, the
-  fast-syntax-highlighting neutralization, the git config scrubbing on the
-  upgrade path, or the fsck settings.
-- Changing the link conventions or the exceptions table.
+- `dependency`: Adding a submodule or a binary dependency.
+- `security-model`: Any change to the security model: the plugin pinning
+  scheme, the fast-syntax-highlighting neutralization, the git config
+  scrubbing on the upgrade path, or the fsck settings.
+- `link-convention`: Changing the link conventions or the exceptions table.
 - Running a remote interactive installer, such as the Homebrew bootstrap.
 - Writing anything outside `~/.config/dotfiles`.
 

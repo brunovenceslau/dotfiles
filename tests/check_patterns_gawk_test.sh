@@ -174,6 +174,31 @@ case "$err" in
   *) fail "a failing bin/check-patterns must be named: $err" ;;
 esac
 
+# An empty PATH element means the current directory, and shutil.which hands it
+# back RELATIVE ("gawk"): the probe resolves it where the gate runs, while
+# bin/check-patterns runs from the repository and a BASH_ENV hash entry can
+# answer its `command -v` with a third binary. The gate must probe and execute
+# the same absolute path: here ./gawk, never the decoy the hash entry names.
+# The VERDICT assertion is what bites on the old probe (it printed the bare
+# "gawk"); the decoy log is a second guard, for a gate that resolves the name
+# through the hash entry, and was not itself seen to fail on the old code.
+mkdir -p "$work/emptyel" "$work/decoy"
+printf '#!/bin/sh\nexec %s "$@"\n' "'$gawk_path'" > "$work/emptyel/gawk"
+printf '#!/bin/sh\necho ran >> %s\nexec %s "$@"\n' "'$work/decoy.log'" "'$gawk_path'" > "$work/decoy/gawk"
+chmod u+x "$work/emptyel/gawk" "$work/decoy/gawk"
+printf 'hash -p %s gawk\n' "'$work/decoy/gawk'" > "$work/hash.env"
+# The working directory is the PHYSICAL path (getcwd), whatever way TMPDIR is
+# spelled: under a symlinked TMPDIR $work is not it.
+emptyel="$(cd "$work/emptyel" && pwd -P)"
+rc=0; out="$(cd "$work/emptyel" && PATH=":$PATH" BASH_ENV="$work/hash.env" STRICT='' \
+  python3 -I "$gate" 2>"$work/err")" || rc=$?
+err="$(cat "$work/err")"
+[ "$rc" = 0 ] || fail "an empty PATH element and a BASH_ENV hash entry: want exit 0, got $rc: $out $err"
+[ "$out" = "check-patterns-gawk: PASS (bin/check-patterns under $emptyel/gawk, LC_ALL=$loc)" ] \
+  || fail "the verdict must name the absolute path of the gawk probed: $out"
+[ ! -e "$work/decoy.log" ] || fail "the gawk a BASH_ENV hash entry names ran instead of the one probed"
+ok
+
 # --- the seam -----------------------------------------------------------------
 # A tree no other arm objects to, holding one Markdown file.
 r="$work/tree"; mkdir -p "$r/lib" "$r/docs"

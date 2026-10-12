@@ -74,6 +74,13 @@ def main(argv):
         print("usage: check_patterns_gawk.py [--locale]", file=sys.stderr)
         return 2
     gawk = shutil.which("gawk")
+    # which() returns a relative result for an empty or relative PATH element
+    # (a bare "gawk" for an empty one). The probe would resolve it against this
+    # directory, bin/check-patterns against the repo's, and a shell's `command
+    # -v` can answer from a BASH_ENV hash entry instead: three lookups, three
+    # possible binaries. An absolute path makes all of them the one probed.
+    if gawk:
+        gawk = os.path.abspath(gawk)
     loc = probe_locale(gawk) if gawk else None
     if argv == ["--locale"]:
         print(loc or "")
