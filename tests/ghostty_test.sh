@@ -60,18 +60,35 @@ pass=$((pass + 3))
 # --- Ghostty syntax: a comment is ONLY valid on its own line; a trailing "# ..."
 # after a value is swallowed into the value. Assert no active line carries an
 # inline comment. Hex colours (palette = N=#rrggbb) are values, not comments - the
-# inline-comment marker is a SPACE before '#'. Check the base and both themes.
-for f in config themes/ipe-amarelo themes/gruvbox-ipe-light; do
-  if grep -nE '^[[:space:]]*[^#[:space:]].* #' "$gd/$f"; then
+# inline-comment marker is a SPACE before '#', so a whole value `key = #rrggbb`
+# (the form most themes use) is let through and nothing after it. Check the
+# base and every theme.
+for f in config $(cd "$gd" && ls themes/*); do
+  if grep -nE '^[[:space:]]*[^#[:space:]].* #' "$gd/$f" \
+    | grep -vE '= #[0-9a-fA-F]{6}[[:space:]]*$'; then
     fail "config/ghostty/$f has an inline comment (Ghostty allows whole-line comments only)"
   fi
 done
 pass=$((pass + 1))
 
-# --- each theme sets a background and exactly 16 palette entries.
-for t in ipe-amarelo gruvbox-ipe-light; do
-  ck "theme $t defines 16 palette colours" "$(grep -cE '^palette = [0-9]+=' "$gd/themes/$t")" "16"
-  grep -q '^background = ' "$gd/themes/$t" || fail "theme $t has no background"
+# --- every theme file (the framework's own and the third-party ones credited in
+# THIRD-PARTY-NOTICES.md) sets a background and exactly the palette indices
+# 0-15, and sets nothing BUT colours: an active line must be one of two exact
+# forms, so a downloaded theme cannot smuggle in a font, a command or an
+# include, and a trailing CR, a trailing space or a non-hex value is refused.
+# Comments and empty lines are the only other lines allowed. The '#' before a
+# hex colour is optional because some themes write bare hex.
+colour_keys='background|foreground|cursor-color|cursor-text|selection-background|selection-foreground|split-divider-color'
+hex6='[0-9a-fA-F]{6}'
+for tf in "$gd"/themes/*; do
+  t="$(basename "$tf")"
+  ck "theme $t defines palette indices 0-15, each once" \
+    "$(sed -nE 's/^palette = ([0-9]+)=.*/\1/p' "$tf" | sort -n | tr '\n' ' ')" \
+    "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 "
+  grep -q '^background = ' "$tf" || fail "theme $t has no background"
+  if grep -vE "^(#.*|palette = ([0-9]|1[0-5])=#$hex6|($colour_keys) = #?$hex6)?\$" "$tf"; then
+    fail "theme $t has a line that is neither a comment, an empty line, a palette entry nor a colour key ($colour_keys)"
+  fi
 done
 
 # --- the example is a placeholder template: no absolute home paths / secrets.
