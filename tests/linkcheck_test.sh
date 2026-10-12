@@ -334,11 +334,12 @@ run
 ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
 
 # A heading holding a link renders as the link's text alone, whatever its
-# destination holds: balanced parentheses (a Wikipedia URL) nested up to 3
+# destination holds: balanced parentheses (a Wikipedia URL) nested up to 32
 # levels, an escaped paren, an angle-bracket form with a space, a quoted or
 # parenthesized title. A destination with a bare space, a backslash before a
-# non-punctuation character, or a 4th nesting level is not matched, so its
-# text stays literal (the depth limit is pinned on purpose). An image adds no
+# non-punctuation character, or a 33rd nesting level is not matched, so its
+# text stays literal (GitHub's limit is 32: cmark-gfm inlines.c, nb_p > 32;
+# the limit is pinned on purpose). An image adds no
 # text to the rendered heading, so its id starts with the hyphen the space
 # beside it leaves (html-pipeline's TocFilter). `## Odd (text` is a regression
 # guard only: it passed before the fix.
@@ -346,6 +347,7 @@ ok "Unicode heading slug, mailto: ignored, tab-indented fence ignored"
 # Expected ids follow github-slugger: lowercase, punctuation such as `()`
 # dropped, `_` kept, each space a `-`.
 new_tree
+open32="$(printf '(%.0s' $(seq 32))"; close32="$(printf ')%.0s' $(seq 32))"
 cat >"$work/r/docs/paren.md" <<'MD'
 ## ![i](https://e.com/a_(b)) [Foo](https://e.com/c_(d)) now
 
@@ -368,17 +370,21 @@ cat >"$work/r/docs/paren.md" <<'MD'
 ## ![i](https://e.com/u "t") Foo
 
 [1](#-foo-now) [2](#x-foo-y) [3](#z-foo-w) [4](#e-foo-v) [5](#a-foo-bar-baz-u)
-[6](#s-ab-c-t) [7](#b-ahttpsecomx-y-t) [8](#d-foohttpsecomab-q) [9](#odd-text) [10](#-foo)
+[6](#s-ab-c-t) [7](#b-ahttpsecomx-y-t) [8](#d-foo-q) [9](#odd-text) [10](#-foo)
 MD
+# 32 levels is a link, 33 is literal text: the 33rd open parenthesis ends the
+# destination in cmark-gfm, so the whole `[Foo](...)` stays text.
+printf '\n## Y [Foo](https://e.com/a_%sb%s) y\n\n## W [Foo](https://e.com/a_(%sb%s) w\n\n[11](#y-foo-y) [12](#w-foohttpsecomab-w)\n' \
+  "$open32" "$close32" "$open32" "$close32" >>"$work/r/docs/paren.md"
 git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a heading link must slug to its text, whatever its destination holds (exit $rc): $out"
-ok "a heading link slugs to its text: nesting to 3 levels, escaped paren, angle form, titles, image; a spaced or 4-deep destination stays literal"
+ok "a heading link slugs to its text: nesting to 32 levels, escaped paren, angle form, titles, image; a spaced or 33-deep destination stays literal"
 expect_broken README.md "An <img alt='x' src='docs/missing.png'>." \
   'no such tracked file or directory: docs/missing\.png' \
   "a single-quoted HTML src is checked"
 # A body link's destination follows the heading's rule: balanced parentheses
-# nested up to 3 levels, an escaped paren (read unescaped, in a definition
+# nested up to 32 levels, an escaped paren (read unescaped, in a definition
 # too), and the `<...>` form, which may hold a space or an escaped `>`. A
 # bare destination never starts with `<`, so `[a](<b)` is literal text, in a
 # heading too.
@@ -403,6 +409,17 @@ git -C "$work/r" add -A
 run
 [ "$rc" = 0 ] || fail "a body destination with parentheses, an escape or <...> must resolve (exit $rc): $out"
 ok "a body link resolves nested parentheses, escapes (in a definition too) and <...> with an escaped '>'; [a](<b) is literal"
+# GitHub's limit: 32 levels is a link, 33 is text (cmark-gfm inlines.c).
+deep() { printf '%s' "$(printf '(%.0s' $(seq "$1"))g$(printf ')%.0s' $(seq "$1"))"; }
+expect_broken README.md "See [x](docs/$(deep 32).md)." \
+  '^README\.md:[0-9]+: no such tracked file or directory: docs/\({32}g\){32}\.md$' \
+  "a body destination nested 32 levels deep is a link"
+new_tree
+printf 'See [x](docs/%s.md).\n' "$(deep 33)" >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a body destination nested 33 levels deep is text, not a link (exit $rc): $out"
+ok "a body destination nested 33 levels deep is text"
 expect_broken README.md 'See [x](docs/gone_(b).md).' \
   '^README\.md:[0-9]+: no such tracked file or directory: docs/gone_\(b\)\.md$' \
   "a broken body destination with parentheses is reported whole"
@@ -826,6 +843,13 @@ shapes = {
     "h57.md": "`<a t=\"`" * (n // 8) + "\\`" * (n // 4),
     "h58.md": "[a](u`) `" * (n // 9),
     "h59.md": "# [a](u`) `b` ![i](v`) `" * (n // 25),
+    # Destinations nested to GitHub's limit of 32 and past it: unclosed, closed
+    # one short, and 33 deep, in a body link, a heading and a definition.
+    "h60.md": "[a](x" + "(" * n,
+    "h61.md": ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 40),
+    "h62.md": ("[a](x" + "(" * 33 + "y" + ")" * 33 + " ") * (n // 40),
+    "h63.md": ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 40),
+    "h64.md": "[a]: x" + "(" * n,
 }
 with open(os.path.join(d, "hostile-links.md"), "w") as f:
     for name, body in shapes.items():
@@ -914,6 +938,8 @@ ok "a file over the size cap exits 2 and one at the cap is read"
 # The cap counts bytes, not characters: a file under it in characters and
 # over it in bytes is refused. The name is hostile (ESC, U+202E): the error
 # line must print it escaped.
+# The raw-byte greps run under LC_ALL=C, so they match bytes whatever the
+# locale and do not lean on BSD grep's multibyte handling.
 new_tree
 python3 -I - "$work/r/docs" "$cap" <<'PY'
 import os, sys
@@ -924,8 +950,8 @@ PY
 git -C "$work/r" add -A
 run
 [ "$rc" = 2 ] && grep -qF 'wide\x1b\u202e.md: over '"$cap"' bytes' <<<"$out" \
-  && ! grep -q "$(printf '\033')" <<<"$out" \
-  && ! grep -q "$(printf '\342\200\256')" <<<"$out" \
+  && ! LC_ALL=C grep -q "$(printf '\033')" <<<"$out" \
+  && ! LC_ALL=C grep -q "$(printf '\342\200\256')" <<<"$out" \
   || fail "a file over the cap in bytes, not in characters, must exit 2 with its name escaped (got $rc): $out"
 ok "the cap counts bytes, and the over-cap error prints a hostile name escaped"
 
@@ -1131,16 +1157,54 @@ heading_slug '[`a](u`)' au "a span opened in link text takes the closing bracket
 heading_slug '![`a](u`) x' au-x "a span opened in image alt text takes the closing bracket and the destination"
 heading_slug '[`a`](u`) `c`' a-c "a span closed inside the link text leaves the destination backtick to the link"
 heading_slug '[`a` b](u`) `c`' a-b-c "a span closed inside longer link text leaves the destination backtick to the link"
-# Pinned miss: in a body link a backtick in the destination can pair with a
-# later one, so the link is hidden and the anchor after it is lost.
+# Rendered text, not source text, makes the id (html-pipeline's TocFilter takes
+# the heading's text content as it is, with no strip, and cmark-gfm renders an
+# autolink as its address): a code span keeps the padding it holds, an escaped
+# bracket opens no link, and an autolink is text where a tag is nothing.
+heading_slug '` a` b' -a-b "a code span keeps the padding it holds when only one side has it"
+heading_slug 'x `c `' x-c- "a code span's trailing padding stays in the id"
+heading_slug 'x `  `' x--- "an all-space code span is kept whole"
+heading_slug '\[a](https://e.com) b' ahttpsecom-b "an escaped bracket is not a link, so its destination stays in the id"
+heading_slug '\\[a](https://e.com) b' a-b "an escaped backslash leaves the bracket a link"
+heading_slug '<https://x.com/a_b> y' httpsxcoma_b-y "a URI autolink renders as its address"
+heading_slug 'Mail <me@x.org> z' mail-mexorg-z "an email autolink renders as its address"
+# \134 is the backslash, as above (check-patterns refuses a literal one before `<`).
+heading_slug "$(printf '\134<https://x.com> y')" httpsxcom-y "an escaped angle bracket opens no autolink"
+heading_slug '<b>hi</b> <a:b> z' hi--z "a tag, and a scheme too short for an autolink, render as nothing"
+
+# A backtick in a body link's destination or title can pair with a later one
+# and hide the link (and the anchors between them) from the link pass, so the
+# gate cannot tell whether the link is live: it fails closed and names the
+# line, rather than parsing the destination. A `[` inside a code span is code,
+# and a heading is read by slugify's link-aware span rule instead.
+expect_broken README.md '[a](docs/gone-bt.md`) <a id="k"></a> `b`
+
+[l](#k)' '^README\.md:[0-9]+: a backtick in a link destination or title cannot be told from a code span .*: docs/gone-bt\.md`\)' \
+  "a backtick in a body link destination fails closed, naming file and line"
+expect_broken README.md '[a](docs/guide.md "a`b") and `c`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: docs/guide\.md "a`b"\)' \
+  "a backtick in a body link title fails closed too"
+expect_broken README.md '[![i](docs/a`b.png)](docs/guide.md) `x`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: docs/a`b\.png\)' \
+  "a backtick in the destination of an image inside link text fails closed"
+# A definition's destination or title is read the same way.
+expect_broken README.md '[r]: docs/guide.md "t`"
+
+[a](docs/gone-def.md) `x`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: docs/guide\.md "t`"$' \
+  "a backtick in a reference definition's title fails closed"
+expect_broken README.md '[r]: docs/a`b.md
+
+[a](docs/gone-def.md) `x`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: docs/a`b\.md$' \
+  "a backtick in a reference definition's destination fails closed"
 new_tree
-printf '%s\n' '[a](docs/gone-bt.md`) <a id="k"></a> `b`' '' '[l](#k)' >>"$work/r/README.md"
+printf '%s\n' 'Code: `[a](docs/gone-bt.md`)` and `[b](u` and [ok](docs/guide.md) `c`' \
+  '' '<!-- [a](docs/x`.md) -->' >>"$work/r/README.md"
 git -C "$work/r" add -A
 run
-[ "$rc" = 1 ] && grep -q 'no such anchor in README\.md: #k' <<<"$out" \
-  && ! grep -q 'gone-bt' <<<"$out" \
-  || fail "a backtick in a body link destination hides the link and the anchor after it, a known miss (exit $rc): $out"
-ok "a backtick in a body link's destination pairs with a later one (known miss, pinned)"
+[ "$rc" = 0 ] || fail "a link-shaped backtick inside a code span or a comment is not reported (exit $rc): $out"
+ok "a backtick in link syntax inside a code span or an HTML comment is not reported"
 expect_broken README.md '<a x<img id="q">
 
 [l](#q)' 'no such anchor in README\.md: #q' \

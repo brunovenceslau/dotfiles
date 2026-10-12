@@ -19,7 +19,7 @@ same tracked set:
     an HTML `<a>` or `<img>` tag (quoted or bare) must name a tracked
     file, or a directory holding one, inside ROOT. A Markdown destination
     is read the CommonMark way: no ASCII whitespace, balanced parentheses
-    (3 levels deep), backslash escapes of ASCII punctuation, or the `<...>`
+    (32 levels deep, GitHub's limit), backslash escapes of ASCII punctuation, or the `<...>`
     form, which may hold spaces; a title may follow, double- or
     single-quoted or in parentheses. Neither has a length limit. Escapes
     are undone and character references (`&amp;`) decoded before
@@ -63,8 +63,8 @@ Hostile input stays near-linear. A pattern that could rescan the rest of a
 line or file once per opener is bounded (a definition's label at
 CommonMark's 999 characters, a heading's code span at 2048), stops at the
 next opener of its kind (a title or an attribute value at its own quote,
-never past a blank line), or crosses at most 3 later openers (a link
-destination, since each opener brings an unclosed parenthesis and a 4th
+never past a blank line), or crosses at most 32 later openers (a link
+destination, since each opener brings an unclosed parenthesis and a 33rd
 level ends it); everything else is a str.find loop or a lookup built in
 one pass. No destination, title or attribute value has a length limit:
 each of the others was bounded once, which silently skipped a long link,
@@ -121,17 +121,18 @@ _WS = r"(?:[ \t\r\f\v]|" + _PARA + r")"
 # `\)` included), else it is a literal; balanced parentheses nest; it never
 # starts with `<`, since that opens the other form, `<...>`, which may hold
 # spaces and an escaped `\>`.
-# Nesting stops at 3 levels: GitHub's cmark-gfm allows 32 (inlines.c), but a
-# destination deeper than 3 is far past anything in a tracked doc, and a
-# deeper one is not read as a link here (pinned by a test) instead of a hang
-# risk. Linear time: the alternatives of every starred group start on
-# different characters (a lookahead splits the two backslash forms), so a
-# string splits into units one way only and a failed match gives each
-# position back once.
+# Nesting stops at 32 levels, GitHub's own limit (cmark-gfm inlines.c,
+# manual_scan_link_url_2: a 33rd open parenthesis ends the destination, and
+# the link with it). Linear in size and in time: the alternatives of every
+# starred group start on different characters (a lookahead splits the two
+# backslash forms), so a string splits into units one way only and a failed
+# match gives each position back once; each level adds one copy of the
+# units, not a power of the one below.
 _PUNCT = r"[!-/:-@\[-`{-~]"
 _DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\ \t\n\r\f\v]"
+_MAX_NEST = 32
 _NEST = r"\((?:" + _DEST_CHAR + r")*\)"
-for _ in range(2):
+for _ in range(_MAX_NEST - 1):
     _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
 _DEST_BARE = r"(?!<)(?:" + _DEST_CHAR + "|" + _NEST + r")+"
 _DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
@@ -344,16 +345,11 @@ def indent_of(ln):
     return len(ln.expandtabs(4)) - len(ln.expandtabs(4).lstrip(" "))
 
 
-def strip_code(text, spans=True):
-    """Blank what is not prose: front matter, fenced and indented code blocks,
-    HTML comments, and (with spans) inline code spans. Every blanked character
-    becomes a space, so offsets and line numbers still point into the file.
-    Headings are read with spans=False: GitHub's id includes a span's text."""
-    return blank_spans(strip_blocks(text), spans)
-
-
 def strip_blocks(text):
-    """The block-level half of strip_code: front matter and code blocks."""
+    """Blank what is not prose at block level: front matter, fenced and
+    indented code blocks. Every blanked character becomes a space, so offsets
+    and line numbers still point into the file; blank_spans does the inline
+    half (comments and code spans)."""
     lines = text.split("\n")
     out = []
     i = 0
@@ -481,18 +477,35 @@ def blank_spans(text, spans):
     return "".join(pieces)
 
 
+# What _render_inline reads token by token, left to right, so each wins
+# where it comes first: a backslash escape (an escaped `<` opens nothing), and
+# an autolink, `<` then a URI (a scheme of 2 to 32 characters, a colon, no
+# control character, space, `<` or `>`) or an email address, then `>` (the
+# patterns of cmark-gfm's scanners.re, _scan_autolink_uri and
+# _scan_autolink_email). An autolink renders as its text, the address as
+# written, where any other `<...>` is a tag and renders as nothing.
+_AUTOLINK_EMAIL = (r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}"
+                   r"[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*")
+INLINE_TOKEN = re.compile(r"\\(" + _PUNCT + r")|<([A-Za-z][A-Za-z0-9.+-]{1,31}:[^\x00-\x20<>]*|"
+                          + _AUTOLINK_EMAIL + ")>")
+
+
 def _render_inline(s):
     """Rendered text of a heading fragment that holds no code span."""
-    parts = re.split(r"\\([!-/:-@\[-`{-~])", s)   # odd items: backslash-escaped chars
-    out = []
-    for k, p in enumerate(parts):
-        if k % 2:
-            out.append(p)   # an escaped `_` or `*` is a literal, never emphasis
-        else:
-            p = re.sub(r"<[^<>]+>", "", p)                        # HTML tags render as nothing
-            p = re.sub(r"(?<![\w])[*_]+|[*_]+(?![\w])", "", p)    # emphasis, not intra-word _
-            out.append(p)
+    out, pos = [], 0
+    for m in INLINE_TOKEN.finditer(s):
+        out.append(_render_plain(s[pos:m.start()]))
+        out.append(m.group(1) or m.group(2))   # an escaped char, or an autolink's text
+        pos = m.end()
+    out.append(_render_plain(s[pos:]))
     return "".join(out)
+
+
+def _render_plain(p):
+    """The text between tokens: HTML tags render as nothing, emphasis markers
+    are dropped. An escaped `_` or `*` never gets here, so it stays literal."""
+    p = re.sub(r"<[^<>]+>", "", p)                        # HTML tags render as nothing
+    return re.sub(r"(?<![\w])[*_]+|[*_]+(?![\w])", "", p)   # emphasis, not intra-word _
 
 
 def atx_text(rest):
@@ -518,7 +531,15 @@ _TAIL = (r"\(" + _WS + r"*(?:(?:" + _DEST_ANGLE + "|" + _DEST_BARE + r")"
 # a title would match as a link and leak its alt text; an escaped `!` makes it
 # a plain link.
 HEADING_IMAGE = re.compile(r"(?<!\\)!\[([^\[\]]*)\]" + _TAIL)
-HEADING_LINK = re.compile(r"\[([^\[\]]*)\]" + _TAIL)
+# An opening bracket counts after an even run of backslashes only (_OPEN), so
+# the match may start with that run: heading_link_text puts it back.
+HEADING_LINK = re.compile(_OPEN + r"([^\[\]]*)\]" + _TAIL)
+
+
+def heading_link_text(m, text):
+    """A heading link's replacement: its text, after the backslash run (an
+    even one, so a literal pair) that opened the match."""
+    return text[m.start():m.start(1) - 1] + text[m.start(1):m.end(1)]
 
 
 # A code span in one line: N backticks up to the next run of exactly N. A
@@ -532,11 +553,11 @@ def _code_spans(text):
     """[(start, end, content)] of the code spans of one line. A span binds
     tighter than link syntax (CommonMark 6.1) except where a link's
     destination or title holds the backtick: `[a](u`) `b`` is a link and a
-    span, not a span over `) `. So the spans are found once, a link or
-    image that opens outside them, with no span opening in its text and running past it (that span
-    takes the `](`: `[`a](u`)` is `a](u` in code), marks its destination and
-    title as a zone where no backtick opens or closes anything, and they are
-    found again with the zones hidden."""
+    span, not a span over `) `. So the spans are found once. A link or
+    image that opens outside them marks its destination and title as a zone
+    where no backtick opens or closes anything, unless a span opens in its
+    text and runs past it (that span takes the `](`: `[`a](u`)` is `a](u`
+    in code). The spans are then found again with the zones hidden."""
     spans = [m for m in _SPAN.finditer(text) if m.group(1)]
     if not spans:
         return []
@@ -597,7 +618,7 @@ def slugify(text):
     # leaves the space beside it, and the character loop drops it.
     text = _sub_outside_spans(HEADING_IMAGE, lambda m, t: "\0", text.strip())
     # a link renders as its text
-    text = _sub_outside_spans(HEADING_LINK, lambda m, t: t[m.start(1):m.end(1)], text)
+    text = _sub_outside_spans(HEADING_LINK, heading_link_text, text)
     rendered, pos = [], 0
     # The code span's 2048 bound is the one kept for speed, by measurement:
     # unbounded, a heading of backtick runs of every length 1..2000 (2 MB)
@@ -612,7 +633,11 @@ def slugify(text):
         rendered.append(content)
         pos = b
     rendered.append(_render_inline(text[pos:]))
-    text = "".join(rendered).strip().lower()
+    # No strip here: html-pipeline's TocFilter takes the heading's text
+    # content as it is, so the padding a code span keeps (` `  a`` is two
+    # spaces) is part of the id, like the space beside an image above. The
+    # heading's own padding is gone already (atx_text, text.strip() above).
+    text = "".join(rendered).lower()
     out = []
     for ch in text:
         cat = unicodedata.category(ch)
@@ -773,19 +798,64 @@ class Lines:
     def of(self, offset):
         return bisect.bisect_left(self.nl, offset) + 1
 
+    def start(self, offset):
+        """The offset where the line holding `offset` begins."""
+        k = bisect.bisect_left(self.nl, offset)
+        return self.nl[k - 1] + 1 if k else 0
+
+
+def backtick_links(prose, code_free, lines):
+    """(offset, tail) of each body link whose destination or title holds a
+    backtick. `prose` is the text with comments blanked and code spans left
+    in; `code_free` is the same with the spans blanked too, which is what the
+    link pass reads. A backtick there can open a code span that pairs with a
+    later one and hides the link from that pass, so the gate cannot tell
+    whether the link is live: it reports the link instead of guessing, and
+    needs no parse of its own. A `[` that sits in a code span is code, not a
+    link, and a heading is skipped: slugify reads its backticks with the
+    link-aware _code_spans, and the link pass does not check a heading's
+    link if a span hides it (a known miss). The skip stays because the
+    heading tests run the whole gate over headings such as `[`a](u`)`, where
+    a span opens in the link text and takes the `](`: that is code, and this
+    detector, which does not know spans, would call it a link. A definition
+    is read the same way as a link, by REFDEF."""
+    for m in REFDEF.finditer(prose):
+        g = 2 if m.group(2) is not None else 3
+        tail = prose[m.start(g):m.end()]
+        if "`" in tail and code_free[m.start(1) - 1] == "[":
+            yield m.start(g), tail
+    pending = [(0, prose)]
+    while pending:
+        base, text = pending.pop()
+        for m in LINK.finditer(text):
+            g = 2 if m.group(2) is not None else 3
+            tail = text[m.start(g):m.end()]
+            if "`" in tail:
+                at = base + m.start(1) - 1   # the `[` itself
+                ls = lines.start(at)   # a bisect: a line of many hits stays linear
+                if code_free[at] == "[" and not ATX_OPEN.match(prose[ls:ls + 12]):
+                    yield base + m.start(g), tail
+            pending.append((base + m.start(1), m.group(1)))
+
 
 def check_file(tree, rel):
     raw = read_text(tree.root, rel)
-    line_of = Lines(raw).of
+    lines = Lines(raw)
+    line_of = lines.of
     found = []   # (line, target, error)
     is_md = rel.endswith(".md")
-    code_free = strip_code(raw) if is_md else raw
+    blocks = strip_blocks(raw) if is_md else raw
+    code_free = blank_spans(blocks, True) if is_md else raw
     for m in SELF.finditer(code_free):
         err = resolve(tree, "", m.group(1))
         if err:
             found.append((line_of(m.start()), m.group(0), err))
     if not is_md:
         return sorted(set(found))
+    for off, tail in backtick_links(blank_spans(blocks, False), code_free, lines):
+        found.append((line_of(off), tail, "a backtick in a link destination or "
+                      "title cannot be told from a code span (write a "
+                      "destination's backtick as %60, drop a title's)"))
     targets = []   # (offset, as written, as resolved)
     pending = [(0, code_free)]
     while pending:

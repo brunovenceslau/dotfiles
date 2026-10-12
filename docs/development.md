@@ -497,10 +497,20 @@ link-convention change.
   code span is text as well: `` `![i](u)` Foo `` is `iu-foo`. In a
   heading, a backtick opens a code span only outside a link's destination
   and title. In any text, a backtick opens a span only when no backslash
-  escapes it, and not inside an `<a>` or `<img>` tag. A backtick in the
-  destination or title of a body link is a known miss: it can pair with a
-  later one, which hides the link and any anchor between the two backticks.
-  A backtick in any other tag's quoted value is a known miss too. An
+  escapes it, and not inside an `<a>` or `<img>` tag. A heading's id keeps
+  the padding a code span holds, reads a link whose `[` a backslash escapes
+  as text, and renders an autolink (`<https://example.com>`) as its address,
+  where any other `<...>` is a tag and renders as nothing. A backtick in the
+  destination or title of a body link fails the gate: it can pair with a
+  later backtick, which would hide the link and any anchor between the two,
+  so the report names the line; write a destination's backtick as `%60` and
+  drop a title's. A reference definition is held to the same rule. A link
+  inside a code span or an HTML comment is not reported. A link in an ATX
+  heading is not reported either, and the link pass can still miss one there
+  that a span hides: the heading tests run the whole gate over headings such
+  as `` [`a](u`) ``, where a span opens in the link text and takes the `](`,
+  and the detector, which does not know spans, would call that a link.
+  A backtick in any other tag's quoted value is a known miss. An
   anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved
   against the local tree the same way.
@@ -524,11 +534,12 @@ link-convention change.
   newline inside it, as the URL standard strips them. A link whose text wraps
   across lines is still found, and a CRLF file reads exactly like its LF
   twin. A link destination ends at ASCII whitespace only, may hold
-  balanced parentheses (up to 3 levels deep), backslash escapes and
-  character references such as `&amp;`, or be written `<...>` with spaces,
-  and its title may be double- or single-quoted or in parentheses, holding
-  its own delimiter escaped. Neither has a length limit. Every other URL
-  scheme is out of scope, since the gate never touches the network.
+  balanced parentheses (up to 32 levels deep, GitHub's limit), backslash
+  escapes and character references such as `&amp;`, or be written `<...>`
+  with spaces, and its title may be double- or single-quoted or in
+  parentheses, holding its own delimiter escaped. Neither has a length
+  limit. Every other URL scheme is out of scope, since the gate never touches
+  the network.
 
 It exits 1 on a broken link, printing `FILE:LINE: reason: target`. The target
 is printed through `tty_safe`, which escapes by Unicode category (see
