@@ -31,8 +31,9 @@ export GIT_CEILING_DIRECTORIES="$work"
 # $(value STRICT), ${value STRICT} and a substitution reference such as
 # $(STRICT:a=b). A `$` starts a reference only when an EVEN number of `$`
 # precede it (`$$` is a literal dollar), so `x$$$(STRICT)` splices and
-# `$$(STRICT)` does not; the regex consumes the preceding `$` in pairs. `$${STRICT:-}` (the shell's own
-# read) is not a splice. Comment lines may name it.
+# `$$(STRICT)` does not; the regex consumes the preceding `$` in pairs.
+# `$${STRICT:-}` (the shell's own read) is not a splice. Comment lines may
+# name it.
 splice_re='(^|[^$])(\$\$)*\$([({]|\([a-z]+ +|\{[a-z]+ +)STRICT([)}]|:[^)}]*[)}])'
 splices() { grep -nE -e "$splice_re" | grep -vE '^[0-9]+:[[:space:]]*#' || true; }
 spliced="$(splices < "$mk")"
