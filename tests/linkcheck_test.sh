@@ -868,6 +868,54 @@ bounded_run 60 "$work/hostile.out" python3 -I "$gate" "$work/r" \
   || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
 
+# The nested-destination and unclosed-link shapes of h60 to h64 above carry
+# only the 60 s cap, which a slow-but-quadratic regression can still meet on a
+# fast machine. Compare growth too, as below: each shape runs at 1x and 8x, a
+# linear scan costs about 8x to 10x (up to 17x under load), a quadratic one
+# 64x, so a ratio past 23 on the best of three runs, with the collector off,
+# separates them on any runner. The 5 ms floor keeps a very fast 1x run from
+# inflating the ratio.
+new_tree
+python3 -I -B - "$repo_root/tests" "$work/r" <<'PY' || fail "check_file must scale linearly on nested and unclosed destinations"
+import gc, os, subprocess, sys, time
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+root = sys.argv[2]
+shapes = {
+    "unclosed destination": lambda n: "[a](x" + "(" * n,
+    "32-deep destinations": lambda n: ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 40),
+    "33-deep heading": lambda n: ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 40),
+    "unclosed definition": lambda n: "[a]: x" + "(" * n,
+    "heading links with backticks": lambda n: "# [a](u`) `b` ![i](v`) `" * (n // 25),
+}
+
+def best(body):
+    with open(os.path.join(root, "docs", "grow.md"), "w") as f:
+        f.write(body + "\n")
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    tree = linkcheck.Tree(root)
+    lo = None
+    gc.disable()
+    try:
+        for _ in range(3):
+            t = time.perf_counter()
+            linkcheck.check_file(tree, "docs/grow.md")
+            dt = time.perf_counter() - t
+            lo = dt if lo is None else min(lo, dt)
+    finally:
+        gc.enable()
+    return lo
+
+bad = []
+for name, make in shapes.items():
+    a, b = best(make(12500)), best(make(100000))
+    if b > 23 * max(a, 0.005):
+        bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
+if bad:
+    sys.exit("; ".join(bad))
+PY
+ok "check_file grows linearly on unclosed and 32-deep nested destinations, in a body, a heading and a definition"
+
 # blank_spans must stay linear with no comment in the text. Two shapes, each
 # a quadratic hazard of its own: many paired spans (scanning for the next
 # `<!--` again at every span, when it answers -1 once, not once per run), and
@@ -1121,7 +1169,13 @@ cat >"$work/r/docs/spans2.md" <<'MD'
 MD
 git -C "$work/r" add -A
 run
-[ "$rc" = 0 ] || fail "headings with backticks in destinations, escaped, padded, fenced or unclosed must slug as CommonMark reads them (exit $rc): $out"
+# The three headings whose live link holds a backtick are reported (see the
+# heading cases near backtick_links); everything else, the anchors in
+# particular, must resolve, so no other report line may appear.
+[ "$rc" = 1 ] || fail "headings with backticks in destinations, escaped, padded, fenced or unclosed must slug as CommonMark reads them, and only the three backtick links are reported (exit $rc): $out"
+[ "$(grep -c '^docs/spans2\.md:[0-9]*: a backtick in a link destination or title' <<<"$out")" = 3 ] \
+  && [ "$(grep -c '^docs/spans2\.md' <<<"$out")" = 3 ] \
+  || fail "only the three heading links holding a backtick may be reported, and no anchor may fail: $out"
 ok "a backtick in a link destination or title, an escaped, padded, multi-backtick or unclosed span slugs as CommonMark reads it"
 
 # An anchor kept by a tag or an escape: backticks inside an <a> tag's value,
@@ -1150,9 +1204,23 @@ heading_slug() {
   printf '## %s\n\n[l](#%s)\n' "$1" "$2" >"$work/r/docs/slug1.md"
   git -C "$work/r" add -A
   run
-  [ "$rc" = 0 ] || fail "$3: $1 must slug to $2 (exit $rc): $out"
+  # A live heading link with a backtick in its destination is reported (fail
+  # closed, see backtick_links) whatever its slug; any other report line, an
+  # anchor that does not resolve above all, is a wrong slug.
+  if [ "$rc" != 0 ]; then
+    bad="$(grep -v -e '^linkcheck: ' -e ': a backtick in a link destination or title' <<<"$out" || true)"
+    [ "$rc" = 1 ] && [ -z "$bad" ] || fail "$3: $1 must slug to $2 (exit $rc): $out"
+  fi
   ok "$3"
 }
+# A repeated heading numbers -1 after the id of its code-span padding.
+new_tree
+printf '## ` a`\n\n## ` a`\n\n## x `c `\n\n## x `c `\n\n[1](#-a) [2](#-a-1) [3](#x-c-) [4](#x-c--1)\n' \
+  >"$work/r/docs/dup-pad.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a repeated heading with code-span padding must number -1 after the padded id (exit $rc): $out"
+ok "a repeated heading with code-span padding numbers -1 after the padded id"
 heading_slug '[`a](u`)' au "a span opened in link text takes the closing bracket and the destination"
 heading_slug '![`a](u`) x' au-x "a span opened in image alt text takes the closing bracket and the destination"
 heading_slug '[`a`](u`) `c`' a-c "a span closed inside the link text leaves the destination backtick to the link"
@@ -1198,6 +1266,26 @@ expect_broken README.md '[r]: docs/a`b.md
 [a](docs/gone-def.md) `x`' \
   '^README\.md:[0-9]+: a backtick in a link destination or title .*: docs/a`b\.md$' \
   "a backtick in a reference definition's destination fails closed"
+# A heading is read with the link-aware span rule, at any block quote or list
+# depth: a live link whose destination holds a backtick is reported even when
+# a later backtick pairs with it (the link pass cannot see it then), while a
+# link a span covers (`[` or `]`) is code and is left alone.
+expect_broken README.md '## H [h](missing5.md`x) `y`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: missing5\.md`x\)' \
+  "a heading link with a backtick destination is reported, though a later backtick pairs with it"
+expect_broken README.md '> ## H [h](missing6.md`x) `y`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: missing6\.md`x\)' \
+  "a block quote's heading link with a backtick destination is reported"
+expect_broken README.md '- ## H [h](missing7.md`x) `y`' \
+  '^README\.md:[0-9]+: a backtick in a link destination or title .*: missing7\.md`x\)' \
+  "a list item's heading link with a backtick destination is reported"
+new_tree
+printf '%s\n' '## [`a](u`) here.' '' '> ## [`a](u`) here.' '' '- ## `[a](u`)` x' \
+  >>"$work/r/README.md"
+git -C "$work/r" add -A
+run
+[ "$rc" = 0 ] || fail "a heading link a code span covers is code, at any depth (exit $rc): $out"
+ok "a heading whose code span opens in the link text, or holds the link, is not reported, top level or nested"
 new_tree
 printf '%s\n' 'Code: `[a](docs/gone-bt.md`)` and `[b](u` and [ok](docs/guide.md) `c`' \
   '' '<!-- [a](docs/x`.md) -->' >>"$work/r/README.md"

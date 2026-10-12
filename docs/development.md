@@ -505,11 +505,13 @@ link-convention change.
   later backtick, which would hide the link and any anchor between the two,
   so the report names the line; write a destination's backtick as `%60` and
   drop a title's. A reference definition is held to the same rule. A link
-  inside a code span or an HTML comment is not reported. A link in an ATX
-  heading is not reported either, and the link pass can still miss one there
-  that a span hides: the heading tests run the whole gate over headings such
-  as `` [`a](u`) ``, where a span opens in the link text and takes the `](`,
-  and the detector, which does not know spans, would call that a link.
+  inside a code span or an HTML comment is not reported. A heading link (ATX,
+  at any block quote or list depth) is read with the same span rule as the
+  heading's id: it is code, and not reported, when a span covers its `[` or
+  its `]`, as in `` [`a](u`) ``, where a span opens in the link text and takes
+  the `](`. Any other heading link whose destination or title holds a
+  backtick is reported like a body link, because a later backtick can pair
+  with it and hide it from the link pass.
   A backtick in any other tag's quoted value is a known miss. An
   anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved

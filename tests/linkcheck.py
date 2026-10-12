@@ -108,6 +108,11 @@ LIST_ITEM = re.compile(r"^ {0,3}(?:[-*+]|[0-9]+[.)])(?:[ \t]|$)")
 # line. atx_text cuts its text out with str methods: a lazy `.*?` next to an
 # optional closing sequence backtracked quadratically on a run of spaces.
 ATX_OPEN = re.compile(r"^ {0,3}#{1,6}(?=[ \t]|$)")
+# The same heading inside any depth of block quote or list item: the prefix is
+# markers (`>`, a bullet, a number) with their padding, so `> ## H` and
+# `- ## H` count, as the renderer reads them.
+ATX_NESTED = re.compile(
+    r"^(?:[ \t]*(?:>|[-*+]|[0-9]+[.)])(?=[ \t]|$))*[ \t]*#{1,6}(?=[ \t]|$)")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
 # A line break that is not a blank line, and the whitespace that may sit
 # between the parts of a link or a tag: never a blank line (a paragraph,
@@ -810,20 +815,21 @@ def backtick_links(prose, code_free, lines):
     in; `code_free` is the same with the spans blanked too, which is what the
     link pass reads. A backtick there can open a code span that pairs with a
     later one and hides the link from that pass, so the gate cannot tell
-    whether the link is live: it reports the link instead of guessing, and
-    needs no parse of its own. A `[` that sits in a code span is code, not a
-    link, and a heading is skipped: slugify reads its backticks with the
-    link-aware _code_spans, and the link pass does not check a heading's
-    link if a span hides it (a known miss). The skip stays because the
-    heading tests run the whole gate over headings such as `[`a](u`)`, where
-    a span opens in the link text and takes the `](`: that is code, and this
-    detector, which does not know spans, would call it a link. A definition
-    is read the same way as a link, by REFDEF."""
+    whether the link is live: it reports the link instead of guessing. A `[`
+    that sits in a code span is code, not a link. A heading (ATX, at any
+    block quote or list depth) is read with the link-aware _code_spans, the
+    way slugify reads it: the link is code, and not reported, when a span
+    covers its `[` or its `]`, as in `[`a](u`) here`, where the span opens in
+    the link text and takes the `](`. Any other heading link is reported like
+    a body one, because the link pass cannot see it when a later backtick
+    pairs with the one in its destination. A definition is read the same way
+    as a link, by REFDEF."""
     for m in REFDEF.finditer(prose):
         g = 2 if m.group(2) is not None else 3
         tail = prose[m.start(g):m.end()]
         if "`" in tail and code_free[m.start(1) - 1] == "[":
             yield m.start(g), tail
+    heads = {}   # line start -> (span starts, spans) of a heading, else None
     pending = [(0, prose)]
     while pending:
         base, text = pending.pop()
@@ -833,9 +839,30 @@ def backtick_links(prose, code_free, lines):
             if "`" in tail:
                 at = base + m.start(1) - 1   # the `[` itself
                 ls = lines.start(at)   # a bisect: a line of many hits stays linear
-                if code_free[at] == "[" and not ATX_OPEN.match(prose[ls:ls + 12]):
+                if code_free[at] == "[" and not _in_heading_span(
+                        heads, prose, ls, at - ls, base + m.end(1) - ls):
                     yield base + m.start(g), tail
             pending.append((base + m.start(1), m.group(1)))
+
+
+def _in_heading_span(heads, prose, ls, opener, closer):
+    """True when the line starting at `ls` is an ATX heading (at any depth)
+    and a code span of it covers column `opener` (the link's `[`) or column
+    `closer` (its `]`). The spans of a line are found once, in `heads`, and
+    placed by bisect, so a heading with many links stays linear."""
+    if ls not in heads:
+        eol = prose.find("\n", ls)
+        line = prose[ls:eol if eol >= 0 else len(prose)]
+        spans = _code_spans(line) if ATX_NESTED.match(line) else None
+        heads[ls] = None if spans is None else ([x[0] for x in spans], spans)
+    if heads[ls] is None:
+        return False
+    starts, spans = heads[ls]
+    for col in (opener, closer):
+        k = bisect.bisect_right(starts, col) - 1
+        if k >= 0 and col < spans[k][1]:
+            return True
+    return False
 
 
 def check_file(tree, rel):
