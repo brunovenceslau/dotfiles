@@ -139,15 +139,24 @@ by step 5.
    survivor's base branch, step 5). The primary check is local: git must verify
    the signature against the allowed-signers file (`gpg.ssh.allowedSignersFile`,
    see [the signing key page](signing-key.md)) and the signer must be the
-   maintainer. GitHub's flag is a second signal that must print `true`. The
-   subshell stops at the first bad commit and exits nonzero, and any gh error or
-   empty answer counts as bad:
+   maintainer. The allowed-signers entry the check relies on lists ONE
+   principal per line, the maintainer's email: with several principals on a
+   line, `%GS` never equals `user.email`, and the check fails closed. GitHub's
+   flag is a second signal that must print `true`. The subshell stops at the
+   first bad commit and exits nonzero. Each of these is a failure, not a pass:
+   a ref git cannot resolve (the base already pruned by step 1's `--prune`, for
+   one), a failing `git rev-list`, an empty range, a gh error, or an empty or
+   other answer from gh:
 
    ```sh
    (
      set -eu
      me=$(git config user.email)     # the signer principal in allowed_signers
-     for c in $(git rev-list origin/<baseRefName>..origin/<branch>); do
+     base=$(git rev-parse --verify --quiet "origin/<baseRefName>^{commit}")
+     tip=$(git rev-parse --verify --quiet "origin/<branch>^{commit}")
+     list=$(git rev-list "$base..$tip")
+     [ -n "$list" ] || { echo "empty range $base..$tip" >&2; exit 1; }
+     for c in $list; do
        st=$(git log -1 --format=%G? "$c")
        who=$(git log -1 --format=%GS "$c")
        if [ "$st" != G ] || [ "$who" != "$me" ]; then
@@ -162,15 +171,19 @@ by step 5.
 
 4. Before each rebase, refuse to continue if the local branch holds commits
    that are not on the remote, because `git checkout -B` discards them. Then
-   check the branch out at the remote tip:
+   check the branch out at the remote tip. Steps 5 and 6 run only if this
+   subshell exits 0:
 
    ```sh
-   if git show-ref --verify --quiet refs/heads/<branch> &&
-      [ -n "$(git rev-list origin/<branch>..<branch>)" ]; then
-     echo "<branch> has unpushed commits: stop and decide" >&2
-   else
+   (
+     set -eu
+     if git show-ref --verify --quiet refs/heads/<branch> &&
+        [ -n "$(git rev-list origin/<branch>..<branch>)" ]; then
+       echo "<branch> has unpushed commits: stop and decide" >&2
+       exit 1
+     fi
      git checkout -B <branch> origin/<branch>
-   fi
+   )                                 # want: exit status 0
    ```
 
 5. Work bottom-up. The lowest survivor whose commits fail verification is
