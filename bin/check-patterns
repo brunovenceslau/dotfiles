@@ -1923,10 +1923,64 @@ fi
 # inside a multi-line HTML block that does not itself open with a tag, and an
 # indented (4-space) code block.
 md_width=80
+# TEST SEAM for the awk that counts: CHECK_PATTERNS_AWK names the awk program
+# (default `awk`) and CHECK_PATTERNS_AWK_LC_ALL the locale it runs under
+# (default C, the script's own). Only this arm reads them. Both are needed
+# because the character-counting path runs only on an awk that decodes UTF-8,
+# and gawk does so only under a UTF-8 locale: `make check-patterns-gawk` sets
+# the pair, so the path that macOS's byte-counting awk never takes runs on a
+# real awk in CI. Every way the pair could make that leg vacuous is exit 2:
+#   - a CHECK_PATTERNS_AWK that does not resolve to an executable file (not on
+#     PATH, a builtin, a relative path, a name starting with `-`, a path
+#     holding `=`), never a
+#     silent fallback to the default awk. The resolved path is what runs, so
+#     the program validated is the program executed;
+#   - a CHECK_PATTERNS_AWK_LC_ALL other than C or POSIX under which the awk
+#     still counts bytes: an unknown locale makes gawk fall back to C without
+#     a word, which would quietly rerun the byte path (WANT_U8 below);
+#   - an awk that does not report the over-width control line below, such as
+#     `true`, which exits 0 having checked nothing.
+md_awk="${CHECK_PATTERNS_AWK:-awk}"
+md_awk_lc="${CHECK_PATTERNS_AWK_LC_ALL:-C}"
+md_awk_path=""
+if [ -n "${CHECK_PATTERNS_AWK:-}" ]; then
+  # `command -v` also answers for a builtin, a function or an alias (it prints
+  # the bare name): only a path is an awk program. `env` would read a leading
+  # `-` as an option, and a path holding `=` as a variable assignment.
+  case "$md_awk" in -*) ;; *) md_awk_path="$(command -v -- "$md_awk" 2>/dev/null || true)" ;; esac
+  case "$md_awk_path" in
+    *=*) md_awk_path="" ;;
+    /*) [ -x "$md_awk_path" ] && [ -f "$md_awk_path" ] || md_awk_path="" ;;
+    *) md_awk_path="" ;;
+  esac
+  if [ -z "$md_awk_path" ]; then
+    _err "check-patterns: CHECK_PATTERNS_AWK names '$md_awk', which does not resolve to an executable file (an absolute path, or a name found on PATH, not starting with '-' and holding no '=')"
+    exit 2
+  fi
+fi
+md_awk_run="${md_awk_path:-$md_awk}"
+# Only a locale NAMED through the seam, and not C or POSIX (compared whole:
+# C.UTF-8 is a UTF-8 locale), demands the character path. The default leaves
+# the choice to the awk's own probe: an awk that counts characters even under
+# C (GoAWK with -c does) is as correct as one that counts bytes.
+md_want_u8=0
+case "${CHECK_PATTERNS_AWK_LC_ALL:-C}" in C | POSIX) ;; *) md_want_u8=1 ;; esac
 # shellcheck disable=SC2016  # an awk program: its `$0` is awk's, never the shell's
 md_width_awk='
 BEGIN {
   u8 = (length("\303\251") == 1)
+  if (WANT_U8 == 1 && !u8) {
+    print "awk: counts bytes under the locale CHECK_PATTERNS_AWK_LC_ALL names (unknown, or not UTF-8), so the character path would not run"
+    exit 2
+  }
+  # The continuation-byte class is a STRING, never a /regex/ literal: gawk
+  # compiles a literal when it parses the program, and in a UTF-8 locale it
+  # rejects [\200-\277] ("Invalid collation character"), which would fail the
+  # gate on the very awk that takes the character path. The string is no
+  # safer to COMPILE there: it is the same fatal error once gsub uses it. It
+  # is safe only because gsub never sees it in that locale, since cols()
+  # returns before the gsub whenever u8 is 1.
+  cont = "[\200-\277]"
   # Self-test of the probe: an e acute, a micro and a degree sign are three
   # characters. Any awk and locale that the probe misreads fails closed.
   if (cols("\303\251\302\265\302\260") != 3) {
@@ -1936,7 +1990,7 @@ BEGIN {
 }
 function cols(s,   t) {
   if (u8) return length(s)
-  t = s; gsub(/[\200-\277]/, "", t); return length(t)
+  t = s; gsub(cont, "", t); return length(t)
 }
 # Every walk below reads the line from ch[], split into one character per
 # element ONCE per line (tokens), never with substr(s, i, 1): the onetrue
@@ -2093,8 +2147,30 @@ fm {
 { check($0, FILENAME, FNR) }
 END { flush() }
 '
-if out=$(find "${prose[@]}" -type f -name '*.md' \
-    -exec awk -v W="$md_width" "$md_width_awk" {} + 2>&1); then
+# The positive control: one line of 17 words, 84 columns, must come back as a
+# violation before any file is trusted to have none. It runs on stdin, so it
+# runs even on a tree with no Markdown file, and only its `:1:<line>` suffix is
+# matched (awks name stdin's FILENAME differently).
+md_ctl_line="$(printf 'aaaa %.0s' 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)"
+md_ctl_line="${md_ctl_line% }"
+# An awk that errors there fails as the scan below would, with the same words.
+md_ctl_err=""
+md_awk_id="the width awk '$md_awk_run', LC_ALL=$md_awk_lc"
+if md_ctl=$(printf '%s\n' "$md_ctl_line" | env LC_ALL="$md_awk_lc" "$md_awk_run" \
+    -v W="$md_width" -v WANT_U8="$md_want_u8" "$md_width_awk" 2>&1); then
+  case "$md_ctl" in
+    *":1:$md_ctl_line") ;;
+    *) md_ctl_err="check-patterns: $md_awk_id, did not report the over-width control line - failing closed" ;;
+  esac
+else
+  md_ctl_err="check-patterns: Markdown line-width scan errored ($md_awk_id, on the over-width control line) - failing closed"
+fi
+if [ -n "$md_ctl_err" ]; then
+  [ -z "$md_ctl" ] || _err "$md_ctl"
+  _err "$md_ctl_err"
+  bad=1; fatal=1
+elif out=$(find "${prose[@]}" -type f -name '*.md' \
+    -exec env LC_ALL="$md_awk_lc" "$md_awk_run" -v W="$md_width" -v WANT_U8="$md_want_u8" "$md_width_awk" {} + 2>&1); then
   if [ -n "$out" ]; then
     _err "$out" \
       "check-patterns: a Markdown prose line over $md_width columns - rewrap the paragraph (a table row, heading, fenced block, HTML line, or a line holding one unbreakable URL, code span or link is exempt)"
