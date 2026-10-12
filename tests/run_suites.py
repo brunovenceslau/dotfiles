@@ -11,31 +11,37 @@ and then execs this file with $(TEST_FILES), so the scrub has happened before
 any suite starts and a signal sent to the recipe reaches this process, not a
 shell waiting on it. What it does, in order:
 
-  - makes ONE scratch root, `mktemp -d` style (mode 0700, a fresh name, never
-    a fixed one in a shared TMPDIR that another user could pre-create) under
-    $TMPDIR (or /tmp when it is unset or empty), resolved to its absolute
-    physical path,
-    holding `real/` and a symlink `link -> real`. A relative link target, so a
-    relative $TMPDIR cannot leave it dangling. Each suite gets its own
-    directory `link/<n>` as TMPDIR: behind a symlink, as macOS's /var ->
-    /private/var is, so a path assumption that only breaks there fails on
-    Linux too, and private, so two suites running at once can never collide
-    on a temp name. Any setup error fails closed before a suite runs;
-  - runs every suite under `bash`, at most JOBS at a time, each in its own
-    session (so its process group can be signalled as one), stdin from
-    /dev/null (suites running at once cannot share a terminal), stdout and
-    stderr into one log file per suite, outside every suite's TMPDIR;
+  - makes ONE scratch root under $TMPDIR (or /tmp when it is unset or empty),
+    `mktemp -d` style: mode 0700 and a fresh name, never a fixed one in a
+    shared TMPDIR that another user could pre-create. The root is resolved to
+    its absolute physical path and holds `real/` and a symlink `link -> real`,
+    whose target is relative, so a relative $TMPDIR cannot leave it dangling.
+    Each suite gets its own directory `link/<n>` as TMPDIR: behind a symlink,
+    as macOS's /var -> /private/var is, so a path assumption that only breaks
+    there fails on Linux too, and private, so two suites running at once can
+    never collide on a temp name. Any setup error fails closed before a suite
+    runs;
+  - runs every suite as `bash -- <suite>`, at most JOBS at a time, each in a
+    session of its own (so its process group can be signalled as one), stdin
+    from /dev/null (suites running at once cannot share a terminal), stdout
+    and stderr into one log file per suite, outside every suite's TMPDIR. A
+    `start <suite>` line says when each one starts, so a suite that hangs
+    until a CI timeout can still be named;
   - prints each suite's log as one block when it ends, opened by
     `run <suite>` and closed by a `done <suite>:` line with its verdict, its
-    wall time and its peak RSS, so the output of suites running at once never
-    interleaves;
+    wall time and a peak RSS, so the output of suites running at once never
+    interleaves. When a suite's main process ends, whatever it left running
+    in its process group is killed;
   - keeps going past a failure, prints every suite's time slowest first, and
     ends with `test: all N test files passed`, or with `test: FAILED:` naming
     every failed suite on stderr and exit 1;
-  - on HUP, INT or TERM, signals every running suite's process group (TERM,
-    then KILL after a grace period), removes the scratch root, and exits
-    128+N (129, 130, 143), the codes a shell trap gives, which make reports
-    as "Error N".
+  - on HUP, INT or TERM, signals every running suite's process group with
+    TERM, then with KILL once each group's main process has exited or the
+    grace period is over (a second signal skips the rest of the grace
+    period). Each stopped suite's block is printed with an INTERRUPTED
+    verdict, the scratch root is removed, and the exit is 128+N (129, 130,
+    143), the codes a shell trap gives, which make reports as "Error N". A
+    process that left its suite's group (setsid, a daemon) is out of reach.
 
 A suite that must not run alongside any other says so with a line that is
 exactly SERIAL_MARK (below). Serial suites run first, one at a time, with
@@ -57,8 +63,9 @@ import time
 
 # The memory one running suite is budgeted, in MiB. A suite is a process tree
 # (bash, then zsh, git, python3, gawk, gitleaks or reuse under it), and the
-# peak RSS each `done` line prints is the largest SINGLE process of that tree,
-# never the sum. Measured on Linux (2026-10-12): the largest peak was 303 MiB
+# peak RSS each `done` line prints is that of the largest single process
+# among the suite's main process and the descendants it waited for, never a
+# sum. Measured on Linux (2026-10-12): the largest peak was 303 MiB
 # (tests/check_patterns_test.sh), the next 130 MiB, most suites under 20 MiB,
 # and all 60 suites at 10 at a time drew MemAvailable down by about 350 MiB in
 # total. The budget sits above the largest single peak, so even a pool of only
@@ -68,18 +75,43 @@ SUITE_MEMORY_MIB = 384
 # A suite holding this exact line runs alone. A comment, so bash ignores it.
 SERIAL_MARK = "# run_suites: serial"
 
-# How long a running suite gets to exit after TERM before it is KILLed.
+# How long a stopped suite gets to exit after TERM before its group is
+# KILLed. RUN_SUITES_GRACE_SECONDS overrides it, so the runner's own test can
+# prove the escalation without waiting this long.
 GRACE_SECONDS = 5.0
+
+# How long a KILLed suite's main process may take to be reaped. One in
+# uninterruptible sleep (a dead network mount) would block a plain wait
+# forever; past this bound it is left behind and named.
+REAP_SECONDS = 5.0
 
 # How often the scheduler looks for a finished suite or a pending signal.
 POLL_SECONDS = 0.05
 
 EXIT_ON_SIGNAL = {signal.SIGHUP: 129, signal.SIGINT: 130, signal.SIGTERM: 143}
 
+# waitid(WNOWAIT) sees that a main process exited while leaving it a zombie,
+# so its pid, and with it the group id, cannot be reused while the group is
+# KILLed. Without it the group is KILLed right after the reap, which leaves a
+# window of a few microseconds for a reuse.
+HAVE_WAITID = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
+
+
+def emit(stream, text):
+    """Write TEXT to STREAM as bytes. A suite path may not be valid UTF-8 (it
+    came from argv through surrogateescape), and printing it must not raise."""
+    stream.flush()
+    stream.buffer.write(os.fsencode(text))
+    stream.buffer.flush()
+
 
 def err(msg):
-    print("ERROR: test: %s - failing closed" % msg, file=sys.stderr)
+    emit(sys.stderr, "ERROR: test: %s - failing closed\n" % msg)
     return 1
+
+
+def plural(n, word):
+    return "%d %s%s" % (n, word, "" if n == 1 else "s")
 
 
 def cpu_count():
@@ -152,11 +184,21 @@ def job_count():
         return int(raw), "TEST_JOBS=%s" % raw
     cpus, avail = cpu_count(), available_memory()
     if avail is None:
-        how = "%d CPUs, available memory unknown" % cpus
+        how = "%s, available memory unknown" % plural(cpus, "CPU")
     else:
-        how = "%d CPUs, %d MiB available at %d MiB per suite" % (
-            cpus, avail // (1024 * 1024), SUITE_MEMORY_MIB)
+        how = "%s, %d MiB available at %d MiB per suite" % (
+            plural(cpus, "CPU"), avail // (1024 * 1024), SUITE_MEMORY_MIB)
     return pick_jobs(cpus, avail), how
+
+
+def grace_seconds():
+    """(seconds, None), or (None, an error)."""
+    raw = os.environ.get("RUN_SUITES_GRACE_SECONDS", "")
+    if not raw:
+        return GRACE_SECONDS, None
+    if not re.fullmatch(r"[0-9]{1,3}(\.[0-9]{1,3})?", raw):
+        return None, "RUN_SUITES_GRACE_SECONDS must be a number of seconds below 1000, got %r" % raw
+    return float(raw), None
 
 
 def is_serial(path):
@@ -194,14 +236,37 @@ def remove_tree(path):
     try:
         shutil.rmtree(path)
     except OSError as e:
-        print("WARN: test: could not remove the scratch root %s: %s" % (path, e),
-              file=sys.stderr)
+        emit(sys.stderr, "WARN: test: could not remove the scratch root %s: %s\n" % (path, e))
 
 
-def peak_rss_mib(ru):
+def peak_rss_mib(ru, platform=sys.platform):
     # ru_maxrss is KiB on Linux and bytes on macOS.
-    kib = ru.ru_maxrss // 1024 if sys.platform == "darwin" else ru.ru_maxrss
+    kib = ru.ru_maxrss // 1024 if platform == "darwin" else ru.ru_maxrss
     return kib // 1024
+
+
+def kill_group(pgid, sig):
+    # ESRCH: the group is already empty. EPERM: macOS refuses a signal to a
+    # group whose only member left is a zombie. Neither leaves anything to stop.
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        pass
+
+
+class Stop:
+    """What the signal handler records. Only flags: the scheduler acts on
+    them between steps, so a signal can never land between a fork and the
+    bookkeeping of the child it made."""
+
+    def __init__(self):
+        self.signum = None
+        self.count = 0
+
+    def handler(self, signum, _frame):
+        if self.signum is None:
+            self.signum = signum
+        self.count += 1
 
 
 class Run:
@@ -218,20 +283,15 @@ class Run:
 
 
 class Runner:
-    def __init__(self, suites, jobs):
-        self.jobs = jobs
+    def __init__(self, suites, jobs, grace, stop):
+        self.jobs = min(jobs, len(suites))
+        self.grace = grace
+        self.stop = stop
         width = len(str(len(suites)))
         self.runs = [Run(str(i).zfill(width), p, is_serial(p))
                      for i, p in enumerate(suites, 1)]
         self.root = None
-        self.signum = None
         self.running = []
-
-    def on_signal(self, signum, _frame):
-        # Only a flag: the scheduler acts on it between steps, so a signal can
-        # never land between a fork and the bookkeeping of the child it made.
-        if self.signum is None:
-            self.signum = signum
 
     def setup(self):
         parent = os.environ.get("TMPDIR") or "/tmp"
@@ -258,70 +318,123 @@ class Runner:
     def launch(self, run):
         env = dict(os.environ, TMPDIR=self.tmpdir(run))
         run.log = open(os.path.join(self.root, "logs", run.index + ".log"), "wb")
+        try:
+            # `--`: a suite path starting with `-` is a file, never an option.
+            run.proc = subprocess.Popen(
+                ["bash", "--", run.path], stdin=subprocess.DEVNULL, stdout=run.log,
+                stderr=subprocess.STDOUT, env=env, start_new_session=True,
+            )
+        except BaseException:
+            run.log.close()
+            raise
         run.start = time.monotonic()
-        run.proc = subprocess.Popen(
-            ["bash", run.path], stdin=subprocess.DEVNULL, stdout=run.log,
-            stderr=subprocess.STDOUT, env=env, start_new_session=True,
-        )
         self.running.append(run)
+        emit(sys.stdout, "start %s\n" % run.path)
+
+    def exited(self, run):
+        """True once RUN's main process has exited, leaving it unreaped."""
+        if not HAVE_WAITID:
+            return False
+        try:
+            return os.waitid(os.P_PID, run.proc.pid,
+                             os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except ChildProcessError:
+            return True
+
+    def collect(self, run, block):
+        """Reap RUN's main process; False when it has not exited yet."""
+        try:
+            pid, status, ru = os.wait4(run.proc.pid, 0 if block else os.WNOHANG)
+        except ChildProcessError:
+            pid, status, ru = run.proc.pid, 255 << 8, None
+        if pid == 0:
+            return False
+        # wait4, not Popen.wait: its rusage is the peak RSS the `done` line
+        # prints. returncode is set by hand so Popen never waits again.
+        run.proc.returncode = run.code = os.waitstatus_to_exitcode(status)
+        run.seconds = time.monotonic() - run.start
+        run.rss = peak_rss_mib(ru) if ru is not None else 0
+        run.log.close()
+        return True
 
     def reap(self):
-        """Collect every suite that has ended; returns them in end order."""
+        """Collect every suite that has ended; returns them in end order.
+        What a suite left running in its group is killed first."""
         done = []
         for run in list(self.running):
-            # wait4, not Popen.poll: its rusage is the peak RSS the `done`
-            # line prints. returncode is set by hand so Popen never waits again.
-            try:
-                pid, status, ru = os.wait4(run.proc.pid, os.WNOHANG)
-            except ChildProcessError:
-                pid, status, ru = run.proc.pid, 255 << 8, None
-            if pid == 0:
-                continue
-            run.proc.returncode = run.code = os.waitstatus_to_exitcode(status)
-            run.seconds = time.monotonic() - run.start
-            run.rss = peak_rss_mib(ru) if ru is not None else 0
-            run.log.close()
+            if HAVE_WAITID:
+                if not self.exited(run):
+                    continue
+                kill_group(run.proc.pid, signal.SIGKILL)
+                self.collect(run, block=True)
+            else:
+                if not self.collect(run, block=False):
+                    continue
+                kill_group(run.proc.pid, signal.SIGKILL)
             self.running.remove(run)
             done.append(run)
         return done
 
-    def report(self, run):
-        out = sys.stdout.buffer
-        out.write(("run %s\n" % run.path).encode())
-        with open(run.log.name, "rb") as f:
-            body = f.read()
-        out.write(body)
+    def report(self, run, verdict=None):
+        if verdict is None:
+            if run.code == 0:
+                verdict = "ok"
+            elif run.code is None:
+                verdict = "FAILED (never reaped)"
+            elif run.code < 0:
+                verdict = "FAILED (killed by signal %d)" % -run.code
+            else:
+                verdict = "FAILED (exit %d)" % run.code
+        try:
+            with open(run.log.name, "rb") as f:
+                body = f.read()
+        except OSError as e:
+            body = ("(its output could not be read: %s)\n" % e).encode()
         if body and not body.endswith(b"\n"):
-            out.write(b"\n")
-        if run.code == 0:
-            verdict = "ok"
-        elif run.code < 0:
-            verdict = "FAILED (killed by signal %d)" % -run.code
-        else:
-            verdict = "FAILED (exit %d)" % run.code
-        out.write(("done %s: %s in %.1fs, peak RSS %d MiB\n"
-                   % (run.path, verdict, run.seconds, run.rss)).encode())
+            body += b"\n"
+        out = sys.stdout.buffer
+        sys.stdout.flush()
+        out.write(os.fsencode("run %s\n" % run.path))
+        out.write(body)
+        out.write(os.fsencode("done %s: %s in %.1fs, peak RSS %d MiB\n"
+                              % (run.path, verdict, run.seconds, run.rss)))
         out.flush()
 
     def stop_all(self):
-        """TERM every running suite's group, then KILL what is left."""
-        for run in self.running:
-            try:
-                os.killpg(run.proc.pid, signal.SIGTERM)
-            except OSError:
-                pass
-        deadline = time.monotonic() + GRACE_SECONDS
-        while self.running and time.monotonic() < deadline:
-            self.reap()
+        """TERM every running suite's group, KILL each once its main process
+        has exited or the grace period is over, and reap them. Returns the
+        suites it stopped."""
+        stopped, self.running = self.running, []
+        if not stopped:
+            return []
+        for run in stopped:
+            kill_group(run.proc.pid, signal.SIGTERM)
+        # Main processes stay unreaped zombies until their group has had its
+        # KILL, so no group id can be reused in between.
+        deadline = time.monotonic() + self.grace
+        while time.monotonic() < deadline and self.stop.count < 2:
+            if HAVE_WAITID and all(self.exited(r) for r in stopped):
+                break
             time.sleep(POLL_SECONDS)
-        for run in self.running:
-            try:
-                os.killpg(run.proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            run.proc.wait()
+        for run in stopped:
+            kill_group(run.proc.pid, signal.SIGKILL)
+        pending = list(stopped)
+        deadline = time.monotonic() + REAP_SECONDS
+        while pending:
+            pending = [r for r in pending if not self.collect(r, block=False)]
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(POLL_SECONDS)
+        for run in pending:
             run.log.close()
-        self.running = []
+            emit(sys.stderr, "WARN: test: %s (pid %d) did not exit after KILL; left behind\n"
+                 % (run.path, run.proc.pid))
+        return stopped
+
+    def abort(self, why):
+        """Stop every running suite and print each one's block."""
+        for run in self.stop_all():
+            self.report(run, "INTERRUPTED (%s)" % why)
 
     def schedule(self):
         """Run every suite; returns the exit code."""
@@ -330,11 +443,11 @@ class Runner:
         # before the pool has started and a drain of it anywhere later.
         pending = [r for r in self.runs if r.serial] + [r for r in self.runs if not r.serial]
         while pending or self.running:
-            if self.signum is not None:
+            if self.stop.signum is not None:
                 return self.interrupted()
             for run in self.reap():
                 self.report(run)
-            while pending and self.signum is None:
+            while pending and self.stop.signum is None:
                 nxt = pending[0]
                 serial_busy = any(r.serial for r in self.running)
                 if serial_busy or len(self.running) >= self.jobs:
@@ -346,57 +459,67 @@ class Runner:
                     self.launch(nxt)
                 except OSError as e:
                     err("could not start %s (%s)" % (nxt.path, e))
-                    self.stop_all()
+                    self.abort("the run stopped: a suite could not start")
                     return 1
             time.sleep(POLL_SECONDS)
-        if self.signum is not None:
+        if self.stop.signum is not None:
             return self.interrupted()
         return self.summary(time.monotonic() - started)
 
     def interrupted(self):
-        self.stop_all()
-        name = signal.Signals(self.signum).name
-        print("test: interrupted by %s, every running suite stopped" % name,
-              file=sys.stderr)
-        return EXIT_ON_SIGNAL[self.signum]
+        name = signal.Signals(self.stop.signum).name
+        self.abort("by %s" % name)
+        emit(sys.stderr, "test: interrupted by %s; every running suite's process group "
+             "was stopped (a process that left its group is out of reach)\n" % name)
+        return EXIT_ON_SIGNAL[self.stop.signum]
 
     def summary(self, wall):
-        print("test: suite times, slowest first:")
+        lines = ["test: suite times, slowest first:\n"]
         for run in sorted(self.runs, key=lambda r: r.seconds, reverse=True):
-            print("  %7.1fs  %s" % (run.seconds, run.path))
-        print("test: wall time %.1fs, %d at a time" % (wall, self.jobs))
+            lines.append("  %7.1fs  %s\n" % (run.seconds, run.path))
+        lines.append("test: wall time %.1fs, %d at a time\n" % (wall, self.jobs))
+        emit(sys.stdout, "".join(lines))
         failed = [r.path for r in self.runs if r.code != 0]
-        sys.stdout.flush()
         if failed:
-            print("test: FAILED: %s" % " ".join(failed), file=sys.stderr)
+            emit(sys.stderr, "test: FAILED: %s\n" % " ".join(failed))
             return 1
-        print("test: all %d test files passed" % len(self.runs))
+        n = len(self.runs)
+        emit(sys.stdout, "test: all %d test files passed\n" % n if n != 1
+             else "test: 1 test file passed\n")
         return 0
 
 
 def main(argv):
+    # Handlers first: reading the memory can take a while (vm_stat), and a
+    # Ctrl-C then must still end the run with its own exit code.
+    stop = Stop()
+    for sig in EXIT_ON_SIGNAL:
+        signal.signal(sig, stop.handler)
     if not argv:
-        print("test: no tests found")
+        # Not a failure: TEST_FILES is a wildcard, empty only in a tree with
+        # no suites, and the recipe has always said so and exited 0.
+        emit(sys.stdout, "test: no tests found\n")
         return 0
     jobs, how = job_count()
     if jobs is None:
         return err(how)
-    runner = Runner(argv, jobs)
-    for sig in EXIT_ON_SIGNAL:
-        signal.signal(sig, runner.on_signal)
+    grace, problem = grace_seconds()
+    if grace is None:
+        return err(problem)
+    if stop.signum is not None:
+        return EXIT_ON_SIGNAL[stop.signum]
+    runner = Runner(argv, jobs, grace, stop)
     try:
         rc = runner.setup()
         if rc == 0:
             serial = sum(1 for r in runner.runs if r.serial)
-            print("test: %d suites (%d serial), %d at a time (%s)"
-                  % (len(runner.runs), serial, jobs, how))
-            sys.stdout.flush()
+            emit(sys.stdout, "test: %s (%d serial), %d at a time (%s)\n"
+                 % (plural(len(runner.runs), "suite"), serial, runner.jobs, how))
             rc = runner.schedule()
         return rc
     finally:
-        # Runs on every path, a failed setup and a signal included. A second
-        # signal during cleanup only sets the flag again, so it cannot cut
-        # the removal short.
+        # Runs on every path, a failed setup and an exception included. A
+        # signal during cleanup only sets a flag, so it cannot cut it short.
         runner.stop_all()
         if runner.root is not None:
             remove_tree(runner.root)

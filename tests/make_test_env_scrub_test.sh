@@ -162,8 +162,16 @@ case "${TMPDIR:-}" in
   /*) ;;
   *) echo "NOT-ABSOLUTE: TMPDIR=${TMPDIR:-unset}"; exit 7 ;;
 esac
-# Behind a link, as macOS's /var/folders/... is: the physical path differs.
-[ "$(cd -P "$TMPDIR" && pwd -P)" != "$TMPDIR" ] || { echo "NOT-BEHIND-A-LINK: TMPDIR=$TMPDIR"; exit 5; }
+# Behind a link, as macOS's /var/folders/... is: some component of the path is
+# a symlink. Checked component by component, never by comparing spellings: a
+# plain directory written `plain/`, `plain//` or `plain/.` differs from its
+# physical path too.
+p="$TMPDIR"; linked=""
+while [ -n "$p" ] && [ "$p" != / ]; do
+  [ ! -L "$p" ] || linked="$p"
+  p="$(dirname "$p")"
+done
+[ -n "$linked" ] || { echo "NOT-BEHIND-A-LINK: TMPDIR=$TMPDIR"; exit 5; }
 d="$(mktemp -d "$TMPDIR/probe.XXXXXX")"
 phys="$(cd -P "$d" && pwd -P)"
 rm -rf "$d"
@@ -172,6 +180,14 @@ case "$phys" in
 esac
 echo "TMPDIR LINK OK"
 EOF
+# Positive control: the probe refuses a plain directory however it is
+# spelled. Built from $work's physical path, since $work itself sits behind
+# the link when this file runs under `make test`.
+plainp="$(cd -P "$work" && pwd -P)/plainp"; mkdir -p "$plainp"
+for spelled in "$plainp" "$plainp/" "$plainp//" "$plainp/."; do
+  rc=0; TMPDIR="$spelled" bash "$tprobe" > "$work/_last_out" 2>&1 || rc=$?
+  [ "$rc" = 5 ] && ok || fail "test bug: the TMPDIR probe must refuse the plain directory '$spelled' (rc $rc): $(last)"
+done
 rm -rf "$work/tmp-parent"; mkdir -p "$work/tmp-parent"
 rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$tprobe")"
 [ "$rc" = 0 ] && ok || fail "a suite under 'make test' must see TMPDIR behind a symlink (rc $rc): $(last)"

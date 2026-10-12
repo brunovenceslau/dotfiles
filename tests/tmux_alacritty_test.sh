@@ -19,7 +19,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 pass=0; ck() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); else fail "$1: got [$2] want [$3]"; fi; }
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/tmux_alacritty_test.XXXXXX")"
-trap 'tmux -L t16test kill-server 2>/dev/null || true; rm -rf "$work"' EXIT INT TERM
+# A private socket, never a fixed name (`-L`): every run of this suite would
+# share that one server, so two runs at once (make test in two worktrees, or
+# copies of the suite in tests/run_suites.py's pool) would kill each other's.
+# Its own short directory under /tmp, not under $work: a unix socket path is
+# capped by sun_path (104 bytes on macOS, 108 on Linux) and a long $TMPDIR
+# overflows it, as in tests/tmux_status_test.sh.
+sockdir="$(mktemp -d /tmp/t16sock.XXXXXX)"
+sock="$sockdir/s"
+trap 'tmux -S "$sock" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT INT TERM
 
 # --- the .local layers are gitignored, the .example templates are
 # NOT - a broken negation would let a host's .local get committed and PUBLISHED.
@@ -85,16 +93,16 @@ if command -v tmux >/dev/null 2>&1; then
   # no sleep. Capped so a wedged server can't hang the suite.
   wait_dead() {
     local n=0
-    while tmux -L t16test list-sessions >/dev/null 2>&1; do
+    while tmux -S "$sock" list-sessions >/dev/null 2>&1; do
       n=$((n + 1)); [ "$n" -ge 2000 ] && break
     done
   }
   # helper: start a server from the conf, read a global option, kill it
   opt() {  # $1 = option name (e.g. @probe or prefix); echoes its value
-    tmux -L t16test kill-server 2>/dev/null || true; wait_dead
-    tmux -L t16test -f "$conf" new-session -d 2>/dev/null
-    tmux -L t16test show-options -gv "$1" 2>/dev/null
-    tmux -L t16test kill-server 2>/dev/null || true
+    tmux -S "$sock" kill-server 2>/dev/null || true; wait_dead
+    tmux -S "$sock" -f "$conf" new-session -d 2>/dev/null
+    tmux -S "$sock" show-options -gv "$1" 2>/dev/null
+    tmux -S "$sock" kill-server 2>/dev/null || true
   }
 
   # 1. parses cleanly and applies base settings (prefix C-a, secondary prefix C-b)
@@ -113,9 +121,9 @@ if command -v tmux >/dev/null 2>&1; then
   # the CI legs while passing locally.) Prove -q is LOAD-BEARING: the real conf
   # (with -q) is clean; a copy WITHOUT -q reports "No such file or directory".
   cfg_err() {  # $1 = conf, $2 = pattern; echoes the pattern if it shows in the config-load output
-    tmux -L t16test kill-server 2>/dev/null || true; wait_dead
-    tmux -L t16test -f "$1" -C new-session -d </dev/null 2>&1 | tr -d '\r' | grep -o "$2" | sed -n 1p
-    tmux -L t16test kill-server 2>/dev/null || true
+    tmux -S "$sock" kill-server 2>/dev/null || true; wait_dead
+    tmux -S "$sock" -f "$1" -C new-session -d </dev/null 2>&1 | tr -d '\r' | grep -o "$2" | sed -n 1p
+    tmux -S "$sock" kill-server 2>/dev/null || true
   }
   rm -f "$local_conf"
   ck "with -q, a missing .local is silent" "$(cfg_err "$conf" 'No such file or directory')" ""

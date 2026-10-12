@@ -105,7 +105,7 @@ in parity by construction. Run `make local-ci` before every push.
 | `make check-patterns` | `bin/check-patterns` | No `curl` or `wget` download is piped, substituted or process-substituted into a shell on the same line (see the rule for its limits), and the shell, config and prose surfaces keep the portability, safety and house-style rules listed in [What `make check-patterns` checks](#what-make-check-patterns-checks). |
 | `make check-patterns-gawk` | `python3 -I tests/check_patterns_gawk.py`, which runs `bin/check-patterns` with `CHECK_PATTERNS_AWK` set to the `gawk` on PATH and `CHECK_PATTERNS_AWK_LC_ALL` to the first of `en_US.UTF-8` and `C.UTF-8` under which it counts characters | The Markdown width check also passes on an awk that counts characters. The other legs run an awk that counts bytes, so this is the only run of the character-counting path on a real awk. Prints one verdict line, `PASS` or `SKIP`: it skips when `python3`, `gawk`, or a locale where `gawk` counts characters is missing, and fails instead under `STRICT=1`. `local-ci` runs it from its summary, so that line is the summary's. `tests/check_patterns_gawk_test.sh` holds the fixtures. |
 | `make py-syntax` | `compile()` over every tracked and untracked-but-not-ignored `.py` file in the whole checkout, from whichever subdirectory it runs, with git's local environment variables unset | Every `.py` file parses, without writing a `__pycache__`. A listed path must be a regular file (never a symlink to a device node or a FIFO), must resolve under the checkout's toplevel and not into a git directory (the checkout's `.git`, a nested repository's, a separate git dir, or any directory shaped like one), and must be at most 1 MiB (`PY_SYNTAX_MAX_BYTES`); anything else is refused before it is read. The file is then opened without following a final symlink and without blocking, and must still be the same regular file. A `GIT_DIR` or `GIT_WORK_TREE` inherited from a git hook cannot point the scan at another tree or shrink it to a subdirectory. Fails closed (not a skip) if `git rev-parse` or `git ls-files` errors OR warns on stderr (e.g. an unreadable directory), or if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. Needs git 2.31 or later; an older git fails closed with a message saying so. |
-| `make test` | `python3 -I tests/run_suites.py` over every `tests/*.sh`, with git's local environment variables unset: several suites at a time, each with its own `TMPDIR` behind a symlink | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. See [What `make test` does](#what-make-test-does). `TMPDIR` is a symlink to a scratch directory, as macOS's is, so a path assumption that only breaks there fails on Linux too. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
+| `make test` | `python3 -I tests/run_suites.py` over every `tests/*.sh`, with git's local environment variables unset: several suites at a time, each with its own `TMPDIR` behind a symlink | Unit coverage of the repository's own tooling. Runs all files and reports all failures, rather than stopping at the first. See [What `make test` does](#what-make-test-does). Each suite's `TMPDIR` is a directory of its own reached through a symlink, as macOS's is, so a path assumption that only breaks there fails on Linux too. A `GIT_DIR`, `GIT_WORK_TREE` or `GIT_INDEX_FILE` inherited from a git hook cannot steer a suite's own `git` calls at another repository. Fails closed, before any suite runs, if `git rev-parse --local-env-vars` fails or does not list `GIT_DIR` and `GIT_INDEX_FILE`. |
 | `make test-env-scrub` | a static read of the Makefile's `GIT_ENV_SCRUB` and the `test` and `py-syntax` recipes | `GIT_ENV_SCRUB` still asks git for its local environment variables, checks the list and unsets it, and both recipes expand it before their first `git` call or suite loop. `tests/make_test_env_scrub_test.sh` and `tests/py_syntax_test.sh` prove the behaviour itself. |
 | `make smoke` | `bin/smoke` | A fresh install into a scratch home works, an interactive shell starts cleanly, a re-run is a no-op, the dev gates are not linked onto `PATH`, and `--purge` leaves no trace except the documented machine-local `~/.config/git/config`. |
 | `make secret-scan` | `bin/secret-scan --git .` | No secret-shaped content in the tracked tree. |
@@ -423,7 +423,9 @@ python3 -I tests/linkcheck.py .
 `make test` unsets git's local environment variables and then hands every
 `tests/*.sh` to `tests/run_suites.py`, which:
 
-- runs each suite under `bash`, several at a time. `TEST_JOBS=N` (on the
+- runs each suite under `bash`, several at a time, and prints
+  `start tests/<suite>.sh` as each one starts, so a suite that hangs until
+  a CI timeout can still be named. `TEST_JOBS=N` (on the
   command line or in the environment) caps them at N, and `TEST_JOBS=1` runs
   them one at a time. Unset, the cap is the CPU count or the number of
   384 MiB budgets that fit in the available memory, whichever is smaller
@@ -436,13 +438,19 @@ python3 -I tests/linkcheck.py .
   behind a symlink fails on Linux too;
 - buffers each suite's output and prints it as one block when the suite
   ends: `run tests/<suite>.sh`, the output, then a `done` line with the
-  verdict, the time and the peak memory of its largest process. Suites end
-  in any order, so the blocks do too;
+  verdict, the time and a peak memory: that of the largest process among
+  the suite's main process and the descendants it waited for. Suites end in
+  any order, so the blocks do too. Whatever a suite leaves running in its
+  process group when its main process ends is killed;
 - keeps going past a failure, lists every suite's time slowest first, and
   ends with `test: all N test files passed`, or names every failed suite on
   stderr after `test: FAILED:` and exits 1;
-- on Ctrl-C, `HUP` or `TERM`, stops every running suite with its children,
-  removes the scratch root and exits 130, 129 or 143.
+- on Ctrl-C, `HUP` or `TERM`, sends `TERM` to every running suite's process
+  group, then `KILL` once the suite's main process has exited or after a
+  5-second grace period (a second Ctrl-C skips the rest of it). It prints
+  each stopped suite's output with an `INTERRUPTED` verdict, removes the
+  scratch root and exits 130, 129 or 143. A process that left its suite's
+  group (`setsid`, a daemon) is out of reach.
 
 A suite that must not run beside any other carries the line
 `# run_suites: serial`, with the reason under it. Serial suites run first,
@@ -454,9 +462,11 @@ plugins' `.zwc` files in place on a fresh checkout. A new suite that writes
 into the checkout, or into any fixed path outside its `TMPDIR`, needs the
 line too.
 
-Without `python3`, `make test` fails even when `STRICT` is unset: a run that
-tests nothing must never pass. `tests/run_suites_test.sh` holds the runner to
-all of this; `tests/make_test_env_scrub_test.sh` runs the recipe itself.
+Without `python3`, `make test` fails even when `STRICT` is unset: there are
+suites to run and none would, which must never pass. An empty suite list is
+not a failure: `test: no tests found`, exit 0. `tests/run_suites_test.sh`
+holds the runner to all of this; `tests/make_test_env_scrub_test.sh` runs
+the recipe itself.
 
 ### What `make smoke` does
 
@@ -1025,9 +1035,10 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Generate NUL bytes inside the principals field in the random part of the differential corpus | A NUL in the principals field is covered by fixed lines only: the `a@x,\x00b@y` vectors and the corpus' enumerated NUL positions | The next change to the corpus generator, or a new NUL shape found by hand |
 | Close the refspec-source LF forgery in the identity guard: a source holding an LF splits its ref line, and the first half can name any oid as one the remote holds, so the guard skips the commits behind it | Not closed (decided on 2026-10-09): only the pusher can do it, it is self-inflicted, and it is harder than `git push --no-verify`, which the guard already allows. The module docstring of `.githooks/commit_identity.py` states it, and `ref_lines()` cannot undo the split | The guard runs where the pusher is not trusted, such as CI or a server hook. Sketch of the fix: refuse an excluded oid that no remote-tracking ref reaches |
 | Split `lib/host_identity.py` into parts | One file (decided on 2026-10-11). A refutation found that a split buys little review relief (4 of 6 doctor commits also touched the core), adds about seven concepts, and opens a fail-open class in every consumer that reads the whole file. A split, if chosen, ships with: the concatenation of the parts and a coverage floor in every whole-file consumer, `rb` reads, ASCII-only parts, a gate that no name is bound twice, the parts list checked against `git ls-files`, and a byte-identity proof of the move | The doctor section passes 1500 lines (1133 on 2026-10-12), counted from its `# --- doctor: read-only checks` heading up to `def run(`: `awk '/^# --- doctor: read-only checks/{f=1} /^def run\(/{f=0} f' lib/host_identity.py \| wc -l` |
+| Isolate two `make test` runs in one checkout from each other | The suites of one run are isolated from each other, and runs in different checkouts share nothing. Two runs in the same checkout share its `.smoke/` and the plugins' `.zwc` files | Two runs in one checkout at once are needed |
+| Give each `make test` suite a time limit | No per-suite limit: a hung suite runs until it is interrupted, and the `start` line without a matching `done` names it | A hung suite eats the CI timeout |
 | Read a container's cgroup memory limit when `make test` picks its job count | The runner reads `MemAvailable` (Linux) or `vm_stat` (macOS), which a container with a memory limit may overstate | `make test` runs out of memory in a container, or CI moves into one |
 | Start the slowest suites first in `make test` | Suites start in file order. The slowest suite (`check_patterns_test.sh`) sorts early, so it starts with the first wave | The time summary shows the run ending well after its slowest suite, because that suite started late |
-| Isolate two `make test` runs on one machine from each other | One run's suites are isolated from each other. `tests/tmux_alacritty_test.sh` uses the fixed tmux socket name `t16test`, shared by every run of the same user | Two runs at once are needed, such as two worktrees gated in parallel |
 | Accept a socketpair as the stdin of the pre-push guard in `.githooks/commit_identity.py`, as well as git's pipe | Refused: the guard accepts only a pipe (`S_ISFIFO`) and stops with "stdin is not git's pipe" on anything else, so what is pushed is never guessed. No hook runner wired here hands over a socketpair | A hook runner that passes the ref lines on a socketpair is wired: accepting `S_ISSOCK` is then the change to make |
 | Lint that every allowed-signers line names exactly one principal | No deterministic lint yet (deferred on 2026-10-12). `docs/stacked-prs.md` requires one principal per line, because `git log --format=%GS` reports the first principal on the matching line, so a line shared with another principal can pass for a key that is not the maintainer's alone. A key listed on two lines yields the first principal `ssh-keygen` returns for the key, in file order, so the lint must also reject a key that appears on more than one line; that one-line-per-key half is written nowhere else yet. Today only review holds the one-principal half. The lint would be a gate on the `security-model` surface | The next change to the SSH signing setup or to the allowed-signers file |
 

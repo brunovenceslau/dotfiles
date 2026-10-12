@@ -374,8 +374,11 @@ py-syntax:
 #   instead of a shell that would wait for the whole pool before acting on it.
 #   The runner is found beside this Makefile ($(SELF)), the suites from the
 #   current directory, so `make -f <path>/Makefile test TEST_FILES=...` works from
-#   anywhere. No python3 fails closed even without STRICT=1: a `make test` that
-#   runs no suite must never look green.
+#   anywhere. That path is single-quoted, like '$(SELF)' in test-env-scrub: a
+#   Makefile path holding a quote or a space is not supported ($(dir) splits on
+#   spaces anyway). No python3 fails closed even without STRICT=1: there are
+#   suites to run and none would, which must never look green. (An empty
+#   TEST_FILES is different: nothing to run, `test: no tests found`, exit 0.)
 test:
 	@$(GIT_ENV_SCRUB) \
 	command -v python3 >/dev/null 2>&1 || { echo "ERROR: make test needs python3 to run its suites - failing closed" >&2; exit 1; }; \
