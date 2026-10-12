@@ -873,20 +873,26 @@ ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs
 # fast machine. Compare growth too, as below: each shape runs at 1x and 8x, a
 # linear scan costs about 8x to 10x (up to 17x under load), a quadratic one
 # 64x, so a ratio past 23 on the best of three runs, with the collector off,
-# separates them on any runner. The 5 ms floor keeps a very fast 1x run from
-# inflating the ratio.
+# separates them on any runner. The sizes are the largest the gate reads (8x
+# stays under MAX_FILE_BYTES, 1 MiB), so the 1x run of the cheapest shape still
+# takes about 7 ms; the 2 ms floor only keeps a timer blip from inflating the
+# ratio. The root is resolved first, as the gate does: TMPDIR may be a symlink
+# (`make test` makes it one), and Tree refuses a file reached through one.
 new_tree
 python3 -I -B - "$repo_root/tests" "$work/r" <<'PY' || fail "check_file must scale linearly on nested and unclosed destinations"
 import gc, os, subprocess, sys, time
 sys.path.insert(0, sys.argv[1])
 import linkcheck
-root = sys.argv[2]
+root = os.path.realpath(sys.argv[2])
 shapes = {
     "unclosed destination": lambda n: "[a](x" + "(" * n,
-    "32-deep destinations": lambda n: ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 40),
-    "33-deep heading": lambda n: ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 40),
+    "32-deep destinations": lambda n: ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 80),
+    "33-deep heading": lambda n: ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 80),
     "unclosed definition": lambda n: "[a]: x" + "(" * n,
-    "heading links with backticks": lambda n: "# [a](u`) `b` ![i](v`) `" * (n // 25),
+    "heading links with backticks": lambda n: "# [a](u`) `b` ![i](v`) `" * (n // 26),
+    # One link per line, many lines: the offset to line bisect behind
+    # Lines.start and Lines.of, which a linear scan per hit would make quadratic.
+    "one heading link per line": lambda n: "# [a](u`) `b`\n" * (n // 14),
 }
 
 def best(body):
@@ -908,8 +914,8 @@ def best(body):
 
 bad = []
 for name, make in shapes.items():
-    a, b = best(make(12500)), best(make(100000))
-    if b > 23 * max(a, 0.005):
+    a, b = best(make(125000)), best(make(1000000))
+    if b > 23 * max(a, 0.002):
         bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
 if bad:
     sys.exit("; ".join(bad))

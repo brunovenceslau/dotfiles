@@ -511,7 +511,9 @@ link-convention change.
   its `]`, as in `` [`a](u`) ``, where a span opens in the link text and takes
   the `](`. Any other heading link whose destination or title holds a
   backtick is reported like a body link, because a later backtick can pair
-  with it and hide it from the link pass.
+  with it and hide it from the link pass. Body and heading lines differ here:
+  a body `` [`a](gone.md`) here. `` is still reported (fail closed), while the
+  heading form is skipped when spans cover the brackets.
   A backtick in any other tag's quoted value is a known miss. An
   anchor into any other file, such as a `#L10` line anchor, is not checked.
 - A `https://github.com/brunovenceslau/dotfiles/blob/main/...` link is resolved

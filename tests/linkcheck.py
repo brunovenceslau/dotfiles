@@ -822,8 +822,10 @@ def backtick_links(prose, code_free, lines):
     covers its `[` or its `]`, as in `[`a](u`) here`, where the span opens in
     the link text and takes the `](`. Any other heading link is reported like
     a body one, because the link pass cannot see it when a later backtick
-    pairs with the one in its destination. A definition is read the same way
-    as a link, by REFDEF."""
+    pairs with the one in its destination. A body line is not read this way:
+    there `[`a](gone.md`) here.` is still reported (fail closed), while the
+    heading form of it is skipped because a span covers its brackets. A
+    definition is read the same way as a link, by REFDEF."""
     for m in REFDEF.finditer(prose):
         g = 2 if m.group(2) is not None else 3
         tail = prose[m.start(g):m.end()]
