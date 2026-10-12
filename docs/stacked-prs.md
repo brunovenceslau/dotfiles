@@ -29,7 +29,7 @@ allowed only while both conditions hold:
 1. `gh stack view` shows a stack number for the stack on GitHub. Linking is
    best-effort, so a stack that is not linked remotely falls back to the
    default: retarget every PR to `main`.
-2. The operator merges it as a stack: `gh stack merge --merge`, or the stacked
+2. The maintainer merges it as a stack: `gh stack merge --merge`, or the stacked
    PR's Merge button with **Create a merge commit**. That is one atomic
    operation, and GitHub retargets the remaining PRs as part of it.
 
@@ -124,22 +124,55 @@ child's pull request. Only the branch contents need the rebase.
 
 GitHub rebases the surviving PRs server-side, so the recipe above does not
 apply to them. Their commits are rewritten on the server, so check each
-survivor before trusting it:
+survivor before trusting it. GitHub's "verified" flag is not enough on its own:
+it is also true for a commit that GitHub signs with its own key, which is what a
+server-side rewrite can produce. The check below looks at the SIGNER, and a
+survivor commit signed by GitHub's own key counts as unsigned and is re-signed
+by step 5.
 
 1. `git fetch --all --prune`.
 2. Right after that fetch, and before any push moves the tracking ref, record
    each survivor's old tip with `git rev-parse origin/<branch>`. Run no other
-   fetch in between: the `--force-with-lease` below relies on that value.
-3. Verify every survivor commit as GitHub reports it, not only the tip
-   (`<baseRefName>` is the survivor's base branch, step 5):
+   fetch in between: the `--force-with-lease=<branch>:<old-tip>` pushes below
+   rely on that value.
+3. Verify every survivor commit, not only the tip (`<baseRefName>` is the
+   survivor's base branch, step 5). The primary check is local: git must verify
+   the signature against the allowed-signers file (`gpg.ssh.allowedSignersFile`,
+   see [the signing key page](signing-key.md)) and the signer must be the
+   maintainer. GitHub's flag is a second signal that must print `true`. The
+   subshell stops at the first bad commit and exits nonzero, and any gh error or
+   empty answer counts as bad:
 
    ```sh
-   for c in $(git rev-list origin/<baseRefName>..origin/<branch>); do
-     gh api "repos/<owner>/<repo>/commits/$c" --jq .commit.verification.verified
-   done                              # want: true for every commit
+   (
+     set -eu
+     me=$(git config user.email)     # the signer principal in allowed_signers
+     for c in $(git rev-list origin/<baseRefName>..origin/<branch>); do
+       st=$(git log -1 --format=%G? "$c")
+       who=$(git log -1 --format=%GS "$c")
+       if [ "$st" != G ] || [ "$who" != "$me" ]; then
+         echo "not signed by $me: $c ($st $who)" >&2; exit 1
+       fi
+       ok=$(gh api "repos/<owner>/<repo>/commits/$c" \
+         --jq .commit.verification.verified) || ok=
+       [ "$ok" = true ] || { echo "not verified by GitHub: $c" >&2; exit 1; }
+     done
+   )                                 # want: exit status 0
    ```
 
-4. Before each rebase, `git checkout -B <branch> origin/<branch>`.
+4. Before each rebase, refuse to continue if the local branch holds commits
+   that are not on the remote, because `git checkout -B` discards them. Then
+   check the branch out at the remote tip:
+
+   ```sh
+   if git show-ref --verify --quiet refs/heads/<branch> &&
+      [ -n "$(git rev-list origin/<branch>..<branch>)" ]; then
+     echo "<branch> has unpushed commits: stop and decide" >&2
+   else
+     git checkout -B <branch> origin/<branch>
+   fi
+   ```
+
 5. Work bottom-up. The lowest survivor whose commits fail verification is
    re-signed onto its own `baseRefName` (`main` for the lowest survivor, the
    lower survivor's branch above it). A plain rebase would say "up to date" and
@@ -147,7 +180,7 @@ survivor before trusting it:
 
    ```sh
    git -c commit.gpgsign=true rebase --force-rebase origin/<baseRefName> <branch>
-   git push --force-with-lease origin <branch>
+   git push --force-with-lease=<branch>:<old-tip> origin <branch>
    ```
 
 6. Each higher survivor is replayed onto the rewritten branch below it, cutting
@@ -155,11 +188,11 @@ survivor before trusting it:
 
    ```sh
    git -c commit.gpgsign=true rebase --onto origin/<lower-branch> <old-lower-tip> <branch>
-   git push --force-with-lease origin <branch>
+   git push --force-with-lease=<branch>:<old-tip> origin <branch>
    ```
 
    A survivor needs no rebase only when no survivor below it was rewritten.
-7. Re-run the signature verification on every survivor.
+7. Re-run the verification of step 3 on every survivor.
 
 `gh stack sync` and `gh stack rebase` also cascade-rebase a stack, but they are
 not part of this recipe: it needs the explicit signed commands above, and the
