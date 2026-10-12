@@ -1,3 +1,15 @@
+# SPDX-FileCopyrightText: 2018 Daniel Berg
+# SPDX-FileCopyrightText: 2018 Srcery Contributers
+# SPDX-FileCopyrightText: 2011 to Present Mark Badolato
+#
+# SPDX-License-Identifier: MIT
+
+# Srcery: palette from https://github.com/srcery-colors/srcery-terminal at
+# commit 4cd7d3d, in the layout of the Ghostty file bundled in
+# https://github.com/mbadolato/iTerm2-Color-Schemes at commit d3e95e4.
+# Downloaded from https://terminalcolors.com/downloads/ghostty/srcery-default.
+# See THIRD-PARTY-NOTICES.md.
+
 background = #1c1b19
 foreground = #fce8c3
 selection-background = #fce8c3

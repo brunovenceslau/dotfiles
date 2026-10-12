@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2021 Catppuccin
+#
+# SPDX-License-Identifier: MIT
+
+# Catppuccin Frappe, byte-for-byte themes/catppuccin-frappe.conf from
+# https://github.com/catppuccin/ghostty at commit b0b03cc.
+# See THIRD-PARTY-NOTICES.md.
+
 palette = 0=#51576d
 palette = 1=#e78284
 palette = 2=#a6d189

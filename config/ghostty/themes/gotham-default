@@ -1,3 +1,14 @@
+# SPDX-FileCopyrightText: 2014 Andrea Leopardi
+#
+# SPDX-License-Identifier: MIT
+
+# Gotham: the palette is the one in colors/gotham.vim of
+# https://github.com/whatyouhide/vim-gotham at commit 7e7eff4, laid out for
+# Ghostty by terminalcolors.com.
+# Downloaded from https://terminalcolors.com/downloads/ghostty/gotham-default.
+# The slot mapping is the site's own.
+# See THIRD-PARTY-NOTICES.md.
+
 background = #0c1014
 foreground = #99d1ce
 selection-background = #0a3749

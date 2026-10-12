@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2021 Catppuccin
+#
+# SPDX-License-Identifier: MIT
+
+# Catppuccin Latte, byte-for-byte themes/catppuccin-latte.conf from
+# https://github.com/catppuccin/ghostty at commit b0b03cc.
+# See THIRD-PARTY-NOTICES.md.
+
 palette = 0=#5c5f77
 palette = 1=#d20f39
 palette = 2=#40a02b

@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: 2021 Catppuccin
+#
+# SPDX-License-Identifier: MIT
+
+# Catppuccin Macchiato, byte-for-byte themes/catppuccin-macchiato.conf from
+# https://github.com/catppuccin/ghostty at commit b0b03cc.
+# See THIRD-PARTY-NOTICES.md.
+
 palette = 0=#494d64
 palette = 1=#ed8796
 palette = 2=#a6da95

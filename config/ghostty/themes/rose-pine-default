@@ -1,3 +1,13 @@
+# SPDX-FileCopyrightText: mvllow
+#
+# SPDX-License-Identifier: MIT
+
+# Rose Pine: palette from https://github.com/rose-pine/palette at
+# commit 92af52b, laid out for Ghostty by terminalcolors.com.
+# Downloaded from https://terminalcolors.com/downloads/ghostty/rose-pine-default.
+# The background, bright black and selection colours are the site's own.
+# See THIRD-PARTY-NOTICES.md.
+
 background = #1f1d2e
 foreground = #e0def4
 selection-background = #2f2c40

@@ -1,3 +1,14 @@
+# SPDX-FileCopyrightText: Pavel Pertsev
+# SPDX-FileCopyrightText: 2011 to Present Mark Badolato
+#
+# SPDX-License-Identifier: MIT
+
+# gruvbox light: palette of https://github.com/morhetz/gruvbox at commit
+# ef8864b; the same colours are in the Ghostty file of
+# https://github.com/mbadolato/iTerm2-Color-Schemes at commit d3e95e4.
+# Downloaded from https://terminalcolors.com/downloads/ghostty/gruvbox-light.
+# See THIRD-PARTY-NOTICES.md.
+
 background = #fbf1c7
 foreground = #3c3836
 selection-background = #3c3836
