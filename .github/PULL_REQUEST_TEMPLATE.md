@@ -25,7 +25,9 @@ not testable. "The gates are green" is not a verification. -->
 - [ ] Every commit is signed, and the subject is a Conventional Commit of 72
       characters or fewer. No trailers.
 - [ ] This pull request targets `main`. If it is stacked, the body says
-      "stacked on #N, review only the last K commits".
+      "stacked on #N, review only the last K commits". The exception is a
+      GitHub stack that `gh stack view` shows with a stack number and that is
+      merged as a stack, described in `docs/stacked-prs.md`.
 - [ ] Documentation that describes changed behaviour is updated in the same
       commit, and no claim in it is unsupported by the tree.
 - [ ] No em dash anywhere in the diff.

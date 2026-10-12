@@ -1005,7 +1005,8 @@ heredocs, `$#`/`${#v}`, a `#` inside a word).
 
 Large changes land as a chain of small pull requests. See
 [stacked pull requests](stacked-prs.md), which explains why every PR in a stack
-targets `main`.
+targets `main` by default, and the one exception (a GitHub stack merged as a
+stack).
 
 ## Cutting a release
 

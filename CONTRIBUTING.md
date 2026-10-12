@@ -122,16 +122,19 @@ shows.
 
 ## Pull requests
 
-- **Every pull request targets `main`.** A pull request opened with
-  `--base <another branch>` races that branch's deletion when the parent
-  merges, and losing the race closes it permanently: a closed pull request
-  cannot be retargeted or reopened. A pull request from a fork has no stack to
-  express: open one at a time against `main`; cross-fork stacks are not
-  supported.
+- **Every pull request targets `main`, with one maintainer exception.** A pull
+  request opened with `--base <another branch>` races that branch's deletion
+  when the parent merges, and losing the race closes it permanently: a closed
+  pull request cannot be retargeted or reopened. The exception is a GitHub
+  stack that `gh stack view` shows with a stack number and that the maintainer
+  merges as a stack; its conditions are in
+  [stacked pull requests](docs/stacked-prs.md). A pull request from a fork has
+  no stack to express: open one at a time against `main`; cross-fork stacks are
+  not supported.
 - **A large change pushed as branches in this repository can stack**, a chain
-  of small pull requests that still each target `main`, with the dependency
-  stated in the body as "stacked on #N, review only the last K commits". That
-  workflow, its reasoning and the re-sync commands are in
+  of small pull requests that by default each target `main`, with the
+  dependency stated in the body as "stacked on #N, review only the last K
+  commits". That workflow, its reasoning and the re-sync commands are in
   [stacked pull requests](docs/stacked-prs.md); it does not apply to a
   fork-based contribution.
 - **Both CI legs must be green**: `local-ci (macos-arm64)` and

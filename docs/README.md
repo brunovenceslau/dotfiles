@@ -38,4 +38,4 @@ Each page has one primary reader and one purpose.
 | Page | Reader | Covers |
 | --- | --- | --- |
 | [development.md](development.md) | A maintainer | The quality gates and what each proves (every `check-patterns` rule included), `STRICT=1`, CI, the GitHub repository settings and their drift check, the hard rules, common changes such as adding a config, bumping a plugin pin or changing the identity step, the maintainers' deferred decisions, cutting a release and which version number to bump, and lessons from past reviews. |
-| [stacked-prs.md](stacked-prs.md) | A maintainer landing a large change | Why every PR targets `main`, the workflow, re-syncing after a merge, keeping signatures through a rebase. |
+| [stacked-prs.md](stacked-prs.md) | A maintainer landing a large change | Why every PR targets `main` by default, the one GitHub stack exception, the workflow, re-syncing after a merge, keeping signatures through a rebase. |
