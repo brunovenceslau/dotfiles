@@ -3305,9 +3305,10 @@ class Doctor(object):
         # them (github_helpers()), and whether config.local sets gh: the
         # upgrade hands git the credential settings of the XDG config and of
         # the checkout's own config (install.sh, _do_upgrade), so a helper in
-        # ~/.gitconfig never reaches it. A helper is named by its program and the file
-        # that sets it (helper_program()), never by its whole value, which
-        # can hold a secret. One chain: each run prints one line here.
+        # ~/.gitconfig never reaches it. A helper is named by its program
+        # and the file that sets it (helper_program()), never by its whole
+        # value, which can hold a secret. One chain: each run prints one
+        # line here.
         host = self.host
         helpers, cleared, err = github_helpers()
         if err is not None:
@@ -3323,6 +3324,8 @@ class Doctor(object):
             # Its includes are followed: the upgrade reaches config.local
             # through the XDG config's [include], where git follows them too.
             local_helpers, _, lerr = github_helpers(host.config_local)
+            # A config.local git cannot read (a link to nothing) sets no
+            # helper: git ignores it too, so the gh below reads as outside it.
             local = local_helpers[0][1] if local_helpers and lerr is None else ""
         origin, value = helpers[0] if helpers else (None, "")
         uses_gh = gh_helper(value)

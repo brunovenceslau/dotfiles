@@ -2031,10 +2031,35 @@ def doctor_deps_units(mod, scratch):
             mod._unwinding = False
             # time.monotonic() is the system-wide monotonic clock on Linux
             # and macOS, so the sender's reading compares with this one's.
+            # The sender waits for an observable state, never a fixed
+            # sleep: a pidfile this run's stub wrote (a stale one from an
+            # earlier stub is removed first), then that pid showing as
+            # `sleep` in ps, which is gh-mute after its last exec, so gh
+            # has let go of its pipes and the signal lands in the reap's
+            # polling.
+            os.unlink(pidfile)
             killer = subprocess.Popen(
-                [sys.executable, "-I", "-c", "import os, signal, sys, time\ntime.sleep(0.3)\n"
-                 "print(repr(time.monotonic()), flush=True)\nos.kill(int(sys.argv[1]), signal.SIGTERM)\n",
-                 str(os.getpid())], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, preexec_fn=default_signals)
+                [sys.executable, "-I", "-c",
+                 "import os, signal, subprocess, sys, time\n"
+                 "end = time.monotonic() + 30\n"
+                 "pid = None\n"
+                 "while time.monotonic() < end:\n"
+                 "    try:\n"
+                 "        pid = int(open(sys.argv[2]).read())\n"
+                 "    except (OSError, ValueError):\n"
+                 "        pid = None\n"
+                 "    if pid is not None:\n"
+                 "        comm = subprocess.run(['ps', '-o', 'comm=', '-p', str(pid)], stdout=subprocess.PIPE,\n"
+                 "                              stdin=subprocess.DEVNULL).stdout.decode().strip()\n"
+                 "        if os.path.basename(comm) == 'sleep':\n"
+                 "            break\n"
+                 "    time.sleep(0.01)\n"
+                 "else:\n"
+                 "    sys.exit('gh-mute never reached exec sleep')\n"
+                 "print(repr(time.monotonic()), flush=True)\n"
+                 "os.kill(int(sys.argv[1]), signal.SIGTERM)\n",
+                 str(os.getpid()), pidfile], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                preexec_fn=default_signals)
             got, waited = None, None
             try:
                 mod.gh_token(os.path.join(ghdir, "gh-mute"))
@@ -2198,7 +2223,8 @@ GUARD_LOG = None
 
 def guard_host_tools(scratch):
     """Put a stub for each GUARDED tool first on PATH, a HOME of this run's
-    own, and none of the caller's tokens or agent."""
+    own, and none of the caller's tokens, agent or git configuration
+    variables."""
     global GUARD_LOG
     bindir = os.path.join(scratch, "guard-bin")
     os.mkdir(bindir)
@@ -2212,6 +2238,14 @@ def guard_host_tools(scratch):
     for k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_HOST", "GH_CONFIG_DIR",
               "SSH_AUTH_SOCK", "SSH_AGENT_PID", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
         os.environ.pop(k, None)
+    # git's own configuration channels: a caller's GIT_CONFIG_GLOBAL or
+    # GIT_CONFIG_COUNT pair would steer every git read of the run to the
+    # host's settings, so none survives (GIT_CONFIG_COUNT with its _KEY_<n>
+    # and _VALUE_<n> pairs, any n).
+    for k in [k for k in os.environ
+              if k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT")
+              or re.match(r"GIT_CONFIG_(KEY|VALUE)_[0-9]+$", k)]:
+        del os.environ[k]
     os.environ.update({"HOME": home, "PATH": bindir + os.pathsep + os.environ["PATH"]})
 
 
@@ -2226,7 +2260,16 @@ def guard_calls():
 
 def main(argv):
     module, scratch = argv
+    # What a caller may have set, which the guard must drop (checked below).
+    decoys = {"GIT_CONFIG_GLOBAL": "/nonexistent/global", "GIT_CONFIG_SYSTEM": "/nonexistent/system",
+              "GIT_CONFIG_PARAMETERS": "'user.name=decoy'", "GIT_CONFIG_COUNT": "1",
+              "GIT_CONFIG_KEY_0": "user.name", "GIT_CONFIG_VALUE_0": "decoy",
+              "GIT_CONFIG_KEY_12": "user.email", "GIT_CONFIG_VALUE_12": "decoy"}
+    os.environ.update(decoys)
     guard_host_tools(scratch)
+    check(not [k for k in decoys if k in os.environ],
+          "the guard drops the caller's git configuration variables (left: %r)"
+          % sorted(k for k in decoys if k in os.environ))
     with open(module, encoding="utf-8") as fh:
         source = fh.read()
     # The Python 3.9 floor (the macOS Command Line Tools python3): newer

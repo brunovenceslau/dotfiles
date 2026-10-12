@@ -2462,6 +2462,24 @@ doc; expect_rc 0 "doctor, gh first in config.local's list"; [ -z "$out" ] || fai
 git config --file "$local_cfg" --unset-all 'credential.https://github.com/.helper'
 # Another helper alone is fine: gh is not the only way to push.
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
+# config.local reaches git through the XDG config's [include], and its own
+# [include]s are followed too: gh set in a file config.local includes counts
+# as config.local setting it. Reading the file without --includes would call
+# that a missing helper.
+helper_cfg "$work/helper.inc"
+git config --file "$local_cfg" include.path "$work/helper.inc"
+doc; expect_rc 0 "doctor, gh in a file config.local includes"; [ -z "$out" ] || fail "doctor, gh in a file config.local includes: $out"
+git config --file "$local_cfg" --unset-all include.path
+rm -f "$work/helper.inc"
+# A config.local that is a link to nothing cannot be read: git ignores it, so
+# the helper in ~/.gitconfig is not in the file the upgrade reads.
+mv "$local_cfg" "$work/config.local.kept"
+ln -s "$work/nowhere" "$local_cfg"
+helper_cfg "$HOME/.gitconfig"
+doc; expect_rc 1 "doctor, config.local is a dangling link"
+has "doctor: credential helper: gh is the credential helper git uses for github.com, but $local_cfg does not set it, so dotfiles-upgrade" "doctor reads a dangling config.local as one that sets no helper"
+rm -f "$local_cfg" "$HOME/.gitconfig"
+mv "$work/config.local.kept" "$local_cfg"
 helper_cfg "$local_cfg" osxkeychain
 doc; expect_rc 0 "doctor, another helper"; [ -z "$out" ] || fail "doctor, another helper: $out"
 git config --file "$local_cfg" --unset-all 'credential.https://github.com.helper'
