@@ -28,18 +28,19 @@ export GIT_CEILING_DIRECTORIES="$work"
 
 # --- static: no recipe line splices STRICT ------------------------------------
 # Every spelling make would expand into shell text: $(STRICT), ${STRICT},
-# $(value STRICT) and a substitution reference such as $(STRICT:a=b). A `$`
-# starts a reference only when an EVEN number of `$` precede it (`$$` is a
-# literal dollar), so `x$$$(STRICT)` splices and `$$(STRICT)` does not; the
-# regex consumes the preceding `$` in pairs. `$${STRICT:-}` (the shell's own
+# $(value STRICT), ${value STRICT} and a substitution reference such as
+# $(STRICT:a=b). A `$` starts a reference only when an EVEN number of `$`
+# precede it (`$$` is a literal dollar), so `x$$$(STRICT)` splices and
+# `$$(STRICT)` does not; the regex consumes the preceding `$` in pairs. `$${STRICT:-}` (the shell's own
 # read) is not a splice. Comment lines may name it.
-splice_re='(^|[^$])(\$\$)*\$([({]|\([a-z]+ +)STRICT([)}]|:[^)}]*[)}])'
+splice_re='(^|[^$])(\$\$)*\$([({]|\([a-z]+ +|\{[a-z]+ +)STRICT([)}]|:[^)}]*[)}])'
 splices() { grep -nE -e "$splice_re" | grep -vE '^[0-9]+:[[:space:]]*#' || true; }
 spliced="$(splices < "$mk")"
 [ -z "$spliced" ] && ok || fail "a recipe splices STRICT into shell text: $spliced"
 # the pin must bite: each spelling is caught, the shell's own read is not
 for form in '[ -n "$(STRICT)" ]' '[ -n "${STRICT}" ]' '[ -n "$(value STRICT)" ]' 'x$(STRICT)' \
-  'x$(STRICT:a=b)' 'x${STRICT:%=%y}' 'x$$$(STRICT)' 'x$$$$$(STRICT)' 'x$$ $(STRICT)'; do
+  'x$(STRICT:a=b)' 'x${STRICT:%=%y}' 'x$$$(STRICT)' 'x$$$$$(STRICT)' 'x$$ $(STRICT)' \
+  '[ -n "${value STRICT}" ]'; do
   [ -n "$(printf '\t%s\n' "$form" | splices)" ] && ok || fail "the splice pin misses: $form"
 done
 # an even run of `$` is literal dollars, so none of these is a reference

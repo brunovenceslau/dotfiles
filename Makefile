@@ -368,10 +368,11 @@ py-syntax:
 # creates (mktemp -d, mode 0700), never at a name next to it in a shared TMPDIR
 # where another user could pre-create the name; one rm -rf of that directory
 # on exit removes both, and the signal traps exit so the EXIT trap runs. A
-# relative TMPDIR is made absolute (cd + pwd) before suites see it; tmp_root
-# keeps its old value if that fails, so the EXIT trap still removes the
-# directory. The link target is the relative name `real`, resolved against the
-# link's own directory: a target built from a relative tmp_root would dangle.
+# relative TMPDIR is made absolute (cd -P + pwd, CDPATH cleared) before suites
+# see it; tmp_root keeps its old value if that fails, so the EXIT trap still
+# removes the directory. The link target is the relative name `real`, resolved
+# against the link's own directory: a target built from a relative tmp_root
+# would dangle.
 test:
 	@if [ -n "$(strip $(TEST_FILES))" ]; then \
 	  $(GIT_ENV_SCRUB) \
@@ -379,7 +380,7 @@ test:
 	  trap '[ -z "$$tmp_root" ] || rm -rf "$$tmp_root"' EXIT; \
 	  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
 	  tmp_root="$$(mktemp -d "$${TMPDIR:-/tmp}/make-test-tmp.XXXXXX")" || { echo "ERROR: mktemp failed - failing closed" >&2; exit 1; }; \
-	  abs_root="$$(cd "$$tmp_root" && pwd)" || { echo "ERROR: could not resolve the TMPDIR directory - failing closed" >&2; exit 1; }; tmp_root="$$abs_root"; \
+	  abs_root="$$(CDPATH= cd -P -- "$$tmp_root" && pwd)" || { echo "ERROR: could not resolve the TMPDIR directory - failing closed" >&2; exit 1; }; tmp_root="$$abs_root"; \
 	  mkdir "$$tmp_root/real" && ln -s real "$$tmp_root/link" || { echo "ERROR: could not make the TMPDIR link - failing closed" >&2; exit 1; }; \
 	  export TMPDIR="$$tmp_root/link"; \
 	  failed=""; ran=0; \
