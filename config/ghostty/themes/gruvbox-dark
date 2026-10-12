@@ -7,7 +7,7 @@
 # ef8864b; the same colours are in the Ghostty file of
 # https://github.com/mbadolato/iTerm2-Color-Schemes at commit d3e95e4.
 # Downloaded from https://terminalcolors.com/downloads/ghostty/gruvbox-dark.
-# The selection colours are the site's own.
+# The selection pair is the site's choice of the upstream's colours.
 # See THIRD-PARTY-NOTICES.md.
 
 background = #282828

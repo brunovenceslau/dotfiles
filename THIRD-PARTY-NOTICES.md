@@ -201,7 +201,7 @@ by value (the 16 palette entries, background, foreground, cursor and selection
 colours) against the upstream files named below, fetched at the commit shown.
 
 The `catppuccin-*` files are the upstream's own Ghostty files, byte for byte
-in their colour lines (22 of 22 values), including its `split-divider-color`.
+in their colour lines (23 of 23 values), including its `split-divider-color`.
 The other six were downloaded from terminalcolors.com as
 `/downloads/ghostty/<name>`, and a re-download on 2026-10-12 was
 byte-identical to each file in the tree. That site's pages for these themes
@@ -211,12 +211,15 @@ the footer "(c) 2025 terminalcolors.com", and its `robots.txt` has
 upstreams below are therefore established by the colour values, not by any
 statement of the site.
 
-Where a value matches neither upstream it is the site's own choice, and the
-file's header says so. This repository makes no copyright claim for the site and
-none is made for those values here. They are: the slot mapping of
-`gotham-default` (the vim scheme has no terminal table); the selection colours
-of `gruvbox-dark`; the background, bright black and selection colours of both
-`rose-pine-*` files. `gruvbox-light` and `srcery-default` have none.
+Two cases are kept apart, and each file's header says which applies. A slot
+choice is the site's pick of which upstream colour fills a Ghostty slot: the
+slot mapping of `gotham-default` (the vim scheme has no terminal table), the
+selection pair of `gruvbox-dark`, and the background and bright black of both
+`rose-pine-*` files. The colours themselves are the upstream's. An invented
+value is in no upstream: only the two Rose Pine selection backgrounds
+(`#2f2c40`, `#f3eeea`). `gruvbox-light` and `srcery-default` have neither.
+This repository claims no copyright in those values, and records no claim by
+the site.
 
 ### Catppuccin
 
@@ -224,7 +227,7 @@ of `gruvbox-dark`; the background, bright black and selection colours of both
 - Commit: `b0b03ccee7ae8f16b13bd4fdfe267616defdb2b7`
 - Licence: MIT, `Copyright (c) 2021 Catppuccin` (its `LICENSE`, the same line
   as in `catppuccin/catppuccin` at `d09787dd98ca6fba08af5ef2ae94a7e09f17daca`)
-- Match: 22 of 22 values for each of `themes/catppuccin-frappe.conf`,
+- Match: 23 of 23 values for each of `themes/catppuccin-frappe.conf`,
   `-latte.conf`, `-macchiato.conf` and `-mocha.conf`. The Ghostty file bundled
   in `mbadolato/iTerm2-Color-Schemes` matches only 10 or 11 of 22 and is not
   the source.
@@ -236,7 +239,7 @@ of `gruvbox-dark`; the background, bright black and selection colours of both
 - Upstream: <https://github.com/whatyouhide/vim-gotham>
 - Commit: `7e7eff411fedada2b6cceb78059ed8a4a26d03ba`
 - Licence: MIT, `Copyright (c) 2014 Andrea Leopardi` (its `LICENSE.txt`)
-- Match: every non-greyscale colour in the file (`#0c1014`, `#11151c`,
+- Match: every colour in the file (`#0c1014`, `#11151c`,
   `#0a3749`, `#99d1ce`, `#c23127`, `#edb443`, `#4e5166`, `#195466`, `#33859e`,
   `#2aa889`) is a value in `colors/gotham.vim`. The vim scheme has no
   terminal-colour table, so the mapping onto Ghostty's 16 slots is the
@@ -307,10 +310,15 @@ holders are the lines each entry names. The text is identical in
 iTerm2-Color-Schemes `LICENSE` carries the same MIT text plus the collection
 paragraph quoted above.
 
+For gruvbox, which has no `LICENSE` file, the MIT notice is applied on the
+strength of `package.json` (author `Pavel Pertsev`, `"license": "MIT"`) and the
+README, as the gruvbox entry under "Palette credit" above records; the block
+below therefore lists no `Pavel Pertsev` line, because no upstream file states
+one.
+
 ```text
 Copyright (c) 2021 Catppuccin
 Copyright (c) 2014 Andrea Leopardi
-Copyright (c) Pavel Pertsev (asserted in package.json, see above)
 Copyright (c) mvllow
 Copyright (c) 2018 Daniel Berg
 Copyright (c) 2018 Srcery Contributers

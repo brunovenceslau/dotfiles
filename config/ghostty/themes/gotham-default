@@ -6,7 +6,7 @@
 # https://github.com/whatyouhide/vim-gotham at commit 7e7eff4, laid out for
 # Ghostty by terminalcolors.com.
 # Downloaded from https://terminalcolors.com/downloads/ghostty/gotham-default.
-# The slot mapping is the site's own.
+# The slot mapping is the site's choice; every colour is the upstream's.
 # See THIRD-PARTY-NOTICES.md.
 
 background = #0c1014
