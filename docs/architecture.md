@@ -393,7 +393,7 @@ This is the only network access a shell start can cause. The fetch contacts the
 `origin` remote of your clone and nothing else: like the upgrade (below), it
 scrubs the global and system git config and the `GIT_CONFIG_*` environment
 families, so an ambient `url.insteadOf` cannot redirect it, and it re-reads only
-the credential helper from the XDG config. It forces object fsck on, runs
+the credential settings from the XDG config. It forces object fsck on, runs
 non-interactively (it fails instead of prompting for credentials), and writes
 only into the clone's object store and `$XDG_STATE_HOME/dotfiles`.
 `tests/update_check_test.sh` covers the redirect ("ambient url.insteadOf cannot
@@ -458,9 +458,12 @@ is the static half of the same rule.
    are scrubbed, so a hostile `url.insteadOf` cannot redirect the fetch. Object
    fsck is re-asserted on the command line, because scrubbing also drops the
    tracked config that sets it.
-4. Re-injects only the credential helper, resolved for this remote from the XDG
-   config, and runs with `GIT_TERMINAL_PROMPT=0` so a missing credential fails
-   loudly instead of hanging on a prompt.
+4. Re-injects only the credential settings of the XDG config (and of the
+   checkout's own config), every `credential.*` entry in the order git reads
+   them, so git builds its list of helpers for this remote by its own rules,
+   and runs with `GIT_TERMINAL_PROMPT=0` so a missing credential fails loudly
+   instead of hanging on a prompt. A setting whose name holds `=` cannot be
+   passed on, and the upgrade refuses it by name.
 5. Merges with `--ff-only`. A diverged or rewound history is refused, never
    reset to. This is the anti-rollback property.
 6. Converges: updates submodules, runs `install.sh link` in a **fresh child
@@ -663,9 +666,14 @@ test suite are in development.md's
 | Have `install.sh doctor` check the fast-syntax-highlighting seed (an empty `secondary_theme.zsh` under `$XDG_CACHE_HOME/zsh`) | `doctor` checks that each plugin submodule is initialized and at its pin, not the seed; the zshrc writes the seed, and its `curl` and `wget` shims cover a seed that could not be written | The fast-syntax-highlighting pin is bumped, or a non-empty seed is found on a host |
 | Have `install.sh doctor` run `brew bundle check` against the Brewfile | `doctor` checks only that Homebrew is installed and on `PATH`; what `brew bundle check` writes and which network calls it makes are not measured | A host misses a Brewfile package and nothing says so |
 | Report a Homebrew prefix that does not match the architecture (an Intel Homebrew under Rosetta on Apple Silicon, or both prefixes present) | `doctor` takes the first prefix the zshrc tries that holds an executable `bin/brew`, and says nothing about the other | A host has both prefixes, or an arm64 host runs an Intel Homebrew |
-| Require a gh token scope beyond what `gh auth login` grants (`workflow`, for one) | No scope is required; only `admin:ssh_signing_key` left on the token is a problem | A push of a workflow file is rejected for a missing scope |
+| Require a gh token scope beyond what `gh auth login` grants (`workflow`, for one) | No scope is required; only `admin:ssh_signing_key` or `write:ssh_signing_key` left on the token is a problem | A push of a workflow file is rejected for a missing scope |
 | Give `install.sh doctor` an `--offline` flag that skips the gh check's network call | Offline, the gh check is a note, after at most 30 seconds when the network does not answer | The wait annoys in practice |
 | Check the pinned `gh` extensions and the neovim plugin lock in `install.sh doctor` | `doctor` checks the zsh plugin submodules only | A `gh` extension is found off its pin with no signal, or a neovim plugin breaks after a lockfile change |
+| Make the no-hard-link fallback of `backup_once()` in `lib/host_identity.py` crash-safe | Accepted (decided on 2026-10-09): where hard links are unsupported, `_copy_new()` copies straight into `config.local.bak`, so a SIGKILL or a power loss mid-copy can leave a partial file that later runs keep as the pristine copy. `config.local` itself is never half-written: it is a temporary file and a rename | Python's standard library gains a rename that refuses an existing name, or a home directory without hard links is seen in use |
+| Bound the time `install.sh doctor` spends when git reads a FIFO | Accepted (decided on 2026-10-09): an `include.path` or a `config.worktree` naming a FIFO holds doctor to git's 30 s timeouts before it reports a problem, about 30 s for an `include.path` in the global config and about 60 s (two timeouts) for a `config.worktree` or an `include.path` in the repository's own config. Bounded, and it needs a local file placed by the user | `doctor` runs unattended, or with a shorter timeout |
+| Contain a gh that leaves its process group, such as a wrapper that calls `setsid`, so it cannot outlive `install.sh doctor` | Accepted (decided on 2026-10-11): `gh_token()` in `lib/host_identity.py` ends gh's process group, and a process that moved to a session of its own is not in it, so it outlives doctor. It gains no privilege: that gh already runs as the user | `doctor` runs a tool that is not already trusted on `PATH` |
+| Close the remaining pid-reuse and timing races in doctor's gh handling | Accepted (decided on 2026-10-11): judged unobservable. A group is signalled only while gh is unreaped, so its id cannot have been reused, and gh's reap and its return code are set in one block that holds the unwinding signals (`_end_group()`, `_reaped()` in `lib/host_identity.py`). `entry()` puts a `SIGCHLD` the caller left ignored back to its default, so the kernel never reaps gh first. The hold is per thread, and the module runs one | A gh process-handling check in `tests/host_identity_units.py` fails on a CI leg with no change to `lib/host_identity.py`, or a host reports a process that doctor ended without starting it |
+| Have the background update check report a credential setting whose name holds `=` | It skips its fetch without a word: `-c` would split such a name into another key. `dotfiles-upgrade` refuses the same setting by name, so a host learns of it there | Such a setting is seen in use |
 
 ## Security properties and where they are enforced
 
@@ -689,8 +697,6 @@ that enforces each property.
 | Fork-free startup, one background fetch | A subprocess or a network call on the path to the first prompt that `make forkgate` does not catch. The background fetch of the update check counts only if it can be made to block the prompt, prompt for input, fetch from anywhere but the clone's `origin`, or skip object checking. | `make forkgate`, [what `make forkgate` does](development.md#what-make-forkgate-does), [the one sanctioned background spawn](#the-one-sanctioned-background-spawn) |
 | A signing key only by exact agreement. The identity step writes a signing key only when the allowed-signers file and the ssh-agent agree on exactly one key for the email, never in the automatic step in an SSH session, and replaces no value already set except through `--rotate`. The rule is in [`install.sh identity`](shell-reference.md#installsh-identity). | A way to make the identity step write a key that the allowed-signers file and the ssh-agent do not both hold, write automatically in an SSH session, or replace a value already set other than through `--rotate`. | `lib/host_identity.py` (`Host.candidates`, `select`, `identity`, `auto`, `rotate`), `tests/host_identity_test.sh` ("happy path: one principal, one key, comment mismatch ignored", "D2: two principals, two keys, and the user.email filter", "a different signingkey is kept; the same key as a path is not a conflict", "auto mode: one line per refusal; quiet on a configured (even stale) host", and the "--rotate" section), `tests/host_identity_conformance.py`, [the host's signing identity](#the-hosts-signing-identity) |
 | Two secret scanners | Anything secret-shaped that is committed, or a way past both `make secret-scan` and `make gitleaks`. | `make secret-scan`, `make gitleaks`, `tests/secret_scan_test.sh`, `tests/gitleaks_gate_test.sh`, [the two secret scanners](development.md#the-two-secret-scanners) |
-| Make the no-hard-link fallback of `backup_once()` in `lib/host_identity.py` crash-safe | Accepted (decided on 2026-10-09): where hard links are unsupported, `_copy_new()` copies straight into `config.local.bak`, so a SIGKILL or a power loss mid-copy can leave a partial file that later runs keep as the pristine copy. `config.local` itself is never half-written: it is a temporary file and a rename | Python's standard library gains a rename that refuses an existing name, or a home directory without hard links is seen in use |
-| Bound the time `install.sh doctor` spends when git reads a FIFO | Accepted (decided on 2026-10-09): an `include.path` or a `config.worktree` naming a FIFO holds doctor to git's 30 s timeouts before it reports a problem, about 30 s for an `include.path` in the global config and about 60 s (two timeouts) for a `config.worktree` or an `include.path` in the repository's own config. Bounded, and it needs a local file placed by the user | `doctor` runs unattended, or with a shorter timeout |
 
 ## Platform differences
 

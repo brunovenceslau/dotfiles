@@ -102,7 +102,7 @@ then check with
 
 ```sh
 ssh-keygen -t ed25519 -C "signing key" -f ~/.ssh/id_signing
-gh auth refresh -h github.com -s admin:ssh_signing_key   # gh auth login does not grant this scope
+gh auth refresh -h github.com -s write:ssh_signing_key   # gh auth login does not grant this scope
 gh ssh-key add ~/.ssh/id_signing.pub --type signing --title "signing"
 git config --global gpg.format ssh
 git config --global user.signingkey ~/.ssh/id_signing.pub

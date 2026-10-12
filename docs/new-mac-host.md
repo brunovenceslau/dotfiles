@@ -61,8 +61,8 @@ Three details matter here:
   `~/.config/git/config.local`, which the `~/.config/git/config` the installer
   writes in step 3 includes. Without the prefix, `gh auth setup-git` writes the
   helper to `~/.gitconfig`. The framework keeps git config under XDG paths, and
-  `dotfiles-upgrade` reads only the XDG config when it fetches, so a helper in
-  `~/.gitconfig` never reaches the upgrade.
+  `dotfiles-upgrade` reads the XDG config and never `~/.gitconfig` when it
+  fetches, so a helper in `~/.gitconfig` never reaches the upgrade.
 
 ## 3. Clone and install
 
@@ -166,15 +166,18 @@ skip to item 5.
    as Verified:
 
    ```sh
-   gh auth refresh -h github.com -s admin:ssh_signing_key
+   gh auth refresh -h github.com -s write:ssh_signing_key
    gh ssh-key add ~/.ssh/id_signing.pub --type signing --title "$(hostname -s) signing"
-   gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key
+   gh auth refresh -h github.com --remove-scopes write:ssh_signing_key
    ```
 
-   `gh auth login` does not grant the `admin:ssh_signing_key` scope, so
+   `gh auth login` does not grant the `write:ssh_signing_key` scope, so
    without the first `gh auth refresh` line `gh ssh-key add --type signing`
    fails and asks for it. The refresh opens the same browser flow as the
-   login; the last line drops the scope again.
+   login; the last line drops the scope again. `write:ssh_signing_key` is
+   the least scope that adds a signing key (GitHub's
+   [SSH signing keys API](https://docs.github.com/en/rest/users/ssh-signing-keys));
+   deleting one needs `admin:ssh_signing_key`.
 
 5. Set the identity, and your name once. git refuses every commit without
    a name, since the tracked config sets `user.useConfigOnly = true`, and

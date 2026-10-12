@@ -83,6 +83,15 @@ case $out in *"$esc"*) fail "the got: line holds a raw ESC (got: $out)" ;; esac
 rc=0; out="$("$installer" "bo${esc}gus" 2>&1)" || rc=$?
 grep -qF -- "unknown command: \$'bo\\x1bgus' (expected" <<<"$out" \
   || fail "the unknown command is not shown as a shell word (got: $out)"
+# Each subcommand's unknown option, the same: a usage error, exit 2, the
+# option one shell word, and no raw ESC.
+for cmd in uninstall identity doctor; do
+  rc=0; out="$("$installer" "$cmd" "--a${esc}[2Jb" 2>&1)" || rc=$?
+  [ "$rc" -eq 2 ] || fail "install.sh $cmd with an ESC option exited $rc (want 2)"
+  grep -qF -- "$cmd: unknown option: \$'--a\\x1b[2Jb' (expected" <<<"$out" \
+    || fail "$cmd's unknown option is not shown as a shell word (got: $out)"
+  case $out in *"$esc"*) fail "$cmd's unknown option line holds a raw ESC (got: $out)" ;; esac
+done
 
 # --- the no-write contract: HOME stays completely empty ---------------------
 # (no `find -quit`: BSD/macOS find lacks it; -mindepth is portable.)

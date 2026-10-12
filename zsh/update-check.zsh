@@ -39,7 +39,8 @@ zmodload -F zsh/files b:mkdir 2>/dev/null
 # the unit test can drive it synchronously against a local remote.
 _dotfiles_update_fetch() {
   # Plain zsh semantics whatever .zshrc.local set: with KSH_ARRAYS, for one,
-  # arrays are 0-based and ${hs[1]} below would drop the credential helper.
+  # arrays are 0-based; the credential array cargs below is built and
+  # expanded under the defaults.
   emulate -L zsh
   local state="$1" ahead
   # NON-INTERACTIVE by construction: a background fetch on the
@@ -61,21 +62,36 @@ _dotfiles_update_fetch() {
   # Ambient config is SCRUBBED, the way install.sh's vgit does it for the upgrade:
   # the GLOBAL/SYSTEM files and the GIT_CONFIG_PARAMETERS/COUNT/GIT_CONFIG env
   # families are dropped, so a hostile url.insteadOf cannot point this fetch at
-  # another repository and fill the object store from it. Only credential.helper
-  # is read back, from the framework's XDG config and for this remote's RAW url
-  # (`config --get` is immune to insteadOf), exactly as the upgrade re-injects it.
+  # another repository and fill the object store from it. Only the credential
+  # section is read back, from the framework's XDG config (and the checkout's
+  # own), and handed to git as -c entries in the order git read them, after an
+  # empty credential.helper, exactly as the upgrade re-injects it (install.sh,
+  # _do_upgrade, where the why is): git then picks the helpers by its own rules.
   # All of this runs in the detached body - never on the prompt's path.
   (
     unset GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG
     export GIT_CONFIG_SYSTEM=/dev/null
-    local url helpers
-    url=$(GIT_CONFIG_GLOBAL=/dev/null git -C "$DOTFILES" config --get remote.origin.url 2>/dev/null)
-    helpers=$(GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME:-$HOME/.config}/git/config" \
-      git -C "$DOTFILES" config --get-urlmatch credential.helper "$url" 2>/dev/null)
-    local -a hs; hs=( ${(f)helpers} )     # unquoted (f): empty lines dropped
+    local entry key
+    local -a cargs; cargs=(-c credential.helper=)
+    # --null prints "<key>\n<value>", or "<key>" alone for a bare boolean,
+    # which `-c <key>` sets as git read it. zsh runs the loop, the last part of
+    # the pipeline, in this shell, so cargs keeps what it adds. A key holding
+    # `=` cannot pass through `-c` (it would set another key): no fetch then,
+    # and dotfiles-upgrade names it.
+    GIT_CONFIG_GLOBAL="${XDG_CONFIG_HOME:-$HOME/.config}/git/config" \
+      git -C "$DOTFILES" config --includes --null --get-regexp '^credential\.' 2>/dev/null |
+      while IFS= read -r -d '' entry; do
+        key=${entry%%$'\n'*}
+        [[ $key == *=* ]] && return 1
+        if [[ $entry == *$'\n'* ]]; then
+          cargs+=(-c "$key=${entry#*$'\n'}")
+        else
+          cargs+=(-c "$key")
+        fi
+      done
     export GIT_CONFIG_GLOBAL=/dev/null
     GIT_TERMINAL_PROMPT=0 GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh} -oBatchMode=yes" \
-      git -C "$DOTFILES" -c credential.helper="${hs[1]-}" \
+      git -C "$DOTFILES" "${cargs[@]}" \
       -c fetch.fsckObjects=true -c transfer.fsckObjects=true \
       fetch --quiet origin 2>/dev/null
   ) || return 0

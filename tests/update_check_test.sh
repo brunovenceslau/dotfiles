@@ -157,12 +157,16 @@ grep -q 'BatchMode=yes' "$envfile" \
   && ck "fetch sets ssh BatchMode (no SSH passphrase/host-key prompt)" yes yes \
   || fail "fetch did NOT set ssh BatchMode"
 
-# --- 9b. the credential helper is re-injected from the XDG config -------------
-# The scrub drops ~/.gitconfig, so the helper for origin is read back from
-# $XDG_CONFIG_HOME/git/config and passed as -c credential.helper=... . gh writes
-# an empty reset line before its helper, so the FIRST NON-EMPTY value must win.
-# Run twice: plain, and with KSH_ARRAYS set (as a .zshrc.local may), where a
-# 0-based ${hs[1]} would silently pass an empty helper.
+# --- 9b. the credential helpers are re-injected from the XDG config ------------
+# The scrub drops ~/.gitconfig, so the credential section is read back from
+# $XDG_CONFIG_HOME/git/config and handed to git as -c entries, in file order,
+# after an empty credential.helper: a generic helper, gh's empty reset and gh
+# for github.com, and a helper for the repository's own URL all reach git,
+# which asks gh and then the last one (one --get-urlmatch value kept only the
+# last). config.local, which the XDG config includes, adds a value git stores
+# escaped (a quote and a backslash), and useHttpPath is a bare boolean, which
+# reaches git as `-c <key>` alone. Run twice: plain, and with KSH_ARRAYS set
+# (as a .zshrc.local may), where array indexing changes.
 fakebin3="$work/fakebin3"; mkdir -p "$fakebin3" "$work/xdg/git"
 argvfile="$work/fetchargv"
 cat > "$fakebin3/git" <<EOF
@@ -173,7 +177,10 @@ done
 exec $real_git "\$@"
 EOF
 chmod u+x "$fakebin3/git"
-printf '[credential]\n\thelper =\n\thelper = !stub-helper get\n' > "$work/xdg/git/config"
+printf '[credential]\n\thelper = generic\n[credential "https://github.com"]\n\thelper =\n\thelper = !stub-helper get\n[credential "https://github.com/x/y"]\n\thelper = store\n\tuseHttpPath\n[include]\n\tpath = config.local\n' \
+  > "$work/xdg/git/config"
+git config --file "$work/xdg/git/config.local" credential.helper 'say "hi" \ there'
+want_cred="-c credential.helper= -c credential.helper=generic -c credential.https://github.com.helper= -c credential.https://github.com.helper=!stub-helper get -c credential.https://github.com/x/y.helper=store -c credential.https://github.com/x/y.usehttppath -c credential.helper=say \"hi\" \\ there -c fetch.fsckObjects=true"
 # credential.helper is matched against a URL, so give origin a URL form for this
 # case (the shim never lets the fetch reach it); restored right after.
 git -C "$B" remote set-url origin "file://$A"
@@ -182,10 +189,17 @@ for opts in "" "setopt ksh_arrays;"; do
   PATH="$fakebin3:$PATH" XDG_CONFIG_HOME="$work/xdg" DOTFILES="$B" DOTFILES_UPDATE_DISABLE=1 \
     zsh -fc "$opts source '$uc'; _dotfiles_update_fetch '$state'"
   case "$(cat "$argvfile" 2>/dev/null)" in
-    *"-c credential.helper=!stub-helper get "*) ck "helper re-injected (${opts:-default options})" yes yes ;;
-    *) fail "helper not re-injected (${opts:-default options}): argv [$(cat "$argvfile" 2>/dev/null)]" ;;
+    *"$want_cred "*) ck "helpers re-injected in file order (${opts:-default options})" yes yes ;;
+    *) fail "helpers not re-injected in file order (${opts:-default options}): argv [$(cat "$argvfile" 2>/dev/null)]" ;;
   esac
 done
+# A key holding `=` would split into another key under -c: no fetch at all.
+printf '[credential "https://github.com/?a=b"]\n\thelper = store\n' >> "$work/xdg/git/config"
+rm -f "$argvfile"
+PATH="$fakebin3:$PATH" XDG_CONFIG_HOME="$work/xdg" DOTFILES="$B" DOTFILES_UPDATE_DISABLE=1 \
+  zsh -fc "source '$uc'; _dotfiles_update_fetch '$state'"
+[ ! -e "$argvfile" ] && ck "a credential key holding = stops the fetch" yes yes \
+  || fail "a credential key holding = reached the fetch: argv [$(cat "$argvfile")]"
 git -C "$B" remote set-url origin "$A"
 
 # --- 10. ambient url.insteadOf cannot redirect the background fetch -----------

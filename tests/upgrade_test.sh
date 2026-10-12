@@ -171,16 +171,30 @@ ck "lock released -> normal run proceeds" "$([ -e "$lock" ] && echo stuck || ech
 orig_url="$(git -C "$B" remote get-url origin)"
 git -C "$B" remote set-url origin "$work/does-not-exist"
 before="$(bhead)"
-if upg; then fail "fetch failure: upgrade proceeded"; fi
+if out="$(bash "$B/install.sh" upgrade </dev/null 2>&1)"; then fail "fetch failure: upgrade proceeded"; fi
 ck "fetch failure refused, HEAD untouched" "$(bhead)" "$before"
+# The refusal names the fix for a fetch that needs credentials: the
+# command, ready to paste, that puts gh's helper where the fetch reads it,
+# under this host's XDG_CONFIG_HOME, quoted for the shell when it needs it.
+grep -qxF "install:     GIT_CONFIG_GLOBAL=$XDG_CONFIG_HOME/git/config.local gh auth setup-git" <<<"$out" \
+  || fail "fetch failure: the refusal does not advise gh auth setup-git: $out"
+odd_xdg="$work/x dg"
+if out="$(XDG_CONFIG_HOME="$odd_xdg" bash "$B/install.sh" upgrade </dev/null 2>&1)"; then
+  fail "fetch failure (XDG_CONFIG_HOME with a space): upgrade proceeded"
+fi
+grep -qxF "install:     GIT_CONFIG_GLOBAL='$odd_xdg/git/config.local' gh auth setup-git" <<<"$out" \
+  || fail "fetch failure: the advice ignores XDG_CONFIG_HOME or is not one shell word: $out"
+ck "fetch failure advises gh auth setup-git under XDG_CONFIG_HOME" ok ok
 git -C "$B" remote set-url origin "$orig_url"
 
 # --- 17. verified fetch is NON-INTERACTIVE + re-injects the credential helper --
 # vgit scrubs the global config (kills url.insteadOf / hostile gpg.ssh.program),
 # which would also drop the operator's HTTPS credential helper and prompt at login.
 # Assert the verified fetch (a) sets GIT_TERMINAL_PROMPT=0 (never prompts) and (b)
-# re-injects credential.helper read from the trusted XDG config FILE (the path the
-# re-inject pins GIT_CONFIG_GLOBAL to). A fake `git` records the fetch env/args.
+# re-injects the credential section read from the trusted XDG config FILE (the
+# path the re-inject pins GIT_CONFIG_GLOBAL to). A fake `git` records the fetch
+# env and every credential.* -c value, in order, one per line, and the fetch's
+# whole argv, each word NUL-terminated (a value can hold a newline).
 xdgcfg="$HOME/.config/git/config"; mkdir -p "$(dirname "$xdgcfg")"
 printf '[credential]\n\thelper = SENTINEL-HELPER\n' > "$xdgcfg"
 fakebin="$work/fakebin"; mkdir -p "$fakebin"; real_git="$(command -v git)"
@@ -189,26 +203,25 @@ cat > "$fakebin/git" <<FG
 #!/bin/sh
 for a in "\$@"; do
   if [ "\$a" = fetch ]; then
-    helper=""
-    for b in "\$@"; do case "\$b" in credential.helper=*) helper="\${b#credential.helper=}";; esac; done
-    printf 'TP=%s HELPER=%s\n' "\${GIT_TERMINAL_PROMPT-UNSET}" "\$helper" > "$fetchlog"
+    printf 'TP=%s\n' "\${GIT_TERMINAL_PROMPT-UNSET}" > "$fetchlog"
+    for b in "\$@"; do case "\$b" in credential.*) printf 'C=%s\n' "\$b" >> "$fetchlog";; esac; done
+    : > "$fetchlog.argv"
+    for b in "\$@"; do printf '%s\0' "\$b" >> "$fetchlog.argv"; done
     break
   fi
 done
 exec $real_git "\$@"
 FG
 chmod +x "$fakebin/git"
-# --get-urlmatch needs a real URL scheme; git clone of a local PATH sets a bare
-# path remote (no `://`). Point origin at the same A as a file:// URL so the helper
-# resolves exactly as it would for a real https:// remote. (A bare-path or SSH
-# scp-syntax remote correctly yields no helper - --get-urlmatch fails and `|| true`
-# leaves it empty - which is right: SSH authenticates by key, not a helper.)
+# The helpers are read with no URL (git matches them at fetch time), so any
+# remote form would do; origin is a file:// URL here, as a real https:// one
+# would be a URL too.
 git -C "$B" remote set-url origin "file://$A"
 PATH="$fakebin:$PATH" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 || true
 [ -f "$fetchlog" ] || fail "verified fetch was never invoked"
 grep -q 'TP=0' "$fetchlog" \
   || fail "verified fetch did not set GIT_TERMINAL_PROMPT=0 (would prompt at login): $(cat "$fetchlog")"
-grep -q 'HELPER=SENTINEL-HELPER' "$fetchlog" \
+grep -qxF 'C=credential.helper=SENTINEL-HELPER' "$fetchlog" \
   || fail "verified fetch did not re-inject the config-file credential helper: $(cat "$fetchlog")"
 ck "verified fetch: non-interactive + credential helper re-injected" ok ok
 
@@ -221,9 +234,74 @@ GIT_CONFIG_PARAMETERS="'credential.helper=!EVIL-INJECTED'" PATH="$fakebin:$PATH"
   bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 || true
 grep -q 'EVIL-INJECTED' "$fetchlog" \
   && fail "SECURITY: a GIT_CONFIG_PARAMETERS credential.helper reached the verified fetch (env not scrubbed)"
-grep -q 'HELPER=SENTINEL-HELPER' "$fetchlog" \
+grep -qxF 'C=credential.helper=SENTINEL-HELPER' "$fetchlog" \
   || fail "the trusted config-file helper must still win under env injection: $(cat "$fetchlog")"
 ck "GIT_CONFIG_PARAMETERS credential.helper scrubbed; config-file helper honored (audit HIGH)" ok ok
+# git's helper list, not one value: a generic helper, gh's empty reset and gh
+# for github.com, and a helper for the repository's own URL. --get-urlmatch
+# kept only the best-matching key's value (store), where git asks gh and then
+# store. Every entry reaches the fetch in file order, after an empty helper
+# that clears what git reads from the checkout's own config.
+printf '[credential]\n\thelper = generic\n[credential "https://github.com"]\n\thelper =\n\thelper = !gh auth git-credential\n[credential "https://github.com/x/y"]\n\thelper = store\n\tuseHttpPath\n' > "$xdgcfg"
+rm -f "$fetchlog"
+PATH="$fakebin:$PATH" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 || true
+want="C=credential.helper=
+C=credential.helper=generic
+C=credential.https://github.com.helper=
+C=credential.https://github.com.helper=!gh auth git-credential
+C=credential.https://github.com/x/y.helper=store
+C=credential.https://github.com/x/y.usehttppath"
+ck "the fetch gets git's whole credential section, in file order" "$(grep '^C=' "$fetchlog")" "$want"
+# The same -c entries make git itself ask gh and then store, as it does
+# reading the file (a helper here logs its name and answers nothing).
+asklog="$work/asklog"
+ask() { printf '!f() { echo %s >> "%s"; }; f' "$1" "$asklog"; }
+printf '[credential]\n\thelper = "%s"\n[credential "https://github.com"]\n\thelper =\n\thelper = "%s"\n[credential "https://github.com/x/y"]\n\thelper = "%s"\n' \
+  "$(ask generic)" "$(ask gh)" "$(ask store)" > "$xdgcfg"
+rm -f "$fetchlog" "$asklog"
+PATH="$fakebin:$PATH" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 || true
+args=(); while IFS= read -r l; do args+=(-c "${l#C=}"); done < <(grep '^C=' "$fetchlog")
+printf 'url=https://github.com/x/y\n\n' | env -u GIT_CONFIG_PARAMETERS GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+  GIT_TERMINAL_PROMPT=0 git -C "$B" "${args[@]}" credential fill >/dev/null 2>&1 || true
+ck "git asks the re-injected helpers in its own order" "$(tr '\n' ' ' < "$asklog")" "gh store "
+# A key holding `=` cannot pass through -c (it would split into another key):
+# the upgrade refuses it by name before fetching.
+printf '[credential "https://github.com/?a=b"]\n\thelper = store\n' > "$xdgcfg"
+rm -f "$fetchlog"
+refuse_clean "a credential key holding =" "upgrade: the credential setting 'credential\.https://github\.com/\?a=b\.helper' holds ="
+[ ! -e "$fetchlog" ] || fail "a credential key holding = reached the fetch: $(cat "$fetchlog")"
+# cred_argv - the credential.* words of the last fetch's argv, NUL-terminated.
+cred_argv() { while IFS= read -r -d '' w; do case $w in credential.*) printf '%s\0' "$w" ;; esac; done < "$fetchlog.argv"; }
+# A helper set in config.local, which the XDG config includes, reaches the
+# fetch, and values git stores escaped (a quote, a backslash, a newline)
+# arrive byte for byte.
+localcfg="$HOME/.config/git/config.local"
+printf '[include]\n\tpath = config.local\n' > "$xdgcfg"
+git config --file "$localcfg" credential.helper 'say "hi" \ there'
+git config --file "$localcfg" credential.https://github.com.helper "$(printf 'two\nlines')"
+rm -f "$fetchlog" "$fetchlog.argv"
+PATH="$fakebin:$PATH" bash "$B/install.sh" upgrade </dev/null >/dev/null 2>&1 || true
+if cmp -s <(cred_argv) <(printf '%s\0' credential.helper= 'credential.helper=say "hi" \ there' \
+    "credential.https://github.com.helper=$(printf 'two\nlines')"); then
+  ck "an included config.local's helpers reach the fetch byte for byte" ok ok
+else
+  fail "the included helpers did not reach the fetch byte for byte: [$(cred_argv | tr '\0' '|')]"
+fi
+rm -f "$localcfg"
+# No XDG config, or an empty one: the fetch gets only the empty helper,
+# still forces object checking, and succeeds.
+for state in absent empty; do
+  rm -f "$xdgcfg" "$fetchlog" "$fetchlog.argv"
+  [ "$state" = absent ] || : > "$xdgcfg"
+  rc=0; out="$(PATH="$fakebin:$PATH" bash "$B/install.sh" upgrade </dev/null 2>&1)" || rc=$?
+  cmp -s <(cred_argv) <(printf '%s\0' credential.helper=) \
+    || fail "an $state XDG config: the fetch got [$(cred_argv | tr '\0' '|')], want only credential.helper="
+  for w in transfer.fsckObjects=true fetch.fsckObjects=true; do
+    [ "$(tr '\0' '\n' < "$fetchlog.argv" | grep -cxF "$w")" -ge 1 ] || fail "an $state XDG config: the fetch lost $w"
+  done
+  [ "$rc" -eq 0 ] && ! grep -q 'fetch failed' <<<"$out" || fail "an $state XDG config: the upgrade failed (rc $rc): $out"
+  ck "an $state XDG config: only the empty helper, fsck forced, the fetch succeeds" ok ok
+done
 rm -f "$xdgcfg"
 
 # --- 18. the single-flight lock auto-releases on interrupt (Ctrl-C) ------------

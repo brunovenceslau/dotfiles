@@ -2562,10 +2562,14 @@ HOMEBREW_PREFIXES = "/opt/homebrew /usr/local".split()
 GH_HOST = "github.com"
 # One network round trip, bounded: gh itself sets no overall time limit.
 GH_TIMEOUT = 30
-# The scope docs/new-mac-host.md adds only to register a signing key, and
-# drops again right after: a token that keeps it can add signing keys to
-# the account.
-GH_SIGNING_SCOPE = "admin:ssh_signing_key"
+# The scopes that let a token add a signing key to the account: write: is
+# what creating one needs (docs/new-mac-host.md adds it to register a key,
+# and drops it again right after), and admin: holds it too. Read from
+# GitHub's REST docs, "REST API endpoints for SSH signing keys"
+# (https://docs.github.com/en/rest/users/ssh-signing-keys): POST
+# /user/ssh_signing_keys needs write:ssh_signing_key, DELETE needs
+# admin:ssh_signing_key. read:ssh_signing_key adds nothing, so it is fine.
+GH_SIGNING_SCOPES = ("admin:ssh_signing_key", "write:ssh_signing_key")
 # The caller's settings that would change what gh prints or where it sends
 # the request (gh help environment, gh 2.102): debug output on stderr, a
 # forced terminal with colours, another default host or repository, a pager.
@@ -2661,17 +2665,36 @@ def _end_group(p):
 _CAN_WAIT_UNREAPED = hasattr(os, "waitid") and hasattr(os, "WNOWAIT") and hasattr(os, "WNOHANG")
 
 
-def _exited_unreaped(p, deadline):
-    """Wait until P exits, leaving it a zombie, whose process group id stays
-    taken; raises subprocess.TimeoutExpired at DEADLINE (time.monotonic())
-    with P still running. Polls, as Popen.wait() with a timeout does."""
+def _until(done, p, deadline, timeout):
+    """Call DONE until it returns true; raises subprocess.TimeoutExpired
+    (naming TIMEOUT, the whole budget) at DEADLINE (time.monotonic()) with
+    P still running. Polls, as Popen.wait() with a timeout does."""
     delay = 0.0005
-    while os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+    while not done():
         left = deadline - time.monotonic()
         if left <= 0:
-            raise subprocess.TimeoutExpired(p.args, 0)
+            raise subprocess.TimeoutExpired(p.args, timeout)
         time.sleep(min(delay, left))
         delay = min(delay * 2, 0.05)
+
+
+def _exited_unreaped(p):
+    """True once P has exited, left a zombie, whose process group id stays
+    taken (a _until() test)."""
+    return os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+
+
+def _reaped(p):
+    """True once P is reaped and its returncode set (a _until() test). Held:
+    Popen reaps P and then sets returncode a few bytecodes later, and a
+    signal that unwound between the two (a SIGTERM or SIGHUP; Popen.wait()
+    happens to wait again after a ^C) would leave a reaped P that
+    _end_group() still takes for unreaped, and so signal a group id that
+    may be another process's by then. Each poll is held, not the whole
+    wait: P may still be running here, and a signal then waits one poll,
+    not until the deadline."""
+    with _Held():
+        return p.poll() is not None
 
 
 def _bounded_output(p, timeout, cap):
@@ -2704,12 +2727,12 @@ def _bounded_output(p, timeout, cap):
                 if len(got[key.fd]) > cap:
                     raise OverflowError(cap)
     if _CAN_WAIT_UNREAPED:
-        _exited_unreaped(p, deadline)
+        _until(lambda: _exited_unreaped(p), p, deadline, timeout)
         try:
             os.killpg(p.pid, signal.SIGKILL)
         except OSError:
             pass  # P was alone in its group
-    p.wait(max(deadline - time.monotonic(), 0))
+    _until(lambda: _reaped(p), p, deadline, timeout)
     return bytes(got[p.stdout.fileno()]), bytes(got[p.stderr.fileno()])
 
 
@@ -2840,11 +2863,13 @@ def _probe_config(subs):
                    for i, sub in enumerate(subs)).encode("utf-8")
 
 
-def github_helpers():
+def github_helpers(path=None):
     """(helpers, cleared, None): the credential helpers git runs for
     https://GH_HOST, as [(origin, value)] in the order it asks them, and
     the origin of the last empty helper that cleared the list (None when
-    none did); or ([], None, why) when git cannot read them.
+    none did); or ([], None, why) when git cannot read them. With PATH,
+    the list that file alone sets (its includes followed), else the one
+    git's whole configuration sets.
 
     git's own rules (gitcredentials(7), git 2.53, and credential.c's
     credential_apply_config()): every credential.helper and every
@@ -2856,8 +2881,8 @@ def github_helpers():
     from standard input, and `--get-urlmatch credential` names the keys
     that match; a pattern that is no full URL is matched as git's fallback
     does (_partial_match())."""
-    rc, out, err = git(["config", "--includes", "--show-origin", "--null", "--get-regexp",
-                        r"^credential\.(.+\.)?helper$"])
+    rc, out, err = git(["config", "--includes"] + (["--file", path] if path is not None else [])
+                       + ["--show-origin", "--null", "--get-regexp", r"^credential\.(.+\.)?helper$"])
     if rc == 1:
         return [], None, None
     if rc != 0:
@@ -3266,21 +3291,24 @@ class Doctor(object):
             self.info("cannot ask GitHub whether gh's token is valid (%s) - not checked; this check needs the network"
                       % _shown(detail))
         else:
-            if detail and GH_SIGNING_SCOPE in detail:
-                self.problem("gh's token still holds the admin:ssh_signing_key scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes admin:ssh_signing_key")
+            # Each held scope is named from GH_SIGNING_SCOPES, never from
+            # GitHub's header: the line prints no text GitHub chose.
+            for scope in GH_SIGNING_SCOPES:
+                if detail and scope in detail:
+                    self.problem("gh's token still holds the %s scope, which only registering a signing key needs - run: gh auth refresh -h github.com --remove-scopes %s"
+                                 % (_shown(scope), _shown(scope)))
             self.ok("%s is logged in to github.com, and GitHub accepts its token (scopes: %s)"
                     % (_shown(path), _shown(", ".join(detail)) if detail else "none listed"))
 
     def credential_helper(self):
         # The helpers git runs for https://github.com, in the order it asks
-        # them (github_helpers()), and whether config.local sets gh, read
-        # as dotfiles-upgrade reads it (install.sh: --get-urlmatch): the
-        # upgrade reads only the XDG config, so a helper in ~/.gitconfig
-        # never reaches it. A helper is named by its program and the file
+        # them (github_helpers()), and whether config.local sets gh: the
+        # upgrade hands git the credential settings of the XDG config and of
+        # the checkout's own config (install.sh, _do_upgrade), so a helper in
+        # ~/.gitconfig never reaches it. A helper is named by its program and the file
         # that sets it (helper_program()), never by its whole value, which
         # can hold a secret. One chain: each run prints one line here.
         host = self.host
-        url = "https://" + GH_HOST
         helpers, cleared, err = github_helpers()
         if err is not None:
             self.problem("cannot read credential.helper (%s) - check the file git -C ~ config --show-origin --get-regexp credential names"
@@ -3288,12 +3316,14 @@ class Doctor(object):
             return
         local = ""
         if os.path.lexists(host.config_local):
-            # --includes: the upgrade reaches config.local through the XDG
-            # config's [include], where git follows config.local's own
-            # includes too, so a helper they set reaches the upgrade.
-            lrc, lvalue, _ = git(["config", "--includes", "--file", host.config_local, "--get-urlmatch",
-                                  "credential.helper", url])
-            local = lvalue if lrc == 0 else ""
+            # The first helper of the list config.local alone sets, read by
+            # git's rules as above, not one --get-urlmatch value, which keeps
+            # only the best-matching key's: an empty reset and gh, then a
+            # helper for one repository's URL, is gh first, as git asks it.
+            # Its includes are followed: the upgrade reaches config.local
+            # through the XDG config's [include], where git follows them too.
+            local_helpers, _, lerr = github_helpers(host.config_local)
+            local = local_helpers[0][1] if local_helpers and lerr is None else ""
         origin, value = helpers[0] if helpers else (None, "")
         uses_gh = gh_helper(value)
         if uses_gh and not helper_runs(value) and "/" not in helper_program(value):
@@ -3304,7 +3334,7 @@ class Doctor(object):
         elif uses_gh and self.gh_state == "out":
             self.problem("git's credential helper for github.com is gh, which is not logged in, so pushing over HTTPS fails - run: gh auth login")
         elif uses_gh and not gh_helper(local):
-            self.problem('gh is the credential helper git uses for github.com, but %s does not set it, so dotfiles-upgrade, which reads only the XDG config, does not use it - see "Git prompts for a username" in docs/troubleshooting.md'
+            self.problem('gh is the credential helper git uses for github.com, but %s does not set it, so dotfiles-upgrade, which reads the XDG config and never ~/.gitconfig, does not use it - see "Git prompts for a username" in docs/troubleshooting.md'
                          % _shown(host.config_local))
         elif uses_gh:
             self.ok("gh is the credential helper git uses for github.com, from %s" % _shown(_origin_file(origin)))
@@ -3578,6 +3608,14 @@ def entry(argv):
     (nohup) stays ignored."""
     global _unwinding
     _unwinding = False
+    # A SIGCHLD the caller left ignored (an ignored signal stays ignored
+    # across exec) makes the kernel reap every child as it exits: each exit
+    # status then reads 0 (subprocess falls back to 0 on ECHILD), so
+    # `ssh-keygen -Q` would call a revoked key not revoked, and gh's pid
+    # and process group id would be free for reuse before gh_token() ends
+    # its group. Children are this module's own business: the default.
+    if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+        signal.signal(signal.SIGCHLD, signal.SIG_DFL)
     for signum in UNWINDING:
         default = signal.default_int_handler if signum == signal.SIGINT else signal.SIG_DFL
         if signal.getsignal(signum) == default:
