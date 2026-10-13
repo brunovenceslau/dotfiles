@@ -41,6 +41,13 @@ TEST_LIB_FILES := $(wildcard tests/lib/*.sh)
 STRICT ?=
 export STRICT
 
+# TEST_JOBS=N runs at most N suites at once under `make test`; TEST_JOBS=1 runs
+# them one at a time. Unset or empty, tests/run_suites.py picks min(CPUs,
+# available memory / its per-suite budget). Exported for the same reason as
+# STRICT, and read from the environment, never spliced into shell text.
+TEST_JOBS ?=
+export TEST_JOBS
+
 .DEFAULT_GOAL := help
 .PHONY: help lint check-patterns check-patterns-gawk py-syntax test test-env-scrub reuse gitleaks smoke secret-scan forkgate linkcheck commit-identity local-ci repo-settings-check
 
@@ -48,7 +55,7 @@ help:
 	@echo "Targets:"
 	@echo "  make lint                 shellcheck + zsh -n + /bin/bash -n + static patterns + python3 -I syntax check"
 	@echo "  make check-patterns-gawk  the static patterns again, under gawk counting characters (a UTF-8 locale)"
-	@echo "  make test                 unit tests for the repo tooling (tests/*.sh), git's local env vars unset"
+	@echo "  make test                 unit tests for the repo tooling (tests/*.sh), in parallel (TEST_JOBS=N caps it), git's local env vars unset"
 	@echo "  make test-env-scrub       static check: test and py-syntax unset git's local env vars first"
 	@echo "  make reuse                REUSE 3.3 compliance: every file states its copyright and licence"
 	@echo "  make gitleaks             gitleaks' maintained secret rule set over the working directory"
@@ -83,14 +90,15 @@ lint: check-patterns py-syntax
 	@if [ -n "$(strip $(BASH32_FILES))" ]; then \
 	  for f in $(BASH32_FILES); do echo "/bin/bash -n $$f"; /bin/bash -n "$$f" || exit 1; done; \
 	else echo "/bin/bash -n: no bash-3.2 files yet, skipping"; fi
-	@# The test scripts RUN under `make test`'s `bash "$$t"`, which on the macOS CI legs is
-	@#   the system /bin/bash 3.2. Parse-check them with the absolute /bin/bash so a bash-3.2
-	@#   -only parse error (e.g. a `case` inside a `$$(...)`, whose pattern `)` the naive 3.2
-	@#   scanner mis-reads - a real packages_test bug once caught this way) is caught at LINT time, fast and
-	@#   un-masked, instead of at test-RUN time behind make test's per-file loop. Asserts the
-	@#   tests PARSE under the system bash, not that they are 3.2 feature-limited. Like the
-	@#   BASH32 pass above, the 3.2-ONLY class is caught by the system /bin/bash (real 3.2)
-	@#   on both macOS legs - a lint under a newer bash is not proof of 3.2 parse-safety.
+	@# The test scripts RUN under tests/run_suites.py's `bash -- <suite>` (`make test`), which
+	@#   on the macOS CI legs is the system /bin/bash 3.2. Parse-check them with the absolute
+	@#   /bin/bash so a bash-3.2-only parse error (e.g. a `case` inside a `$$(...)`, whose pattern
+	@#   `)` the naive 3.2 scanner mis-reads - a real packages_test bug once caught this way) is
+	@#   caught at LINT time, fast and un-masked, instead of at test-RUN time among every other
+	@#   suite's output. Asserts the tests PARSE under the system bash, not that they are
+	@#   3.2 feature-limited. Like the BASH32 pass above, the 3.2-ONLY class is caught by
+	@#   the system /bin/bash (real 3.2) on both macOS legs - a lint under a newer bash is
+	@#   not proof of 3.2 parse-safety.
 	@if [ -n "$(strip $(TEST_FILES))" ]; then \
 	  for f in $(TEST_FILES) $(TEST_LIB_FILES); do echo "/bin/bash -n $$f"; /bin/bash -n "$$f" || exit 1; done; \
 	else echo "/bin/bash -n tests: no test files yet, skipping"; fi
@@ -351,49 +359,39 @@ py-syntax:
 	  fi; \
 	else echo "py-syntax: no .py files, skipping"; fi
 
-# Unit tests for the repo's own tooling. KEEP-GOING: run EVERY test and report ALL failures
-# at once, exiting nonzero iff any failed. The early-abort (`|| exit 1`) once MASKED a
-# multi-bug macOS breakage: two independent failures surfaced one-per-CI-round because
-# the run stopped at the first. An early abort makes a cascade look like a single bug.
+# Unit tests for the repo's own tooling, run by tests/run_suites.py, which holds the
+#   rules (read its docstring): every suite under bash, several at a time
+#   (TEST_JOBS, below), each with its own TMPDIR behind a symlink, output buffered
+#   per suite so it never interleaves. KEEP-GOING: it runs EVERY suite and names
+#   ALL failures at once, exiting nonzero iff any failed. An early abort once
+#   MASKED a multi-bug macOS breakage: two independent failures surfaced one per
+#   CI round. On HUP, INT, QUIT or TERM it stops every running suite, removes
+#   its scratch root and exits 129, 130, 131 or 143.
 # Every suite runs with git's local env vars unset ($(GIT_ENV_SCRUB), defined above
-# py-syntax): a leaked GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would otherwise steer
-# each suite's own fixture `git` calls at THAT repository, committing or configuring
-# into it.
-# Every suite also runs with TMPDIR behind a symlink. macOS's default TMPDIR
-# (/var/folders/...) is a symlink (/var -> /private/var), so a path assumption
-# that breaks there (a comparison of a logical path against a physical one, a
-# `[ -ef ]`, a "does it start with" test) never fails on Linux, where /tmp is a
-# real directory, and surfaces only on the macOS CI legs. A symlink made here
-# fails on Linux too. The link and its target live in one directory this recipe
-# creates (mktemp -d, mode 0700), never at a name next to it in a shared TMPDIR
-# where another user could pre-create the name; one rm -rf of that directory
-# on exit removes both, and the signal traps exit so the EXIT trap runs. A
-# relative TMPDIR is made absolute (cd -P + pwd, CDPATH cleared) before suites
-# see it; tmp_root keeps its old value if that fails, so the EXIT trap still
-# removes the directory. The link target is the relative name `real`, resolved
-# against the link's own directory: a target built from a relative tmp_root
-# would dangle.
+#   py-syntax): a leaked GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would otherwise
+#   steer each suite's own fixture `git` calls at THAT repository, committing or
+#   configuring into it. The runner is exec'd, not run as a child: a signal sent
+#   to the recipe's shell then reaches the runner itself, which stops the suites,
+#   instead of a shell that would wait for the whole pool before acting on it.
+#   The runner is found beside this Makefile ($(SELF)), the suites from the
+#   current directory, so `make -f <path>/Makefile test TEST_FILES=...` works from
+#   anywhere. That path is single-quoted, like '$(SELF)' in test-env-scrub: a
+#   Makefile path holding a quote or a space is not supported ($(dir) splits on
+#   spaces anyway). No python3 fails closed even without STRICT=1: there are
+#   suites to run and none would, which must never look green. (With python3,
+#   an empty TEST_FILES is different: nothing to run, `test: no tests found`,
+#   exit 0.)
 test:
-	@if [ -n "$(strip $(TEST_FILES))" ]; then \
-	  $(GIT_ENV_SCRUB) \
-	  tmp_root=""; \
-	  trap '[ -z "$$tmp_root" ] || rm -rf "$$tmp_root"' EXIT; \
-	  trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM; \
-	  tmp_root="$$(mktemp -d "$${TMPDIR:-/tmp}/make-test-tmp.XXXXXX")" || { echo "ERROR: mktemp failed - failing closed" >&2; exit 1; }; \
-	  abs_root="$$(CDPATH= cd -P -- "$$tmp_root" && pwd)" || { echo "ERROR: could not resolve the TMPDIR directory - failing closed" >&2; exit 1; }; tmp_root="$$abs_root"; \
-	  mkdir "$$tmp_root/real" && ln -s real "$$tmp_root/link" || { echo "ERROR: could not make the TMPDIR link - failing closed" >&2; exit 1; }; \
-	  export TMPDIR="$$tmp_root/link"; \
-	  failed=""; ran=0; \
-	  for t in $(TEST_FILES); do echo "run $$t"; ran=$$((ran+1)); bash "$$t" || failed="$$failed $$t"; done; \
-	  if [ -n "$$failed" ]; then echo "test: FAILED:$$failed" >&2; exit 1; fi; \
-	  echo "test: all $$ran test files passed"; \
-	else echo "test: no tests found"; fi
+	@$(GIT_ENV_SCRUB) \
+	command -v python3 >/dev/null 2>&1 || { echo "ERROR: make test needs python3 to run its suites - failing closed" >&2; exit 1; }; \
+	exec python3 -I '$(dir $(SELF))tests/run_suites.py' $(TEST_FILES)
 
 # Static tripwire for GIT_ENV_SCRUB: its definition must ask git for the local env
 #   vars, fail closed unless GIT_DIR and GIT_INDEX_FILE are listed, and then run
 #   `unset $$lev` as a command (at the start of its line, so `: unset $$lev` fails);
 #   and each recipe that must be scrubbed (`test`, `py-syntax`) must expand it BEFORE
-#   its first git call or suite loop. It reads this Makefile's own text ($(SELF), so
+#   its first git call or suite loop (a `for t in` loop, or the run_suites
+#   runner). It reads this Makefile's own text ($(SELF), so
 #   `make -f <copy>` checks the copy), which lets tests/make_test_env_scrub_test.sh
 #   prove each check against a mutated copy. A static check proves the shape only; the
 #   behaviour is proven by running the recipes under a leaked GIT_DIR (that file and
@@ -414,7 +412,7 @@ test-env-scrub:
 	  recipe="$$(awk -v t="$$target:" 'index($$0, t) == 1 {p=1; next} p && !/^\t/{p=0} p' '$(SELF)')"; \
 	  if [ -z "$$recipe" ]; then echo "ERROR: test-env-scrub: no '$$target' recipe in $(SELF) - failing closed" >&2; exit 1; fi; \
 	  use_n="$$(printf '%s\n' "$$recipe" | grep -nF '$$(GIT_ENV_SCRUB)' | head -n 1 | cut -d: -f1)"; \
-	  first_n="$$(printf '%s\n' "$$recipe" | grep -nE 'git |for t in' | head -n 1 | cut -d: -f1)"; \
+	  first_n="$$(printf '%s\n' "$$recipe" | grep -nE 'git |for t in|run_suites' | head -n 1 | cut -d: -f1)"; \
 	  if [ -z "$$use_n" ] || [ -z "$$first_n" ] || [ "$$use_n" -ge "$$first_n" ]; then \
 	    echo "ERROR: test-env-scrub: the '$$target' recipe must expand \$$(GIT_ENV_SCRUB) before its first git call or suite loop, or a leaked GIT_DIR steers it" >&2; \
 	    exit 1; \

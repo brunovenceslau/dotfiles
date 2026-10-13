@@ -110,24 +110,50 @@ DOTFILES="$B" XDG_STATE_HOME="$work" DOTFILES_UPDATE_CADENCE_DAYS=1 zsh -fc "sou
 ck "cadence: CADENCE_DAYS=1 resets a 2-day-old stamp" yes yes
 
 # --- 8. startup NEVER BLOCKS on the fetch - the load-bearing test -
-# A fake `git` earlier on PATH that SLEEPS on fetch (real git for everything else).
-# Past-cadence, the module spawns `_dotfiles_update_fetch &!`; if that spawn is
-# truly detached the `source` returns immediately while the 5s fetch runs in the
-# background, so the measured wall-clock is ~0s. If someone drops the `&!` (making
-# it synchronous) the source blocks the full 5s. We assert the source returns in
-# under 3s - impossible unless the fetch is detached. (The old test pointed at a
-# fast-FAILING remote and asserted ok==ok - it could not tell async from sync.)
+# A fake `git` earlier on PATH whose `fetch` marks that it started, then holds
+# until the test releases it, and marks that it ended (real git for everything
+# else). Past-cadence, the module spawns `_dotfiles_update_fetch &!`; if that
+# spawn is truly detached, `source` returns while the fetch is still held, so
+# `fetch-ended` cannot exist yet. If someone drops the `&!`, `source` waits for
+# the fetch, which ends only by its own 30 s bound, and `fetch-ended` is there
+# when it returns. An order, not a time: a wall-clock bound (once "under 3 s"
+# against a 5 s fetch) fails on a loaded runner whose shell startup alone
+# stalls for seconds. `fetch-started` must then appear too, or the case would
+# pass with no fetch spawned at all. (The old test pointed at a fast-FAILING
+# remote and asserted ok==ok - it could not tell async from sync.)
 fakebin="$work/fakebin"; mkdir -p "$fakebin"
 real_git="$(command -v git)"
-printf '#!/bin/sh\nfor a in "$@"; do [ "$a" = fetch ] && { sleep 5; exit 1; }; done\nexec %s "$@"\n' "$real_git" > "$fakebin/git"
-chmod +x "$fakebin/git"
+marks="$work/fetch-marks"; mkdir -p "$marks"
+printf '#!/bin/sh
+for a in "$@"; do
+  if [ "$a" = fetch ]; then
+    : > "%s/fetch-started"
+    i=0
+    while [ ! -e "%s/fetch-release" ] && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done
+    : > "%s/fetch-ended"
+    exit 1
+  fi
+done
+exec "%s" "$@"
+' \
+  "$marks" "$marks" "$marks" "$real_git" > "$fakebin/git"
+chmod u+x "$fakebin/git"
+# wait_mark NAME - wait up to 30 s for a mark of the fake fetch.
+wait_mark() {
+  local i=0
+  while [ ! -e "$marks/$1" ]; do
+    i=$((i + 1)); [ "$i" -le 300 ] || return 1
+    sleep 0.1
+  done
+}
 rm -f "$state/update-check.stamp"
-t0=$(date +%s)
 PATH="$fakebin:$PATH" DOTFILES="$B" XDG_STATE_HOME="$work" zsh -fc "source '$uc'" 2>/dev/null
-t1=$(date +%s)
-elapsed=$(( t1 - t0 ))
-[ "$elapsed" -lt 3 ] || fail "startup BLOCKED ${elapsed}s on the fetch - the spawn is not detached"
-ck "non-blocking: source returned in ${elapsed}s while a 5s fetch runs detached" "yes" "yes"
+[ ! -e "$marks/fetch-ended" ] || fail "startup BLOCKED until the fetch ended - the spawn is not detached"
+wait_mark fetch-started || fail "startup never spawned the fetch (no fetch-started mark in 30 s)"
+: > "$marks/fetch-release"
+# The detached fetch must be gone before the next case reuses the state dir.
+wait_mark fetch-ended || fail "the released fetch did not end within 30 s"
+ck "non-blocking: source returned while the detached fetch was still running" "yes" "yes"
 ( cd "$B"; git remote set-url origin "$A" )
 
 # --- 9. the background fetch is NON-INTERACTIVE - never prompts at login -------

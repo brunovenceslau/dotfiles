@@ -753,136 +753,320 @@ run
 [ "$rc" = 0 ] || fail "a heading code span of 2048 characters is verbatim, of 2049 prose (exit $rc): $out"
 ok "a heading's code span is read verbatim up to 2048 characters and as prose past it"
 
-# Hostile input stays near-linear: many unclosed comment openers, tag
-# openers with no `>`, unclosed quotes, backtick runs of every length and
-# unclosed brackets, 100 KB to just under the 1 MiB file cap each, in prose
-# and in headings (a link with an #anchor into each file makes the heading
-# pass read it too). The previous regexes were quadratic here (measured: one
-# 200 KB line of `[a](b` alone, or of `<a `, outlived 20 s, and a single
-# 200 KB heading of `[` or of `[a](x` did too), while every scan now takes
-# well under a second, so the 60 s bound separates the two with room for a
-# slow runner.
+# --- Growth, not wall time ----------------------------------------------------
+# The scans below must stay near-linear on hostile input. A wall-clock bound
+# cannot tell a slow runner from a slow scan: on a 4-CPU CI leg running 4
+# suites at once, the hostile corpus below went from about 7 s alone to past
+# 60 s, while its CPU time grew only 1.6x to 1.9x under that load. So each
+# shape is measured twice, at 1x and at 8x, in this process's CPU time
+# (time.process_time; load inflates it far less than wall time, and alike at
+# both sizes, so their ratio holds), with the collector off, each call
+# repeated until it has used 20 ms of CPU so a fast scan needs no timer floor.
+# A linear scan costs about 8x to 11x more at 8x, a quadratic one 64x: a ratio
+# past RATIO (23) is re-measured, best of three for each size, before it
+# fails. cpu_cost.py holds that rule, once, for every growth check in this
+# file.
+cat >"$work/cpu_cost.py" <<'PY'
+import gc
+import time
+
+RATIO = 23
+
+
+def cpu_cost(fn):
+    """CPU seconds one call of FN takes, collector off, repeated until the
+    calls have used 20 ms of CPU, so a timer tick cannot dominate."""
+    gc.disable()
+    try:
+        reps, t0 = 0, time.process_time()
+        while True:
+            fn()
+            reps += 1
+            dt = time.process_time() - t0
+            if dt >= 0.02:
+                return dt / reps
+    finally:
+        gc.enable()
+
+
+def growth(small, big, arm=lambda a: None):
+    """(1x cost, 8x cost) of SMALL and BIG, re-measured best of three when
+    the ratio passes RATIO. ARM(None) runs before each 1x measurement and
+    ARM(1x cost) before each 8x one: the hostile corpus sets its CPU limits
+    there."""
+    arm(None)
+    a = cpu_cost(small)
+    arm(a)
+    b = cpu_cost(big)
+    if b > RATIO * a:
+        for _ in range(2):
+            arm(None)
+            a = min(a, cpu_cost(small))
+            arm(a)
+            b = min(b, cpu_cost(big))
+    return a, b
+PY
+
+# Hostile input: many unclosed comment openers, tag openers with no `>`,
+# unclosed quotes, backtick runs of every length and unclosed brackets, in
+# prose and in headings, each shape at 1x and at 8x (the sizes the gate once
+# took as a whole, up to just under the 1 MiB file cap). Each measured call
+# is check_file on the shape plus resolve() of an #anchor into it, so the
+# heading pass reads it too. The previous regexes were quadratic here
+# (measured: one 200 KB line of `[a](b` alone, or of `<a `, outlived 20 s,
+# and a single 200 KB heading of `[` or of `[a](x` did too); one was
+# exponential (h53).
+#
+# A quadratic or exponential scan must also be stopped, not only measured:
+# before each run, RLIMIT_CPU is set to the CPU this process has used plus a
+# budget, so the kernel ends it with SIGXCPU once the run overspends. The 1x
+# run gets FIRST seconds (10 here: linear 1x runs take well under 0.2 s), the
+# 8x run 40 times the 1x cost (KILL_RATIO, past RATIO, and at least 2 s), and
+# `shape hN.md 1x` or `8x` is printed and flushed before each, so a SIGXCPU
+# death names its shape. Load inflates CPU time by 1.9x at most (measured),
+# well inside these budgets, and the 8x budget scales with a 1x cost taken
+# under the same load. bounded_run's 300 s is only the backstop for a kernel
+# that never sends SIGXCPU.
+# Usage: growth_hostile.py LINKCHECK_DIR ROOT FIRST [SHAPE...]; the mutants
+# below run it on a copy of the gate, limited to one shape.
+cat >"$work/growth_hostile.py" <<'PY'
+import math
+import os
+import resource
+import signal
+import subprocess
+import sys
+
+lc_dir, root, FIRST = sys.argv[1], os.path.realpath(sys.argv[2]), float(sys.argv[3])
+only = sys.argv[4:]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, lc_dir)
+import linkcheck
+from cpu_cost import RATIO, growth
+
+KILL_RATIO, KILL_FLOOR = 40, 2.0
+
+
+def shapes(n):
+    k = int(1400 * (n / 200000) ** 0.5)   # backtick runs 1..k: length grows as n
+    return {
+        "h1.md": "<!-- x " * (3 * n // 20),
+        "h2.md": '<a title="x ' * (9 * n // 100),
+        "h3.md": "<img href='" * (9 * n // 100),
+        "h4.md": "".join("`" * j + " x " for j in range(1, k)),
+        "h5.md": "[" * (n // 2),
+        "h6.md": "<a " * (3 * n // 10) + ">",
+        "h7.md": "[a](b" * (n // 5),
+        "h8.md": '[a](b "x ' * (n // 9),
+        "h9.md": "[a\n" * (2 * n // 3),
+        "h10.md": "<a " * (n // 3),
+        "h11.md": '<a id="x ' * (n // 9),
+        "h12.md": "# " + " " * n + "x",
+        "h13.md": "# " + "[a](x" * (n // 5),
+        "h14.md": "# " + "[" * n,
+        "h15.md": "# " + "<" * (2 * n),
+        "h16.md": "# " + "".join("`" * j + " x " for j in range(1, k)),
+        "h17.md": "[a][" * (n // 4),
+        # A heading link or image whose destination is unclosed after a run of
+        # spaces and then a character (atx_text strips trailing spaces, so the
+        # spaces must be followed by something): once quadratic, 200 KB outlived 60 s.
+        "h18.md": "# [a](" + " " * n + "x",
+        "h19.md": "# ![a](" + " " * n + "x",
+        "h20.md": "# [a](x " + " " * n + '"',
+        "h21.md": "# [a](" + "(x" * (n // 2),
+        # Body destinations: balanced and unclosed parentheses, angle openers,
+        # backslashes and every title form; `[a](<` once took 2 s at 200 KB.
+        "h22.md": "[a](<" * (n // 4),
+        "h23.md": "[a](x(y)" * (n // 8),
+        "h24.md": "[a](x" + "(y)" * (n // 3),
+        "h25.md": "[a](x(y(z(" * (n // 10),
+        "h26.md": "[a](\\" * (n // 5),
+        "h27.md": "[a](x 'y [a](x (y " * (n // 18),
+        # Escaped brackets in link text, labels and definitions.
+        "h28.md": "[\\" * (n // 2),
+        "h29.md": "[a][b\\]" * (n // 7),
+        "h30.md": "[b\\]]: x\n" * (n // 8),
+        # Tags whose quoted values hold `>`, or never close, or never open.
+        "h31.md": '<a t=">"' * (n // 8),
+        "h32.md": "<a t='" * (n // 6),
+        "h33.md": "<a t=\"x' " * (n // 9),
+        "h34.md": "<a =" + " " * n + "x",
+        # Unbounded titles and ids, escaped title delimiters, and open tags that
+        # nest quote kinds, run a quoted value into a name, or never close.
+        "h35.md": '[a](b "' + "x" * n,
+        "h36.md": '[a](b "\\' * (n // 8),
+        "h37.md": '<a id="x ' * (n // 9),
+        "h38.md": "<a t=\"<a u='" * (n // 12),
+        "h39.md": '<a t="' + "<a b " * (n // 5) + '" c="d"x',
+        "h40.md": '<a t="x"y ' * (n // 10),
+        "h41.md": "<a" + " a=b" * (n // 4),
+        # Definitions with titles that never close, destinations on the next
+        # line, backslash runs before `[`, attributes glued onto quoted values
+        # or opening with a digit, and a destination of references.
+        "h42.md": '[a]: b "x\n' * (n // 8),
+        "h43.md": "[a]:\n" * (n // 5),
+        "h44.md": "\\" * n + "[a](b",
+        "h45.md": "\\\\[" * (n // 3),
+        "h46.md": '<a x="y"' * (n // 8),
+        "h47.md": "<a 1" * (n // 4),
+        "h48.md": "[a](" + "&amp;" * (n // 5),
+        # Tags read past a `/`, a leading `=` and a `<` in a name, none closed.
+        "h49.md": "<a/" * (n // 3),
+        "h50.md": "<a =x" * (n // 5),
+        "h51.md": "<a x<y" * (n // 6),
+        "h52.md": "<a x<a " * (n // 7),
+        # One tag with a long run of `name =value` pairs: without the lookahead
+        # in _hattr each pair parses two ways and the scan is exponential.
+        "h53.md": "<a " + "x =y " * (n // 5),
+        "h54.md": "<a x</ =" * (n // 8),
+        "h55.md": "<a href=x=" * (n // 10),
+        "h56.md": "<a href=`x " * (n // 11),
+        "h57.md": "`<a t=\"`" * (n // 8) + "\\`" * (n // 4),
+        "h58.md": "[a](u`) `" * (n // 9),
+        "h59.md": "# [a](u`) `b` ![i](v`) `" * (n // 25),
+        # Destinations nested to GitHub's limit of 32 and past it: unclosed, closed
+        # one short, and 33 deep, in a body link, a heading and a definition.
+        "h60.md": "[a](x" + "(" * n,
+        "h61.md": ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 40),
+        "h62.md": ("[a](x" + "(" * 33 + "y" + ")" * 33 + " ") * (n // 40),
+        "h63.md": ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 40),
+        "h64.md": "[a]: x" + "(" * n,
+    }
+
+
+# SIGXCPU's default action, never an inherited one: a parent that ignored it
+# (SIG_IGN survives exec) would turn the CPU budget below into no limit at all,
+# since an ignored SIGXCPU at the soft limit does nothing until the hard one.
+signal.signal(signal.SIGXCPU, signal.SIG_DFL)
+# A SIGXCPU death must not leave a core file in the fixture or in /cores.
+resource.setrlimit(resource.RLIMIT_CORE, (0, resource.getrlimit(resource.RLIMIT_CORE)[1]))
+SOFT, HARD = resource.getrlimit(resource.RLIMIT_CPU)
+
+
+def cpu_used():
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    return ru.ru_utime + ru.ru_stime
+
+
+def allow(seconds):
+    """SIGXCPU once this process has used about SECONDS more CPU. The limit
+    is in whole seconds, so it is rounded up and given one more."""
+    soft = int(math.ceil(cpu_used() + seconds)) + 1
+    if HARD != resource.RLIM_INFINITY:
+        soft = min(soft, HARD)
+    resource.setrlimit(resource.RLIMIT_CPU, (soft, HARD))
+
+
+docs = os.path.join(root, "docs")
+with open(os.path.join(docs, "grow-idx.md"), "w") as f:
+    f.write("[1x](grow-1.md#x) [8x](grow-8.md#x)\n")
+small, big = shapes(25000), shapes(200000)
+bad = []
+for name in small:
+    if only and name not in only:
+        continue
+    for rel, body in (("grow-1.md", small[name]), ("grow-8.md", big[name])):
+        with open(os.path.join(docs, rel), "w") as f:
+            f.write(body + "\n")
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    tree = linkcheck.Tree(root)
+
+    def scan(rel):
+        # The anchors of a file are cached on the Tree: dropped before each
+        # call, so every call does the heading pass again.
+        tree._anchors.pop("docs/" + rel, None)
+        linkcheck.check_file(tree, "docs/" + rel)
+        linkcheck.resolve(tree, "docs/grow-idx.md", rel + "#x")
+
+    def arm(a):
+        print("shape %s %s" % (name, "1x" if a is None else "8x"), flush=True)
+        allow(FIRST if a is None else max(KILL_RATIO * a, KILL_FLOOR))
+
+    a, b = growth(lambda: scan("grow-1.md"), lambda: scan("grow-8.md"), arm)
+    if b > RATIO * a:
+        bad.append("%s: 8x cost %.1fx (%.4f s -> %.4f s CPU)" % (name, b / a, a, b))
+resource.setrlimit(resource.RLIMIT_CPU, (SOFT, HARD))
+if bad:
+    sys.exit("BAD: " + "; ".join(bad))
+print("growth: every shape within %dx" % RATIO)
+PY
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
-new_tree
-python3 -I - "$work/r/docs" <<'PY'
-import os, sys
-d, n = sys.argv[1], 200000
-shapes = {
-    "h1.md": "<!-- x " * 30000,
-    "h2.md": '<a title="x ' * 18000,
-    "h3.md": "<img href='" * 18000,
-    "h4.md": "".join("`" * k + " x " for k in range(1, 1400)),
-    "h5.md": "[" * 100000,
-    "h6.md": "<a " * 60000 + ">",
-    "h7.md": "[a](b" * (n // 5),
-    "h8.md": '[a](b "x ' * (n // 9),
-    "h9.md": "[a\n" * (2 * n // 3),
-    "h10.md": "<a " * (n // 3),
-    "h11.md": '<a id="x ' * (n // 9),
-    "h12.md": "# " + " " * n + "x",
-    "h13.md": "# " + "[a](x" * (n // 5),
-    "h14.md": "# " + "[" * n,
-    "h15.md": "# " + "<" * (2 * n),
-    "h16.md": "# " + "".join("`" * k + " x " for k in range(1, 1400)),
-    "h17.md": "[a][" * (n // 4),
-    # A heading link or image whose destination is unclosed after a run of
-    # spaces and then a character (atx_text strips trailing spaces, so the
-    # spaces must be followed by something): once quadratic, 200 KB outlived 60 s.
-    "h18.md": "# [a](" + " " * n + "x",
-    "h19.md": "# ![a](" + " " * n + "x",
-    "h20.md": "# [a](x " + " " * n + '"',
-    "h21.md": "# [a](" + "(x" * (n // 2),
-    # Body destinations: balanced and unclosed parentheses, angle openers,
-    # backslashes and every title form; `[a](<` once took 2 s at 200 KB.
-    "h22.md": "[a](<" * (n // 4),
-    "h23.md": "[a](x(y)" * (n // 8),
-    "h24.md": "[a](x" + "(y)" * (n // 3),
-    "h25.md": "[a](x(y(z(" * (n // 10),
-    "h26.md": "[a](\\" * (n // 5),
-    "h27.md": "[a](x 'y [a](x (y " * (n // 18),
-    # Escaped brackets in link text, labels and definitions.
-    "h28.md": "[\\" * (n // 2),
-    "h29.md": "[a][b\\]" * (n // 7),
-    "h30.md": "[b\\]]: x\n" * (n // 8),
-    # Tags whose quoted values hold `>`, or never close, or never open.
-    "h31.md": '<a t=">"' * (n // 8),
-    "h32.md": "<a t='" * (n // 6),
-    "h33.md": "<a t=\"x' " * (n // 9),
-    "h34.md": "<a =" + " " * n + "x",
-    # Unbounded titles and ids, escaped title delimiters, and open tags that
-    # nest quote kinds, run a quoted value into a name, or never close.
-    "h35.md": '[a](b "' + "x" * n,
-    "h36.md": '[a](b "\\' * (n // 8),
-    "h37.md": '<a id="x ' * (n // 9),
-    "h38.md": "<a t=\"<a u='" * (n // 12),
-    "h39.md": '<a t="' + "<a b " * (n // 5) + '" c="d"x',
-    "h40.md": '<a t="x"y ' * (n // 10),
-    "h41.md": "<a" + " a=b" * (n // 4),
-    # Definitions with titles that never close, destinations on the next
-    # line, backslash runs before `[`, attributes glued onto quoted values
-    # or opening with a digit, and a destination of references.
-    "h42.md": '[a]: b "x\n' * (n // 8),
-    "h43.md": "[a]:\n" * (n // 5),
-    "h44.md": "\\" * n + "[a](b",
-    "h45.md": "\\\\[" * (n // 3),
-    "h46.md": '<a x="y"' * (n // 8),
-    "h47.md": "<a 1" * (n // 4),
-    "h48.md": "[a](" + "&amp;" * (n // 5),
-    # Tags read past a `/`, a leading `=` and a `<` in a name, none closed.
-    "h49.md": "<a/" * (n // 3),
-    "h50.md": "<a =x" * (n // 5),
-    "h51.md": "<a x<y" * (n // 6),
-    "h52.md": "<a x<a " * (n // 7),
-    # One tag with a long run of `name =value` pairs: without the lookahead
-    # in _hattr each pair parses two ways and the scan is exponential.
-    "h53.md": "<a " + "x =y " * (n // 5),
-    "h54.md": "<a x</ =" * (n // 8),
-    "h55.md": "<a href=x=" * (n // 10),
-    "h56.md": "<a href=`x " * (n // 11),
-    "h57.md": "`<a t=\"`" * (n // 8) + "\\`" * (n // 4),
-    "h58.md": "[a](u`) `" * (n // 9),
-    "h59.md": "# [a](u`) `b` ![i](v`) `" * (n // 25),
-    # Destinations nested to GitHub's limit of 32 and past it: unclosed, closed
-    # one short, and 33 deep, in a body link, a heading and a definition.
-    "h60.md": "[a](x" + "(" * n,
-    "h61.md": ("[a](x" + "(" * 32 + "y" + ")" * 31 + " ") * (n // 40),
-    "h62.md": ("[a](x" + "(" * 33 + "y" + ")" * 33 + " ") * (n // 40),
-    "h63.md": ("# [a](x" + "(" * 33 + "y" + ")" * 33 + "\n") * (n // 40),
-    "h64.md": "[a]: x" + "(" * n,
+# hostile_growth DIR OUT FIRST [SHAPE...] - the growth check on the gate in
+# DIR, bounded at 300 s; sets rc and hostile_shape (the shape it was on).
+hostile_growth() {
+  local dir="$1" out="$2" first="$3"
+  shift 3
+  new_tree
+  bounded_run 300 "$out" python3 -I -B "$work/growth_hostile.py" "$dir" "$work/r" "$first" "$@" \
+    || fail "hostile input: bounded_run could not turn job control on"
+  [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
+    || fail "hostile input: the growth check outlived its 300 s backstop (hung $br_hung, stuck $br_stuck) on $(grep '^shape ' "$out" | tail -n 1)"
+  rc="$br_rc"
+  hostile_shape="$(grep "^shape " "$out" | tail -n 1 | cut -d" " -f2- || true)"
 }
-with open(os.path.join(d, "hostile-links.md"), "w") as f:
-    for name, body in shapes.items():
-        with open(os.path.join(d, name), "w") as g:
-            g.write(body + "\n")
-        f.write("[x](%s#x)\n" % name)
-PY
-git -C "$work/r" add -A
-# 60 s, not 30: measured 5.9 to 7.6 s here at load 1.8, so 30 s gave a
-# 1.3x to 1.7x margin on a runner three times slower.
-bounded_run 60 "$work/hostile.out" python3 -I "$gate" "$work/r" \
-  || fail "hostile input: bounded_run could not turn job control on"
-[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
-  || fail "hostile input: linkcheck outlived 60 s (hung $br_hung, stuck $br_stuck)"
-[ "$br_rc" = 0 ] || [ "$br_rc" = 1 ] \
-  || fail "hostile input: expected a verdict (0 or 1), got $br_rc: $(cat "$work/hostile.out")"
-ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) finishes in bounded time"
+# SIGXCPU's number, for telling a CPU-limit death from any other.
+xcpu=$(( 128 + $(kill -l XCPU) ))
+hostile_growth "$repo_root/tests" "$work/hostile.out" 10
+case "$rc" in
+  0) ;;
+  "$xcpu") fail "hostile input: shape $hostile_shape overspent its CPU budget (SIGXCPU): it is far from linear" ;;
+  *) fail "hostile input: the growth check failed (exit $rc) on shape $hostile_shape: $(cat "$work/hostile.out")" ;;
+esac
+ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) grows near-linearly in CPU time"
 
-# The nested-destination and unclosed-link shapes of h60 to h64 above carry
-# only the 60 s cap, which a slow-but-quadratic regression can still meet on a
-# fast machine. Compare growth too, as below: each shape runs at 1x and 8x, a
-# linear scan costs about 8x to 10x (up to 17x under load), a quadratic one
-# 64x, so a ratio past 23 on the best of three runs, with the collector off,
-# separates them on any runner. The sizes are the largest the gate reads (8x
-# stays under MAX_FILE_BYTES, 1 MiB), so the 1x run of the cheapest shape still
-# takes about 7 ms; the 2 ms floor only keeps a timer blip from inflating the
-# ratio. The root is resolved first, as the gate does: TMPDIR may be a symlink
-# (`make test` makes it one), and Tree refuses a file reached through one.
+# The check itself, proven against mutants of the gate, each on the one
+# shape that catches it: an exponential scan is stopped by SIGXCPU and
+# named, and a quadratic one fails the ratio. The exponential mutant drops
+# the lookahead from _hattr (h53), with a 2 s 1x budget to keep the case
+# short. The quadratic one wraps check_file in a loop over the square of the
+# file's size, about as costly as h26's own scan at 1x (measured: 6.8 ms in
+# all, 0.30 s at 8x, a ratio of 43). The 8x run stays well inside the 2 s
+# floor of its CPU budget, so the ratio, not SIGXCPU, has to catch it.
+mut="$work/mut-lookahead"
+mkdir -p "$mut"
+sed 's/ + r"|(?!" + _WS + r"\*=))")$/ + r"|)")/' "$gate" >"$mut/linkcheck.py"
+[ "$(diff "$gate" "$mut/linkcheck.py" | grep -c '^[<>]')" = 2 ] \
+  || fail "test bug: the lookahead mutant must change exactly one line of the gate"
+hostile_growth "$mut" "$work/mut-lookahead.out" 2 h53.md
+[ "$rc" = "$xcpu" ] && [ "$hostile_shape" = "h53.md 1x" ] \
+  || fail "an exponential scan (no lookahead in _hattr) must die of SIGXCPU on h53.md 1x (exit $rc, shape '$hostile_shape'): $(cat "$work/mut-lookahead.out")"
+ok "an exponential scan is stopped by its CPU budget and its shape is named"
+mut="$work/mut-quadratic"
+mkdir -p "$mut"
+{
+  cat "$gate"
+  cat <<'PY'
+
+
+_check_file = check_file
+
+
+def check_file(tree, rel):   # mutant: a quadratic term
+    k = 0
+    for _ in range((os.path.getsize(os.path.join(tree.root, rel)) // 1000) ** 2 * 240):
+        k += 1
+    return _check_file(tree, rel)
+PY
+} >"$mut/linkcheck.py"
+hostile_growth "$mut" "$work/mut-quadratic.out" 10 h26.md
+[ "$rc" = 1 ] && grep -q '^BAD: h26\.md: 8x cost ' "$work/mut-quadratic.out" \
+  || fail "a quadratic scan must fail the growth ratio on h26.md (exit $rc): $(cat "$work/mut-quadratic.out")"
+ok "a quadratic scan fails the growth ratio and its shape is named"
+
+# The nested-destination and unclosed-link shapes of h60 to h64 above, at the
+# largest sizes the gate reads (8x stays under MAX_FILE_BYTES, 1 MiB), and
+# many lines of heading links: the offset to line bisect behind Lines.start
+# and Lines.of, which a linear scan per hit would make quadratic. The root is
+# resolved first, as the gate does: TMPDIR may be a symlink (`make test` makes
+# it one), and Tree refuses a file reached through one.
 new_tree
-python3 -I -B - "$repo_root/tests" "$work/r" <<'PY' || fail "check_file must scale linearly on nested and unclosed destinations"
-import gc, os, subprocess, sys, time
+python3 -I -B - "$repo_root/tests" "$work/r" "$work" <<'PY' || fail "check_file must scale linearly on nested and unclosed destinations"
+import os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[3])
 import linkcheck
+from cpu_cost import RATIO, growth
 root = os.path.realpath(sys.argv[2])
 shapes = {
     "unclosed destination": lambda n: "[a](x" + "(" * n,
@@ -895,28 +1079,17 @@ shapes = {
     "one heading link per line": lambda n: "# [a](u`) `b`\n" * (n // 14),
 }
 
-def best(body):
-    with open(os.path.join(root, "docs", "grow.md"), "w") as f:
-        f.write(body + "\n")
-    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
-    tree = linkcheck.Tree(root)
-    lo = None
-    gc.disable()
-    try:
-        for _ in range(3):
-            t = time.perf_counter()
-            linkcheck.check_file(tree, "docs/grow.md")
-            dt = time.perf_counter() - t
-            lo = dt if lo is None else min(lo, dt)
-    finally:
-        gc.enable()
-    return lo
-
 bad = []
 for name, make in shapes.items():
-    a, b = best(make(125000)), best(make(1000000))
-    if b > 23 * max(a, 0.002):
-        bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
+    for rel, n in (("grow-1.md", 125000), ("grow-8.md", 1000000)):
+        with open(os.path.join(root, "docs", rel), "w") as f:
+            f.write(make(n) + "\n")
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True)
+    tree = linkcheck.Tree(root)
+    a, b = growth(lambda: linkcheck.check_file(tree, "docs/grow-1.md"),
+                  lambda: linkcheck.check_file(tree, "docs/grow-8.md"))
+    if b > RATIO * a:
+        bad.append("%s: 8x cost %.1fx (%.4f s -> %.4f s CPU)" % (name, b / a, a, b))
 if bad:
     sys.exit("; ".join(bad))
 PY
@@ -927,28 +1100,13 @@ ok "check_file grows linearly on unclosed and 32-deep nested destinations, in a 
 # `<!--` again at every span, when it answers -1 once, not once per run), and
 # K runs of distinct lengths with no partner followed by M paired runs (a
 # walk over the later runs to find a partner, instead of the one-pass lookup,
-# costs K x M: 0.4 s against 16 s at K=600, M=120000). Compare growth, not
-# wall time: each shape runs at 1x and 8x, a linear scan costs about 8x to 10x
-# (up to 17x under load), a quadratic one 64x, so a ratio past 23 on the best
-# of five runs, with the collector off, separates them on any runner. The
-# 5 ms floor keeps a very fast 1x run from inflating the ratio.
-python3 -I -B - "$repo_root/tests" <<'PY' || fail "blank_spans must scale linearly with no comment in the text"
-import gc, sys, time
+# costs K x M: 0.4 s against 16 s at K=600, M=120000).
+python3 -I -B - "$repo_root/tests" "$work" <<'PY' || fail "blank_spans must scale linearly with no comment in the text"
+import sys
 sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
 import linkcheck
-
-def best(text):
-    lo = None
-    gc.disable()
-    try:
-        for _ in range(5):
-            t = time.perf_counter()
-            linkcheck.blank_spans(text, True)
-            dt = time.perf_counter() - t
-            lo = dt if lo is None else min(lo, dt)
-    finally:
-        gc.enable()
-    return lo
+from cpu_cost import RATIO, growth
 
 def pairs(n):
     return "`a` b " * n
@@ -961,9 +1119,10 @@ for name, small, big in (
         ("paired spans", pairs(10000), pairs(80000)),
         ("distinct runs then pairs", distinct_then_pairs(100, 10000),
          distinct_then_pairs(800, 80000))):
-    a, b = best(small), best(big)
-    if b > 23 * max(a, 0.005):
-        bad.append("%s: 8x cost %.1fx (%.3f s -> %.3f s)" % (name, b / a, a, b))
+    a, b = growth(lambda: linkcheck.blank_spans(small, True),
+                  lambda: linkcheck.blank_spans(big, True))
+    if b > RATIO * a:
+        bad.append("%s: 8x cost %.1fx (%.4f s -> %.4f s CPU)" % (name, b / a, a, b))
 if bad:
     sys.exit("; ".join(bad))
 PY

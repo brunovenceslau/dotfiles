@@ -26,7 +26,9 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/strict_env_test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT INT TERM
 export GIT_CEILING_DIRECTORIES="$work"
 
-# --- static: no recipe line splices STRICT ------------------------------------
+# --- static: no recipe line splices STRICT or TEST_JOBS -----------------------
+# Both reach their readers through the environment (TEST_JOBS: the runner
+# make test execs), so the same pin holds both.
 # Every spelling make would expand into shell text: $(STRICT), ${STRICT},
 # $(value STRICT), ${value STRICT} and a substitution reference such as
 # $(STRICT:a=b). A `$` starts a reference only when an EVEN number of `$`
@@ -34,14 +36,14 @@ export GIT_CEILING_DIRECTORIES="$work"
 # `$$(STRICT)` does not; the regex consumes the preceding `$` in pairs.
 # `$${STRICT:-}` (the shell's own read) is not a splice. Comment lines may
 # name it.
-splice_re='(^|[^$])(\$\$)*\$([({]|\([a-z]+ +|\{[a-z]+ +)STRICT([)}]|:[^)}]*[)}])'
+splice_re='(^|[^$])(\$\$)*\$([({]|\([a-z]+ +|\{[a-z]+ +)(STRICT|TEST_JOBS)([)}]|:[^)}]*[)}])'
 splices() { grep -nE -e "$splice_re" | grep -vE '^[0-9]+:[[:space:]]*#' || true; }
 spliced="$(splices < "$mk")"
-[ -z "$spliced" ] && ok || fail "a recipe splices STRICT into shell text: $spliced"
+[ -z "$spliced" ] && ok || fail "a recipe splices STRICT or TEST_JOBS into shell text: $spliced"
 # the pin must bite: each spelling is caught, the shell's own read is not
 for form in '[ -n "$(STRICT)" ]' '[ -n "${STRICT}" ]' '[ -n "$(value STRICT)" ]' 'x$(STRICT)' \
   'x$(STRICT:a=b)' 'x${STRICT:%=%y}' 'x$$$(STRICT)' 'x$$$$$(STRICT)' 'x$$ $(STRICT)' \
-  '[ -n "${value STRICT}" ]'; do
+  '[ -n "${value STRICT}" ]' 'x$(TEST_JOBS)' 'x${TEST_JOBS}' 'x$(value TEST_JOBS)'; do
   [ -n "$(printf '\t%s\n' "$form" | splices)" ] && ok || fail "the splice pin misses: $form"
 done
 # an even run of `$` is literal dollars, so none of these is a reference

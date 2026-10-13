@@ -350,8 +350,11 @@ done
 # A locale gawk does not know: it falls back to C, silently, and counts bytes.
 expect2 "counts bytes under the locale CHECK_PATTERNS_AWK_LC_ALL names" \
   "an unknown CHECK_PATTERNS_AWK_LC_ALL" CHECK_PATTERNS_AWK=gawk CHECK_PATTERNS_AWK_LC_ALL=bogus
-# An executable that checks nothing and exits 0.
-printf '#!/bin/sh\nexit 0\n' > "$work/true"
+# An executable that checks nothing and exits 0. It drains its stdin first:
+# the gate pipes the control line into it under pipefail, and an awk that
+# exits before reading would make that printf die of SIGPIPE at random, so
+# the gate would report a scan error instead of the missing control line.
+printf '#!/bin/sh\ncat >/dev/null\nexit 0\n' > "$work/true"
 chmod u+x "$work/true"
 expect2 "did not report the over-width control line" \
   "an awk that reports nothing" CHECK_PATTERNS_AWK="$work/true"
