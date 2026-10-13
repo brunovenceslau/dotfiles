@@ -35,16 +35,21 @@ shell waiting on it. What it does, in order:
   - keeps going past a failure, prints every suite's time slowest first, and
     ends with `test: all N test files passed`, or with `test: FAILED:` naming
     every failed suite on stderr and exit 1;
-  - on HUP, INT or TERM, reports the suites that had already ended, then
+  - on HUP, INT, QUIT or TERM, reports the suites that had already ended, then
     signals every running suite's process group with TERM and waits until
     the group is empty or the grace period is over, when what is left gets
     KILL (a second signal skips the rest of the grace period). Each stopped
     suite's block is printed with an INTERRUPTED verdict and the time until
     its main process was reaped, so a suite that ignored TERM counts the
     grace period too. The scratch root is removed, and the exit is 128+N
-    (129, 130, 143), the codes a shell trap gives, which make reports as
-    "Error N". A process that left its suite's group (setsid, set -m, a
-    daemon) is out of reach.
+    (129, 130, 131, 143), the codes a shell trap gives, which make reports
+    as "Error N". A process that left its suite's group (setsid, set -m, a
+    daemon) is out of reach, and so is everything after a KILL of the
+    runner itself, which no process can catch: its suites keep running in
+    their sessions and the scratch root stays;
+  - when its stdout is closed (its reader, such as `head`, went away),
+    stops every running suite, removes the scratch root and says so on
+    stderr, exit 1.
 
 A suite that must not run alongside any other says so with a line that is
 exactly SERIAL_MARK (below). Serial suites run first, one at a time, with
@@ -91,7 +96,10 @@ REAP_SECONDS = 5.0
 # How often the scheduler looks for a finished suite or a pending signal.
 POLL_SECONDS = 0.05
 
-EXIT_ON_SIGNAL = {signal.SIGHUP: 129, signal.SIGINT: 130, signal.SIGTERM: 143}
+# QUIT too: its default action ends the runner without a word, leaving the
+# suites running in their sessions and the scratch root behind.
+EXIT_ON_SIGNAL = {signal.SIGHUP: 129, signal.SIGINT: 130, signal.SIGQUIT: 131,
+                  signal.SIGTERM: 143}
 
 # When a suite ends normally, waitid(WNOWAIT) sees that its main process
 # exited while leaving it a zombie, so its pid, and with it the group id,
@@ -141,11 +149,11 @@ def available_memory():
     raises: an unknown answer is None and the caller says so.
     """
     try:
-        with open("/proc/meminfo", encoding="ascii") as f:
-            for line in f:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
+        with open("/proc/meminfo", encoding="ascii", errors="replace") as f:
+            avail = parse_meminfo(f.read())
+        if avail is not None:
+            return avail
+    except OSError:
         pass
     try:
         out = subprocess.run(
@@ -156,6 +164,13 @@ def available_memory():
     except (OSError, subprocess.SubprocessError):
         return None
     return parse_vm_stat(out)
+
+
+def parse_meminfo(text):
+    """Bytes in /proc/meminfo's MemAvailable line (the kernel prints KiB),
+    or None when the line is missing or malformed."""
+    m = re.search(r"^MemAvailable:\s+(\d+) kB$", text, re.M)
+    return int(m.group(1)) * 1024 if m else None
 
 
 def parse_vm_stat(text):
@@ -252,6 +267,19 @@ def peak_rss_mib(ru, platform=sys.platform):
     return kib // 1024
 
 
+def read_all(fd):
+    """Every byte of the file open at FD, read from its start with pread, so
+    the offset the suite's processes still share with this descriptor is
+    left alone."""
+    chunks, off = [], 0
+    while True:
+        chunk = os.pread(fd, 1 << 16, off)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        off += len(chunk)
+
+
 def kill_group(pgid, sig):
     # ESRCH: the group is already empty. EPERM: macOS refuses a signal to a
     # group whose only member left is a zombie. Neither leaves anything to stop.
@@ -324,7 +352,12 @@ class Runner:
 
     def launch(self, run):
         env = dict(os.environ, TMPDIR=self.tmpdir(run))
-        run.log = open(os.path.join(self.root, "logs", run.index + ".log"), "wb")
+        # Kept open until report() has read it back through this same
+        # descriptor: logs/ sits beside every suite's TMPDIR, and a suite
+        # that swapped its log for a symlink or another file would print
+        # whatever that names, were it opened again by its path. Read and
+        # write, so that one descriptor serves both.
+        run.log = open(os.path.join(self.root, "logs", run.index + ".log"), "w+b")
         try:
             # `--`: a suite path starting with `-` is a file, never an option.
             run.proc = subprocess.Popen(
@@ -361,7 +394,6 @@ class Runner:
         run.proc.returncode = run.code = os.waitstatus_to_exitcode(status)
         run.seconds = time.monotonic() - run.start
         run.rss = peak_rss_mib(ru) if ru is not None else 0
-        run.log.close()
         return True
 
     def reap(self):
@@ -396,10 +428,11 @@ class Runner:
             else:
                 verdict = "FAILED (exit %d)" % run.code
         try:
-            with open(run.log.name, "rb") as f:
-                body = f.read()
+            body = read_all(run.log.fileno())
         except OSError as e:
             body = ("(its output could not be read: %s)\n" % e).encode()
+        finally:
+            run.log.close()
         if body and not body.endswith(b"\n"):
             body += b"\n"
         out = sys.stdout.buffer
@@ -421,9 +454,11 @@ class Runner:
         stop its own suites, each in a session of its own, out of this
         runner's reach. A main process is reaped as soon as it exits; its
         group id stays in use, and so cannot be reused, for as long as any
-        member is left, and whether one is left is asked again each poll.
-        A group that empties between that last poll and the KILL leaves the
-        same few-microsecond window for a reuse as a run without waitid."""
+        member is left. Whether one is left is asked again each poll, and
+        once more right before the KILL, so a group that emptied during the
+        last poll's sleep is skipped, not KILLed; one that empties between
+        that probe and the KILL leaves the same few-microsecond window for a
+        reuse as a run without waitid."""
         stopped, self.running = self.running, []
         if not stopped:
             return []
@@ -448,6 +483,12 @@ class Runner:
             if live:
                 time.sleep(POLL_SECONDS)
         for run in live:
+            try:
+                os.killpg(run.proc.pid, 0)
+            except ProcessLookupError:
+                continue                    # emptied since the last poll
+            except OSError:
+                pass
             kill_group(run.proc.pid, signal.SIGKILL)
         pending = [r for r in stopped if r.code is None]
         deadline = time.monotonic() + REAP_SECONDS
@@ -457,7 +498,6 @@ class Runner:
                 break
             time.sleep(POLL_SECONDS)
         for run in pending:
-            run.log.close()
             emit(sys.stderr, "WARN: test: %s (pid %d) did not exit after KILL; left behind\n"
                  % (run.path, run.proc.pid))
         return stopped
@@ -488,6 +528,8 @@ class Runner:
                 pending.pop(0)
                 try:
                     self.launch(nxt)
+                except BrokenPipeError:
+                    raise                   # stdout closed: main() says so
                 except OSError as e:
                     err("could not start %s (%s)" % (nxt.path, e))
                     self.abort("the run stopped: a suite could not start")
@@ -551,10 +593,20 @@ def main(argv):
                  % (plural(len(runner.runs), "suite"), serial, runner.jobs, how))
             rc = runner.schedule()
         return rc
+    except BrokenPipeError:
+        # Whoever read stdout is gone (`head`, say). Point stdout at
+        # /dev/null, so the cleanup below and the interpreter's own flush at
+        # exit cannot raise again, and say why on stderr.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+        return err("stdout was closed (a broken pipe); stopping the run "
+                   "and its running suites")
     finally:
         # Runs on every path, a failed setup and an exception included. A
         # signal during cleanup only sets a flag, so it cannot cut it short.
-        runner.stop_all()
+        for run in runner.stop_all():
+            run.log.close()
         if runner.root is not None:
             remove_tree(runner.root)
 

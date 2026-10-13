@@ -90,14 +90,15 @@ lint: check-patterns py-syntax
 	@if [ -n "$(strip $(BASH32_FILES))" ]; then \
 	  for f in $(BASH32_FILES); do echo "/bin/bash -n $$f"; /bin/bash -n "$$f" || exit 1; done; \
 	else echo "/bin/bash -n: no bash-3.2 files yet, skipping"; fi
-	@# The test scripts RUN under `make test`'s `bash "$$t"`, which on the macOS CI legs is
-	@#   the system /bin/bash 3.2. Parse-check them with the absolute /bin/bash so a bash-3.2
-	@#   -only parse error (e.g. a `case` inside a `$$(...)`, whose pattern `)` the naive 3.2
-	@#   scanner mis-reads - a real packages_test bug once caught this way) is caught at LINT time, fast and
-	@#   un-masked, instead of at test-RUN time behind make test's per-file loop. Asserts the
-	@#   tests PARSE under the system bash, not that they are 3.2 feature-limited. Like the
-	@#   BASH32 pass above, the 3.2-ONLY class is caught by the system /bin/bash (real 3.2)
-	@#   on both macOS legs - a lint under a newer bash is not proof of 3.2 parse-safety.
+	@# The test scripts RUN under tests/run_suites.py's `bash -- <suite>` (`make test`), which
+	@#   on the macOS CI legs is the system /bin/bash 3.2. Parse-check them with the absolute
+	@#   /bin/bash so a bash-3.2-only parse error (e.g. a `case` inside a `$$(...)`, whose pattern
+	@#   `)` the naive 3.2 scanner mis-reads - a real packages_test bug once caught this way) is
+	@#   caught at LINT time, fast and un-masked, instead of at test-RUN time among every other
+	@#   suite's output. Asserts the tests PARSE under the system bash, not that they are
+	@#   3.2 feature-limited. Like the BASH32 pass above, the 3.2-ONLY class is caught by
+	@#   the system /bin/bash (real 3.2) on both macOS legs - a lint under a newer bash is
+	@#   not proof of 3.2 parse-safety.
 	@if [ -n "$(strip $(TEST_FILES))" ]; then \
 	  for f in $(TEST_FILES) $(TEST_LIB_FILES); do echo "/bin/bash -n $$f"; /bin/bash -n "$$f" || exit 1; done; \
 	else echo "/bin/bash -n tests: no test files yet, skipping"; fi
@@ -364,8 +365,8 @@ py-syntax:
 #   per suite so it never interleaves. KEEP-GOING: it runs EVERY suite and names
 #   ALL failures at once, exiting nonzero iff any failed. An early abort once
 #   MASKED a multi-bug macOS breakage: two independent failures surfaced one per
-#   CI round. On HUP, INT or TERM it stops every running suite, removes its
-#   scratch root and exits 129, 130 or 143.
+#   CI round. On HUP, INT, QUIT or TERM it stops every running suite, removes
+#   its scratch root and exits 129, 130, 131 or 143.
 # Every suite runs with git's local env vars unset ($(GIT_ENV_SCRUB), defined above
 #   py-syntax): a leaked GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would otherwise
 #   steer each suite's own fixture `git` calls at THAT repository, committing or
@@ -377,8 +378,9 @@ py-syntax:
 #   anywhere. That path is single-quoted, like '$(SELF)' in test-env-scrub: a
 #   Makefile path holding a quote or a space is not supported ($(dir) splits on
 #   spaces anyway). No python3 fails closed even without STRICT=1: there are
-#   suites to run and none would, which must never look green. (An empty
-#   TEST_FILES is different: nothing to run, `test: no tests found`, exit 0.)
+#   suites to run and none would, which must never look green. (With python3,
+#   an empty TEST_FILES is different: nothing to run, `test: no tests found`,
+#   exit 0.)
 test:
 	@$(GIT_ENV_SCRUB) \
 	command -v python3 >/dev/null 2>&1 || { echo "ERROR: make test needs python3 to run its suites - failing closed" >&2; exit 1; }; \

@@ -445,8 +445,8 @@ python3 -I tests/linkcheck.py .
 - keeps going past a failure, lists every suite's time slowest first, and
   ends with `test: all N test files passed`, or names every failed suite on
   stderr after `test: FAILED:` and exits 1;
-- on Ctrl-C, `HUP` or `TERM`, first reports the suites that had already
-  ended, with their own verdicts. It then sends `TERM` to every running
+- on Ctrl-C, `HUP`, `QUIT` or `TERM`, first reports the suites that had
+  already ended, with their own verdicts. It then sends `TERM` to every running
   suite's process group and waits until the group is empty, or until a
   5-second grace period is over, when what is left gets `KILL` (a second
   Ctrl-C skips the rest of the wait). Waiting for the whole group, not only
@@ -454,8 +454,13 @@ python3 -I tests/linkcheck.py .
   runner's own suites. It prints each stopped suite's output with an
   `INTERRUPTED` verdict and the time until its main process ended, which
   includes the grace period for a suite that ignored `TERM`, removes the
-  scratch root and exits 130, 129 or 143. A process that left its suite's
-  group (`setsid`, a `set -m` job, a daemon) is out of reach.
+  scratch root and exits 129, 130, 131 or 143. A process that left its
+  suite's group (`setsid`, a `set -m` job, a daemon) is out of reach, and so
+  is everything after a `KILL` of the runner itself, which no process can
+  catch: its suites keep running and the scratch root stays;
+- when its stdout is closed (its reader, such as `head`, went away), stops
+  the running suites, removes the scratch root and exits 1, naming the broken
+  pipe on stderr.
 
 A suite that must not run beside any other carries the line
 `# run_suites: serial`, with the reason under it. Serial suites run first,
@@ -468,10 +473,10 @@ into the checkout, or into any fixed path outside its `TMPDIR`, needs the
 line too.
 
 Without `python3`, `make test` fails even when `STRICT` is unset: there are
-suites to run and none would, which must never pass. An empty suite list is
-not a failure: `test: no tests found`, exit 0. `tests/run_suites_test.sh`
-holds the runner to all of this; `tests/make_test_env_scrub_test.sh` runs
-the recipe itself.
+suites to run and none would, which must never pass. With `python3`, an empty
+suite list is not a failure: `test: no tests found`, exit 0.
+`tests/run_suites_test.sh` holds the runner to all of this;
+`tests/make_test_env_scrub_test.sh` runs the recipe itself.
 
 ### What `make smoke` does
 
@@ -1044,6 +1049,7 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Tell an out-of-memory kill apart from an expected failure in `make test` | A suite that asserts a command fails could pass when the kernel kills that command for memory instead; only the suite's own `done` line shows a kill by signal 9, and only for its main process | A `done` line shows a peak RSS near the 384 MiB budget, or a suite is reported killed by signal 9 |
 | Give each `make test` suite a time limit | No per-suite limit: a hung suite runs until it is interrupted, and the `start` line without a matching `done` names it | A hung suite eats the CI timeout |
 | Read a container's cgroup memory limit when `make test` picks its job count | The runner reads `MemAvailable` (Linux) or `vm_stat` (macOS), which a container with a memory limit may overstate | `make test` runs out of memory in a container, or CI moves into one |
+| Lower the default `make test` job count on small hosts | The cap is the CPU count (or the memory budget, if smaller). On the 4-CPU macOS Intel CI leg, 3 jobs would end at about the same time as 4: the run's critical path is the serial phase (59.6 s) plus `check_patterns_test.sh` (592.7 s), 652.3 s against a wall time of 678.3 s, so the other suites already fit beside it. Splitting `check_patterns_test.sh` is the lever that would shorten the wall time | A run's wall time exceeds its critical path (the serial phase plus the slowest pool suite) by more than 10% |
 | Start the slowest suites first in `make test` | Suites start in file order. The slowest suite (`check_patterns_test.sh`) sorts early, so it starts with the first wave | The time summary shows the run ending well after its slowest suite, because that suite started late |
 | Accept a socketpair as the stdin of the pre-push guard in `.githooks/commit_identity.py`, as well as git's pipe | Refused: the guard accepts only a pipe (`S_ISFIFO`) and stops with "stdin is not git's pipe" on anything else, so what is pushed is never guessed. No hook runner wired here hands over a socketpair | A hook runner that passes the ref lines on a socketpair is wired: accepting `S_ISSOCK` is then the change to make |
 | Lint that every allowed-signers line names exactly one principal | No deterministic lint yet (deferred on 2026-10-12). `docs/stacked-prs.md` requires one principal per line, because `git log --format=%GS` reports the first principal on the matching line, so a line shared with another principal can pass for a key that is not the maintainer's alone. A key listed on two lines yields the first principal `ssh-keygen` returns for the key, in file order, so the lint must also reject a key that appears on more than one line; that one-line-per-key half is written nowhere else yet. Today only review holds the one-principal half. The lint would be a gate on the `security-model` surface | The next change to the SSH signing setup or to the allowed-signers file |

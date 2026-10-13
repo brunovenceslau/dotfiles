@@ -13,10 +13,14 @@
 # scratch directory, under a TMPDIR of its own, so "nothing left behind" is a
 # plain `ls -A`. Concurrency is proven with barriers (each suite waits until
 # all of them have started), never with timings, so a slow machine cannot turn
-# a case red; the only timing checks are lower bounds. Every runner call is
-# bounded, so a runner that hangs fails the case instead of stalling the
-# suite. tests/make_test_env_scrub_test.sh holds the recipe's side: the git env
-# scrub, TMPDIR made absolute, the 129/130/143 exits as make reports them.
+# a case red. The timing checks are lower bounds, an order between two
+# suites' times, and upper bounds far above what they bound (a 0.3 s reap
+# bound must hold within 5 s). Every runner call is bounded, so a runner that
+# hangs fails the case instead of stalling the suite. A fixture that ignores
+# TERM loops for 60 s at most, so a case cut short cannot leave it running
+# for ever. tests/make_test_env_scrub_test.sh holds the recipe's side: the
+# git env scrub, TMPDIR made absolute, the 129/130/131/143 exits as make
+# reports them.
 set -euo pipefail
 set -E
 trap '_err_rc=$?; [ "${BASH_SUBSHELL:-0}" -ne 0 ] || echo "ERR: unexpected failure at line $LINENO (rc $_err_rc): $BASH_COMMAND" >&2' ERR
@@ -35,7 +39,10 @@ if ! py="$(command -v python3)"; then
 fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/run_suites_test.XXXXXX")"
-trap 'rm -rf "$work"' EXIT
+# inner_leader is set only while case 6c's inner suite, which sits in a
+# session no runner here can reach once its own runner is gone, may run.
+inner_leader=""
+trap '[ -z "$inner_leader" ] || kill -KILL "$inner_leader" 2>/dev/null || true; rm -rf "$work"' EXIT
 # On a signal, stop the runners this file started, and wait for them, before
 # exiting: a runner keeps its suites in sessions of their own, so only the
 # runner itself can stop them, and one cut short leaves them running forever.
@@ -60,6 +67,7 @@ forward() {
 }
 trap 'forward 129' HUP
 trap 'forward 130' INT
+trap 'forward 131' QUIT
 trap 'forward 143' TERM
 
 # fresh - a new suite directory ($s), shared state directory ($SHARED, which
@@ -112,6 +120,9 @@ wait_file() {
 # block FILE OUTPUT - the lines of FILE's block, from `run FILE` to its `done`.
 block() { awk -v f="$1" '$0 == "run " f { p = 1 } p { print } p && index($0, "done " f ": ") == 1 { exit }' <<<"$2"; }
 now() { "$py" -I -c 'import time; print("%.3f" % time.time())'; }
+# The body of a fixture that ignores TERM: 600 sleeps of 0.1 s, so one left
+# behind by a case cut short ends by itself within about a minute.
+deaf_loop='i=0; while [ "$i" -lt 600 ]; do i=$((i + 1)); sleep 0.1; done'
 
 # --- 1. Several at a time: three suites pass a three-way barrier, so all ran
 # at once; each `start` line precedes its block; every block is opened by
@@ -244,7 +255,7 @@ finish() {
 # --- 6. A signal stops every running suite, its own children included (one
 # that ignores TERM too), prints each stopped suite's output with an
 # INTERRUPTED verdict, removes the scratch root, and exits 128+N.
-for sig in HUP:129 INT:130 TERM:143; do
+for sig in HUP:129 INT:130 QUIT:131 TERM:143; do
   code="${sig#*:}"; sig="${sig%:*}"
   fresh
   suite slow.sh 'echo SLOW-OUT
@@ -253,13 +264,15 @@ echo "$!" > "$SHARED/child.pid"
 ( trap "" TERM; exec sleep 300 ) &
 echo "$!" > "$SHARED/ignorer.pid"
 wait'
-  suite other.sh 'echo OTHER-OUT; sleep 300'
+  suite other.sh 'echo OTHER-OUT; echo ready > "$SHARED/other.ready"; sleep 300'
   # The TERM-ignoring child keeps the group alive for the whole grace
   # period: 1s keeps the case short.
   extra_env=(RUN_SUITES_GRACE_SECONDS=1)
   start_bg 2 slow.sh other.sh
   extra_env=()
   wait_file "$SHARED/ignorer.pid" || { kill -KILL "$rpid" 2>/dev/null || true; fail "test bug: slow.sh never started ($sig)"; }
+  # other.sh has printed OTHER-OUT once it marks itself ready.
+  wait_file "$SHARED/other.ready" || { kill -KILL "$rpid" 2>/dev/null || true; fail "test bug: other.sh never started ($sig)"; }
   kill -"$sig" "$rpid"
   finish 30
   out="$(cat "$work/out")"
@@ -282,9 +295,9 @@ done
 # --- 6b. A suite whose main process ignores TERM gets TERM first and KILL
 # only once the grace period is over.
 fresh
-suite stubborn.sh 'trap "echo TERM > \"\$SHARED/got-term\"" TERM
-echo "$$" > "$SHARED/leader.pid"
-while :; do sleep 0.1; done'
+suite stubborn.sh "trap 'echo TERM > \"\$SHARED/got-term\"' TERM
+echo \"\$\$\" > \"\$SHARED/leader.pid\"
+$deaf_loop"
 extra_env=(RUN_SUITES_GRACE_SECONDS=2)
 start_bg 1 stubborn.sh
 extra_env=()
@@ -300,9 +313,9 @@ awk -v a="$t0" -v b="$t1" 'BEGIN { exit !(b - a >= 2) }' && ok \
 gone "$(cat "$SHARED/leader.pid")" 10 && ok || fail "the TERM-ignoring suite must be KILLed after the grace period"
 # A second signal skips the rest of the grace period.
 fresh
-suite stubborn.sh 'trap "echo TERM > \"\$SHARED/got-term\"" TERM
-echo "$$" > "$SHARED/leader.pid"
-while :; do sleep 0.1; done'
+suite stubborn.sh "trap 'echo TERM > \"\$SHARED/got-term\"' TERM
+echo \"\$\$\" > \"\$SHARED/leader.pid\"
+$deaf_loop"
 extra_env=(RUN_SUITES_GRACE_SECONDS=120)
 start_bg 1 stubborn.sh
 extra_env=()
@@ -321,7 +334,7 @@ gone "$(cat "$SHARED/leader.pid")" 10 && ok || fail "a second signal must KILL t
 # exited would leave the inner suite running forever, orphaned.
 fresh
 mkdir -p "$SHARED/inner" "$SHARED/itp"
-printf '#!/usr/bin/env bash\ntrap "echo TERM > \\"\\$SHARED/got-term\\"" TERM\necho "$$" > "$SHARED/leader.pid"\nwhile :; do sleep 0.1; done\n' \
+printf '#!/usr/bin/env bash\ntrap "echo TERM > \\"\\$SHARED/got-term\\"" TERM\necho "$$" > "$SHARED/leader.pid"\n%s\n' "$deaf_loop" \
   > "$SHARED/inner/stubborn.sh"
 suite nest.sh 'cd "$SHARED/inner" || exit 1
 RUN_SUITES_GRACE_SECONDS=1 TEST_JOBS=1 TMPDIR="$SHARED/itp" "$PY" -I "$RUNNER" stubborn.sh > "$SHARED/inner.log" 2>&1 &
@@ -335,10 +348,34 @@ kill -TERM "$rpid"
 finish 40
 [ "$rc" = 143 ] && ok || fail "the outer runner must exit 143 (rc $rc): $(cat "$work/out")"
 gone "$inner_leader" 10 && ok \
-  || { kill -KILL "$inner_leader" 2>/dev/null || true; fail "an interrupted nested runner must not orphan its suite (pid $inner_leader alive): $(cat "$SHARED/inner.log")"; }
+  || fail "an interrupted nested runner must not orphan its suite (pid $inner_leader alive): $(cat "$SHARED/inner.log")"
+inner_leader=""
 grep -q "test: interrupted by SIGTERM" "$SHARED/inner.log" && ok \
   || fail "the inner runner must get to stop its own suites: $(cat "$SHARED/inner.log")"
 [ -z "$(ls -A "$SHARED/itp")" ] && ok || fail "the inner runner must remove its scratch root: $(ls -A "$SHARED/itp")"
+
+# --- 6d. An INTERRUPTED suite's time runs until its main process ended: one
+# that obeys TERM is not charged the grace period, one that ignores it is.
+# An order between the two, not a bound, so load cannot turn it red.
+fresh
+suite obey.sh 'echo ready > "$SHARED/obey.ready"; sleep 300'
+suite deaf.sh "trap '' TERM
+echo ready > \"\$SHARED/deaf.ready\"
+$deaf_loop"
+extra_env=(RUN_SUITES_GRACE_SECONDS=3)
+start_bg 2 obey.sh deaf.sh
+extra_env=()
+for f in obey deaf; do
+  wait_file "$SHARED/$f.ready" || { kill -KILL "$rpid" 2>/dev/null || true; fail "test bug: $f.sh never started"; }
+done
+kill -TERM "$rpid"
+finish 30
+out="$(cat "$work/out")"
+secs() { sed -n "s/^done $1: INTERRUPTED (by SIGTERM) in \([0-9.]*\)s, .*/\1/p" <<<"$out"; }
+t_obey="$(secs obey.sh)"; t_deaf="$(secs deaf.sh)"
+[ -n "$t_obey" ] && [ -n "$t_deaf" ] || fail "both suites must be reported INTERRUPTED with a time: $out"
+awk -v a="$t_obey" -v b="$t_deaf" 'BEGIN { exit !(a < b) }' && ok \
+  || fail "a suite that obeys TERM must not be charged the grace period (obey ${t_obey}s, deaf ${t_deaf}s): $out"
 
 # --- 7. Serial suites run alone and before the pool: no pool suite is
 # running while one runs, and every pool suite starts after it ended.
@@ -406,7 +443,8 @@ grep -q "^ERROR: test: could not make the scratch root" <<<"$err" && ok \
 [ ! -e "$SHARED/ran" ] && ok || fail "no suite may run without a scratch root"
 
 # --- 10. The default job count: min(CPUs, available memory / the per-suite
-# budget), at least 1, the macOS vm_stat reading, and the peak RSS units
+# budget), at least 1, the Linux meminfo and macOS vm_stat readings, and the
+# peak RSS units
 # (KiB on Linux, bytes on macOS). Pure functions, so checked here on every
 # platform. -B: importing the runner must not write tests/__pycache__ into
 # the checkout while other suites copy it.
@@ -436,6 +474,13 @@ checks = [
         "Pages speculative:                          30.\n"), 1230 * 16384),
     ("vm_stat without a page size", m.parse_vm_stat("Pages free: 1.\n"), None),
     ("vm_stat without a count", m.parse_vm_stat("(page size of 4096 bytes)\nPages free: 1.\n"), None),
+    ("meminfo KiB", m.parse_meminfo(
+        "MemTotal:       16000000 kB\n"
+        "MemFree:          100000 kB\n"
+        "MemAvailable:    8000000 kB\n"
+        "Buffers:           50000 kB\n"), 8000000 * 1024),
+    ("meminfo without MemAvailable", m.parse_meminfo("MemTotal: 16000000 kB\nMemFree: 1 kB\n"), None),
+    ("meminfo with a malformed count", m.parse_meminfo("MemAvailable:   12x34 kB\n"), None),
     ("peak RSS on Linux (KiB)", m.peak_rss_mib(linux, "linux"), 300),
     ("peak RSS on macOS (bytes)", m.peak_rss_mib(darwin, "darwin"), 300),
 ]
@@ -444,7 +489,7 @@ for name, got, want in checks:
 PY
 )"
 grep -q '^BAD' <<<"$units" && fail "job count units: $(grep '^BAD' <<<"$units")" || ok
-[ "$(grep -c '^ok' <<<"$units")" = 9 ] && ok || fail "test bug: the units did not all run: $units"
+[ "$(grep -c '^ok' <<<"$units")" = 12 ] && ok || fail "test bug: the units did not all run: $units"
 [ -z "$(find "$repo_root/tests" -name '__pycache__' -prune -newer "$work/units.stamp" -print 2>/dev/null)" ] && \
   [ -z "$(find "$repo_root/tests" -path '*/__pycache__/run_suites*' -newer "$work/units.stamp" -print 2>/dev/null)" ] && ok \
   || fail "the units must not write tests/__pycache__ into the checkout"
@@ -454,13 +499,18 @@ grep -q '^BAD' <<<"$units" && fail "job count units: $(grep '^BAD' <<<"$units")"
 # with a suite already running stops and reports it; a signal during startup
 # ends the run before any suite; the grace period's both bounds; a signal
 # mid-step starts nothing; the first signal names the exit; a main process
-# that cannot be reaped after KILL is left behind, named, within the bound.
+# that cannot be reaped after KILL is left behind, named, within the bound;
+# an exception still stops the suites and removes the scratch root; a
+# broken pipe during a launch is named as one.
 # Each prints `ok NAME` or `BAD NAME: why`.
 fresh
 printf '#!/usr/bin/env bash\nexit 3\n' > "$s/e.sh"
 printf '#!/usr/bin/env bash\necho SLOW-OUT\nsleep 300\n' > "$s/slow.sh"
 printf '#!/usr/bin/env bash\n: > "$SHARED/ran"\n' > "$s/m.sh"
-printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\nwhile :; do sleep 0.1; done\n' > "$s/deaf.sh"
+# e_wait.sh fails only once slowpid.sh has written its pid, the id of its group.
+printf '#!/usr/bin/env bash\ni=0\nwhile [ ! -s "$SHARED/pid.txt" ] && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done\nexit 3\n' > "$s/e_wait.sh"
+printf '#!/usr/bin/env bash\necho "$$" > "$SHARED/pid.txt"\nsleep 300\n' > "$s/slowpid.sh"
+printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\n%s\n' "$deaf_loop" > "$s/deaf.sh"
 printf '#!/usr/bin/env bash\n: > "$SHARED/obey.sh.ready"\nsleep 300\n' > "$s/obey.sh"
 cat > "$work/harness.py" <<'PY'
 import importlib.util, io, os, signal, sys, time
@@ -625,13 +675,70 @@ os.waitpid(pid, 0)
 m.remove_tree(r.root)
 check("reap bound named", "slow.sh (pid %d) did not exit after KILL; left behind" % pid in err, err)
 check("reap bound held", took < 5, took)
+m.REAP_SECONDS = 5.0
+
+# 8. An exception out of the scheduler (here: report() raising as e.sh's
+# block is printed) still reaches the caller, after main()'s cleanup has
+# stopped the running suite's group and removed the scratch root.
+pidfile = os.path.join(os.environ["SHARED"], "pid.txt")
+real_report = m.Runner.report
+def report(self, run, verdict=None):
+    raise RuntimeError("simulated report failure")
+m.Runner.report = report
+os.environ["TEST_JOBS"] = "2"
+try:
+    captured(lambda: m.main(["e_wait.sh", "slowpid.sh"]))
+    raised = None
+except RuntimeError as e:
+    raised = e
+m.Runner.report = real_report
+for sig in m.EXIT_ON_SIGNAL:
+    signal.signal(sig, signal.SIG_DFL)
+check("exception propagates", raised is not None, "main() returned")
+try:
+    os.killpg(int(open(pidfile).read()), 0)
+    gone = False
+except ProcessLookupError:
+    gone = True
+except OSError:
+    gone = False
+check("exception stops the group", gone, "slowpid.sh's group is alive")
+check("exception cleans", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
+
+# 9. stdout closes just as a `start` line is written, the one write inside
+# a launch: a broken pipe, never a suite that "could not start".
+class Closed(Cap):
+    def __init__(self):
+        Cap.__init__(self)
+        self.fd = os.open(os.devnull, os.O_WRONLY)
+        real_write = self.buffer.write
+        def write(b):
+            if bytes(b).startswith(b"start "):
+                raise BrokenPipeError(32, "Broken pipe")
+            return real_write(b)
+        self.buffer.write = write
+    def fileno(self):
+        return self.fd
+out, err = Closed(), Cap()
+real = sys.stdout, sys.stderr
+sys.stdout, sys.stderr = out, err
+try:
+    rc = m.main(["m.sh"])
+finally:
+    sys.stdout, sys.stderr = real
+for sig in m.EXIT_ON_SIGNAL:
+    signal.signal(sig, signal.SIG_DFL)
+check("broken pipe rc", rc == 1, rc)
+check("broken pipe named", "stdout was closed (a broken pipe)" in err.text()
+      and "could not start" not in err.text(), err.text())
+check("broken pipe cleans", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
 PY
 bounded_run 60 "$work/harness" sh -c 'cd "$1" && shift && exec "$@"' sh "$s" \
   env TMPDIR="$tp" "$py" -I -B "$work/harness.py" "$runner"
 harness="$(cat "$work/harness")"
 [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "the in-process harness hung: $harness"
 grep -q '^BAD' <<<"$harness" && fail "in-process cases: $(grep '^BAD' <<<"$harness")" || ok
-[ "$(grep -c '^ok' <<<"$harness")" = 19 ] && ok || fail "test bug: the in-process cases did not all run: $harness"
+[ "$(grep -c '^ok' <<<"$harness")" = 25 ] && ok || fail "test bug: the in-process cases did not all run: $harness"
 
 # --- 11. Verdicts, launch and input edge cases.
 # A suite killed by a signal is a failure that names the signal.
@@ -666,6 +773,17 @@ fresh
 suite -n.sh 'echo DASH-RAN'
 run 1 -n.sh
 [ "$rc" = 0 ] && grep -qx "DASH-RAN" <<<"$out" && ok || fail "a suite named -n.sh must run as a file (rc $rc): $out $err"
+# A suite's block is read back from the log it wrote, through the runner's
+# own descriptor: a suite that replaces its log file (logs/ sits two levels
+# above its TMPDIR) cannot make the runner print another file.
+fresh
+suite swap.sh 'echo REAL-OUT
+log="$TMPDIR/../../logs/1.log"
+[ -f "$log" ] || { echo "test bug: no log at $log"; exit 9; }
+rm -f "$log" && echo FORGED > "$log"'
+run 1 swap.sh
+[ "$rc" = 0 ] && grep -qx REAL-OUT <<<"$out" && ! grep -q FORGED <<<"$out" && ok \
+  || fail "a suite that swaps its log file must still get its own output printed (rc $rc): $out"
 # What a suite leaves running in its process group dies with it.
 fresh
 suite leave.sh 'sleep 300 &
@@ -674,11 +792,61 @@ run 1 leave.sh
 [ "$rc" = 0 ] && ok || fail "a suite leaving a background process must still pass (rc $rc): $out"
 left="$(cat "$SHARED/left.pid")"
 gone "$left" 10 && ok || { kill -KILL "$left" 2>/dev/null || true; fail "a process left in an ended suite's group must be killed (pid $left)"; }
+# The peak RSS is measured, not only printed: a suite whose child touches
+# 64 MiB reports at least 60 MiB (ru_maxrss is KiB on Linux, bytes on macOS;
+# the runner converts both).
+fresh
+suite big.sh '"$PY" -I -c "b = b\"x\" * (64 << 20); print(len(b))"'
+extra_env=(PY="$py")
+run 1 big.sh
+extra_env=()
+peak="$(sed -n 's/^done big\.sh: ok in [0-9.]*s, peak RSS \([0-9]*\) MiB$/\1/p' <<<"$out")"
+[ "$rc" = 0 ] && [ -n "$peak" ] && [ "$peak" -ge 60 ] && ok \
+  || fail "a suite that touches 64 MiB must report a peak RSS of at least 60 MiB (rc $rc, peak '$peak'): $out"
+# A suite that leaves a read-only directory holding a symlink to a directory
+# outside the scratch root: the root is still removed, and the outside
+# directory's mode is left alone (the fallback makes directories writable
+# without following links). Root ignores permissions, so the first removal
+# would never fail and the fallback never run: the case needs another user.
+if [ "$(id -u)" != 0 ]; then
+  fresh
+  mkdir -p "$SHARED/outside"
+  chmod 555 "$SHARED/outside"
+  suite ro.sh 'mkdir "$TMPDIR/ro" && ln -s "$SHARED/outside" "$TMPDIR/ro/link" && chmod 500 "$TMPDIR/ro"'
+  run 1 ro.sh
+  mode="$("$py" -I -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode)))' "$SHARED/outside")"
+  chmod 755 "$SHARED/outside"
+  [ "$rc" = 0 ] && empty_tp && ok || fail "a read-only directory left by a suite must not keep the scratch root (rc $rc): $(ls -A "$tp") $err"
+  [ "$mode" = 0o555 ] && ok || fail "removing the scratch root must not follow a link out of it (outside dir now $mode)"
+else
+  echo "SKIP: running as root, which ignores permissions - the read-only scratch root case was not run"
+fi
+# A closed stdout (its reader, such as `head`, went away) is a broken pipe,
+# reported as one: the run stops its suites, removes the scratch root and
+# exits 1. It is never a suite that "could not start". The reader here goes
+# away once p1.sh runs, and p2.sh's block, a second later, is the first write
+# to fail.
+fresh
+suite p1.sh 'echo "$$" > "$SHARED/p1.pid"; sleep 300'
+suite p2.sh 'sleep 1; echo P2'
+bounded_run 60 "$work/bp" bash -c 'cd "$1" && shift && "$@" 2>"$0" \
+  | { IFS= read -r _ || :; while [ ! -s "$SHARED/p1.pid" ]; do sleep 0.1; done; }; exit "${PIPESTATUS[0]}"' \
+  "$work/err" "$s" env TEST_JOBS=2 TMPDIR="$tp" "$py" -I "$runner" p1.sh p2.sh
+err="$(cat "$work/err")"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "a runner with a closed stdout must not hang: $err"
+[ "$br_rc" = 1 ] && grep -q "^ERROR: test: stdout was closed (a broken pipe)" <<<"$err" && ok \
+  || fail "a closed stdout must be reported as a broken pipe, exit 1 (rc $br_rc): $err"
+grep -q "could not start" <<<"$err" && fail "a closed stdout is not a suite that could not start: $err" || ok
+empty_tp && ok || fail "a closed stdout must still remove the scratch root: $(ls -A "$tp")"
+p1="$(cat "$SHARED/p1.pid")"
+gone "$p1" 10 && ok || { kill -KILL "$p1" 2>/dev/null || true; fail "a closed stdout must stop the running suites (pid $p1 alive)"; }
 # A suite path that is not UTF-8 is printed as its bytes, never a traceback.
 # macOS file systems refuse such names, so the case runs where they exist.
+# The braces carry the 2>/dev/null: a failing redirection reports its error
+# (`Illegal byte sequence` on macOS) before a 2>/dev/null after it applies.
 fresh
 badname="$(printf 'bad\377.sh')"
-if printf 'echo BAD-RAN; exit 1\n' > "$s/$badname" 2>/dev/null; then
+if { printf 'echo BAD-RAN; exit 1\n' > "$s/$badname"; } 2>/dev/null; then
   run 1 "$badname"
   [ "$rc" = 1 ] && ok || fail "a failing suite with a non-UTF-8 name must exit 1 (rc $rc): $err"
   grep -q Traceback <<<"$err$out" && fail "a non-UTF-8 suite name must not raise: $err" || ok

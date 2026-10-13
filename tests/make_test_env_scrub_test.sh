@@ -27,6 +27,7 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/make_test_env_scrub.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
+trap 'exit 131' QUIT
 trap 'exit 143' TERM
 
 # This file's OWN git calls must not follow a leaked GIT_DIR either: it runs
@@ -221,7 +222,7 @@ rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$work/
 # The runner turns each signal into the conventional 128+N exit, which make
 # reports as "Error N"; dying by the signal itself would make make name the
 # signal instead, so the number pins the handler.
-for sig in HUP:129 INT:130 TERM:143; do
+for sig in HUP:129 INT:130 QUIT:131 TERM:143; do
   code="${sig#*:}"; sig="${sig%:*}"
   printf '#!/usr/bin/env bash\nkill -%s "$PPID"\nsleep 1\n' "$sig" > "$work/sig_test.sh"
   rc="$(TMPDIR="$work/tmp-parent" make_in "$work" -f "$mk" test TEST_FILES="$work/sig_test.sh")"
