@@ -147,10 +147,14 @@ export GIT_CONFIG_SYSTEM=/dev/null
 # and cloned with it initialized. doctor checks the plugins of the checkout
 # that holds the installer, so the suite does not depend on how this one was
 # cloned. fx runs the fixtures' own git commands (never the step) with no
-# ambient config.
+# ambient config, and with no auto maintenance: from git 2.54 a commit can
+# spawn a detached repack of a fixture this small (once two or more loose
+# objects sit in objects/17, the one directory git samples, so it depends
+# on the commit's hash), and a local clone or an object listing racing that
+# repack reads a store that is changing under it.
 fx() {
   GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -c user.name=t -c user.email=t@t \
-    -c commit.gpgsign=false -c protocol.file.allow=always "$@"
+    -c commit.gpgsign=false -c protocol.file.allow=always -c maintenance.auto=false "$@"
 }
 # mkcheckout DIR - install.sh and lib/ of this tree, in DIR (no git there).
 mkcheckout() {
@@ -2221,13 +2225,20 @@ if [ "$honours" = yes ]; then
   has "doctor: plugins: cannot list the plugin pins of $work/pc-unborn (fatal: " "doctor names an unborn HEAD in a partial clone"
 fi
 # A partial clone missing a tree under the root one: ls-tree's other
-# missing-object line ("Could not read <oid>") is the note too. The tree
-# is removed from a local clone's loose objects, which stand in for one
-# the clone never fetched.
-fx clone -q "$co" "$work/pc-sub"
-fx -C "$work/pc-sub" config remote.origin.promisor true
-subtree="$(fx -C "$work/pc-sub" rev-parse HEAD:zsh)"
-rm "$work/pc-sub/.git/objects/${subtree%"${subtree#??}"}/${subtree#??}" || fail "the zsh tree is not a loose object"
+# missing-object line ("Could not read <oid>") is the note too. A real
+# tree:1 clone holds the root tree and none below it, by construction: the
+# missing zsh tree never depends on how $co stores its objects, which git
+# itself may repack at any time (from 2.54, the auto maintenance a commit
+# spawns repacks a repository this small once two or more of its loose
+# objects sit in objects/17, the one directory git samples, and deletes the
+# loose copies). Only a git that honours GIT_NO_LAZY_FETCH is asked whether
+# the tree is missing: another would fetch it to answer.
+fx clone -q --no-checkout --filter=tree:1 "file://$work/super.git" "$work/pc-sub"; mkcheckout "$work/pc-sub"
+subtree="$(GIT_NO_LAZY_FETCH=1 fx -C "$work/pc-sub" rev-parse HEAD:zsh)" || fail "test bug: the tree:1 clone lacks its root tree"
+if [ "$honours" = yes ]; then
+  ! GIT_NO_LAZY_FETCH=1 fx -C "$work/pc-sub" cat-file -e "$subtree" 2>/dev/null \
+    || fail "test bug: the tree:1 clone holds the zsh tree"
+fi
 pdoc "$work/pc-sub" --verbose
 if [ "$honours" = yes ]; then
   has "doctor: plugins: note: $work/pc-sub is a partial clone without the trees the plugin pins are in (error: Could not read $subtree)" "doctor notes a partial clone missing a subtree"
