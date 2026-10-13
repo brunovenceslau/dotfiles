@@ -2747,30 +2747,43 @@ def gh_token(path):
     an answer past GH_OUTPUT_CAP, or a signal here ends its whole process
     group (_end_group()): a gh that is a wrapper leaves no child behind. A
     ^C at the terminal then no longer reaches gh directly; it reaches this
-    process, whose KeyboardInterrupt ends the group on its way out."""
+    process, whose KeyboardInterrupt ends the group on its way out.
+
+    gh starts held, and the hold ends inside the try that ends its group:
+    a signal that lands while gh starts, or before that try (this process
+    woken by gh's exec but not run yet, while gh runs on), would otherwise
+    unwind with gh's Popen unassigned or unguarded, and leave gh running.
+    gh itself starts with the signal mask this process had before the
+    hold: a mask is inherited across exec, and gh must not keep the
+    unwinding signals blocked."""
     state = None
     try:
         with _Held():
             state = tempfile.mkdtemp(prefix="host_identity.gh.")
             _left.add(state)
+        p = None
         try:
-            p = subprocess.Popen(
-                [path, "api", "--hostname", GH_HOST, "--include", "--silent", "user"],
-                cwd=state,
-                env=gh_env(state),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-            )
-        except OSError as e:
-            return "unknown", e.strerror or str(e)
-        with p.stdout, p.stderr:
-            try:
+            held = _Held()
+            with held:
+                try:
+                    p = subprocess.Popen(
+                        [path, "api", "--hostname", GH_HOST, "--include", "--silent", "user"],
+                        cwd=state,
+                        env=gh_env(state),
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        start_new_session=True,
+                        preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, held.old),
+                    )
+                except OSError as e:
+                    return "unknown", e.strerror or str(e)
+            with p.stdout, p.stderr:
                 out, err = _bounded_output(p, GH_TIMEOUT, GH_OUTPUT_CAP)
-            except BaseException:
+        except BaseException:
+            if p is not None:
                 _end_group(p)
-                raise
+            raise
     except subprocess.TimeoutExpired:
         return "unknown", "no answer within %d seconds" % GH_TIMEOUT
     except OverflowError:
