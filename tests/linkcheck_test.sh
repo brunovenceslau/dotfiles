@@ -1019,10 +1019,17 @@ ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs
 # shape that catches it: an exponential scan is stopped by SIGXCPU and
 # named, and a quadratic one fails the ratio. The exponential mutant drops
 # the lookahead from _hattr (h53), with a 2 s 1x budget to keep the case
-# short. The quadratic one wraps check_file in a loop over the square of the
-# file's size, about as costly as h26's own scan at 1x (measured: 6.8 ms in
-# all, 0.30 s at 8x, a ratio of 43). The 8x run stays well inside the 2 s
-# floor of its CPU budget, so the ratio, not SIGXCPU, has to catch it.
+# short. The quadratic one makes check_file scan the file again 4 times per
+# 25 KB of it: 5 scans at 1x, 33 at 8x, each as long as the file. Its
+# quadratic term is the gate's own scan, so the ratio is about 6.6 times
+# the gate's linear one wherever it runs (a counting loop instead once
+# measured 42x on Linux and stayed under 23x on macOS arm64, where the
+# interpreter loop is cheaper next to the regex scan). Measured on h26 on
+# 4 CPUs shared with 11 CPU hogs, 78 runs: a median first-shot ratio of 50x
+# and 1.9 s of CPU at 8x at most, under the 3 s or more that allow() makes
+# of its 2 s floor, so the ratio, not SIGXCPU, has to catch it. One of the
+# 78 measured 18x: a 1x cost inflated by the load, which growth() does not
+# re-measure, since it re-measures only a ratio past RATIO.
 mut="$work/mut-lookahead"
 mkdir -p "$mut"
 sed 's/ + r"|(?!" + _WS + r"\*=))")$/ + r"|)")/' "$gate" >"$mut/linkcheck.py"
@@ -1043,9 +1050,8 @@ _check_file = check_file
 
 
 def check_file(tree, rel):   # mutant: a quadratic term
-    k = 0
-    for _ in range((os.path.getsize(os.path.join(tree.root, rel)) // 1000) ** 2 * 240):
-        k += 1
+    for _ in range(4 * (os.path.getsize(os.path.join(tree.root, rel)) // 25000)):
+        _check_file(tree, rel)
     return _check_file(tree, rel)
 PY
 } >"$mut/linkcheck.py"
