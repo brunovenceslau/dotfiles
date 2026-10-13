@@ -126,7 +126,7 @@ shows.
   request opened with `--base <another branch>` races that branch's deletion
   when the parent merges, and losing the race closes it permanently: a closed
   pull request cannot be retargeted or reopened. The exception is a GitHub
-  stack that `gh stack view` shows with a stack number and that the maintainer
+  stack with a stack number reported by GitHub, which the maintainer
   merges as a stack; its conditions are in
   [stacked pull requests](docs/stacked-prs.md). A pull request from a fork has
   no stack to express: open one at a time against `main`; cross-fork stacks are
