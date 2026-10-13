@@ -18,6 +18,13 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass=0; ck() { if [ "$2" = "$3" ]; then pass=$((pass + 1)); else fail "$1: got [$2] want [$3]"; fi; }
 
+# The traps come first, so a failed mktemp leaks nothing; each signal exits,
+# and the EXIT trap cleans up once.
+work=""; sockdir=""; sock=""
+trap '[ -z "$sock" ] || tmux -S "$sock" kill-server 2>/dev/null || true; rm -rf ${work:+"$work"} ${sockdir:+"$sockdir"}' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 work="$(mktemp -d "${TMPDIR:-/tmp}/tmux_alacritty_test.XXXXXX")"
 # A private socket, never a fixed name (`-L`): every run of this suite would
 # share that one server, so two runs at once (make test in two worktrees, or
@@ -27,7 +34,6 @@ work="$(mktemp -d "${TMPDIR:-/tmp}/tmux_alacritty_test.XXXXXX")"
 # overflows it, as in tests/tmux_status_test.sh.
 sockdir="$(mktemp -d /tmp/t16sock.XXXXXX)"
 sock="$sockdir/s"
-trap 'tmux -S "$sock" kill-server 2>/dev/null || true; rm -rf "$work" "$sockdir"' EXIT INT TERM
 
 # --- the .local layers are gitignored, the .example templates are
 # NOT - a broken negation would let a host's .local get committed and PUBLISHED.

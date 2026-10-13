@@ -35,13 +35,16 @@ shell waiting on it. What it does, in order:
   - keeps going past a failure, prints every suite's time slowest first, and
     ends with `test: all N test files passed`, or with `test: FAILED:` naming
     every failed suite on stderr and exit 1;
-  - on HUP, INT or TERM, signals every running suite's process group with
-    TERM, then with KILL once each group's main process has exited or the
-    grace period is over (a second signal skips the rest of the grace
-    period). Each stopped suite's block is printed with an INTERRUPTED
-    verdict, the scratch root is removed, and the exit is 128+N (129, 130,
-    143), the codes a shell trap gives, which make reports as "Error N". A
-    process that left its suite's group (setsid, a daemon) is out of reach.
+  - on HUP, INT or TERM, reports the suites that had already ended, then
+    signals every running suite's process group with TERM and waits until
+    the group is empty or the grace period is over, when what is left gets
+    KILL (a second signal skips the rest of the grace period). Each stopped
+    suite's block is printed with an INTERRUPTED verdict and the time until
+    its main process was reaped, so a suite that ignored TERM counts the
+    grace period too. The scratch root is removed, and the exit is 128+N
+    (129, 130, 143), the codes a shell trap gives, which make reports as
+    "Error N". A process that left its suite's group (setsid, set -m, a
+    daemon) is out of reach.
 
 A suite that must not run alongside any other says so with a line that is
 exactly SERIAL_MARK (below). Serial suites run first, one at a time, with
@@ -90,10 +93,14 @@ POLL_SECONDS = 0.05
 
 EXIT_ON_SIGNAL = {signal.SIGHUP: 129, signal.SIGINT: 130, signal.SIGTERM: 143}
 
-# waitid(WNOWAIT) sees that a main process exited while leaving it a zombie,
-# so its pid, and with it the group id, cannot be reused while the group is
-# KILLed. Without it the group is KILLed right after the reap, which leaves a
-# window of a few microseconds for a reuse.
+# When a suite ends normally, waitid(WNOWAIT) sees that its main process
+# exited while leaving it a zombie, so its pid, and with it the group id,
+# cannot be reused while the group is KILLed. Where Python has no waitid the
+# group is KILLed right after the reap, which leaves a window of a few
+# microseconds for a reuse. CPython has os.waitid on macOS only from 3.13
+# (3.9 to 3.12 compile it out on Apple; the os docs say "Changed in version
+# 3.13"), so the 3.9 of the Command Line Tools takes that path. Stopping on a
+# signal does not depend on it: stop_all() asks the group itself.
 HAVE_WAITID = hasattr(os, "waitid") and hasattr(os, "WNOWAIT")
 
 
@@ -341,10 +348,10 @@ class Runner:
         except ChildProcessError:
             return True
 
-    def collect(self, run, block):
-        """Reap RUN's main process; False when it has not exited yet."""
+    def collect(self, run):
+        """Reap RUN's main process if it has exited; never blocks."""
         try:
-            pid, status, ru = os.wait4(run.proc.pid, 0 if block else os.WNOHANG)
+            pid, status, ru = os.wait4(run.proc.pid, os.WNOHANG)
         except ChildProcessError:
             pid, status, ru = run.proc.pid, 255 << 8, None
         if pid == 0:
@@ -359,16 +366,19 @@ class Runner:
 
     def reap(self):
         """Collect every suite that has ended; returns them in end order.
-        What a suite left running in its group is killed first."""
+        What a suite left running in its group is KILLed as it is reaped."""
         done = []
         for run in list(self.running):
             if HAVE_WAITID:
                 if not self.exited(run):
                     continue
                 kill_group(run.proc.pid, signal.SIGKILL)
-                self.collect(run, block=True)
+                # Non-blocking even here: should waitid ever report an exit
+                # that wait4 cannot collect yet, the next poll retries.
+                if not self.collect(run):
+                    continue
             else:
-                if not self.collect(run, block=False):
+                if not self.collect(run):
                     continue
                 kill_group(run.proc.pid, signal.SIGKILL)
             self.running.remove(run)
@@ -401,27 +411,48 @@ class Runner:
         out.flush()
 
     def stop_all(self):
-        """TERM every running suite's group, KILL each once its main process
-        has exited or the grace period is over, and reap them. Returns the
-        suites it stopped."""
+        """TERM every running suite's group, wait until each group is empty
+        or the grace period is over, KILL what is left, and reap the main
+        processes. Returns the suites it stopped.
+
+        A group is KILLed only once the grace period is over (or a second
+        signal cut it short), never as soon as its main process exits: a
+        suite may run a nested runner in its group, which needs that time to
+        stop its own suites, each in a session of its own, out of this
+        runner's reach. A main process is reaped as soon as it exits; its
+        group id stays in use, and so cannot be reused, for as long as any
+        member is left, and whether one is left is asked again each poll.
+        A group that empties between that last poll and the KILL leaves the
+        same few-microsecond window for a reuse as a run without waitid."""
         stopped, self.running = self.running, []
         if not stopped:
             return []
         for run in stopped:
             kill_group(run.proc.pid, signal.SIGTERM)
-        # Main processes stay unreaped zombies until their group has had its
-        # KILL, so no group id can be reused in between.
+        live = list(stopped)          # groups that may still have members
         deadline = time.monotonic() + self.grace
-        while time.monotonic() < deadline and self.stop.count < 2:
-            if HAVE_WAITID and all(self.exited(r) for r in stopped):
-                break
-            time.sleep(POLL_SECONDS)
-        for run in stopped:
+        while live and time.monotonic() < deadline and self.stop.count < 2:
+            still = []
+            for run in live:
+                if run.code is None and not self.collect(run):
+                    still.append(run)       # the main process still runs
+                    continue
+                try:
+                    os.killpg(run.proc.pid, 0)
+                except ProcessLookupError:
+                    continue                # the group is empty: done
+                except OSError:
+                    pass                    # EPERM: members, not ours
+                still.append(run)
+            live = still
+            if live:
+                time.sleep(POLL_SECONDS)
+        for run in live:
             kill_group(run.proc.pid, signal.SIGKILL)
-        pending = list(stopped)
+        pending = [r for r in stopped if r.code is None]
         deadline = time.monotonic() + REAP_SECONDS
         while pending:
-            pending = [r for r in pending if not self.collect(r, block=False)]
+            pending = [r for r in pending if not self.collect(r)]
             if not pending or time.monotonic() >= deadline:
                 break
             time.sleep(POLL_SECONDS)
@@ -467,10 +498,14 @@ class Runner:
         return self.summary(time.monotonic() - started)
 
     def interrupted(self):
+        # A suite that ended before the signal keeps its own verdict.
+        for run in self.reap():
+            self.report(run)
         name = signal.Signals(self.stop.signum).name
         self.abort("by %s" % name)
         emit(sys.stderr, "test: interrupted by %s; every running suite's process group "
-             "was stopped (a process that left its group is out of reach)\n" % name)
+             "was stopped (a process that left its group, with setsid or set -m, "
+             "or as a daemon, is out of reach)\n" % name)
         return EXIT_ON_SIGNAL[self.stop.signum]
 
     def summary(self, wall):
@@ -491,7 +526,8 @@ class Runner:
 
 def main(argv):
     # Handlers first: reading the memory can take a while (vm_stat), and a
-    # Ctrl-C then must still end the run with its own exit code.
+    # Ctrl-C then must still end the run with its own exit code. The
+    # scheduler checks for a signal before it starts any suite.
     stop = Stop()
     for sig in EXIT_ON_SIGNAL:
         signal.signal(sig, stop.handler)
@@ -506,8 +542,6 @@ def main(argv):
     grace, problem = grace_seconds()
     if grace is None:
         return err(problem)
-    if stop.signum is not None:
-        return EXIT_ON_SIGNAL[stop.signum]
     runner = Runner(argv, jobs, grace, stop)
     try:
         rc = runner.setup()

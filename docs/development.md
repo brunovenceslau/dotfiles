@@ -445,12 +445,17 @@ python3 -I tests/linkcheck.py .
 - keeps going past a failure, lists every suite's time slowest first, and
   ends with `test: all N test files passed`, or names every failed suite on
   stderr after `test: FAILED:` and exits 1;
-- on Ctrl-C, `HUP` or `TERM`, sends `TERM` to every running suite's process
-  group, then `KILL` once the suite's main process has exited or after a
-  5-second grace period (a second Ctrl-C skips the rest of it). It prints
-  each stopped suite's output with an `INTERRUPTED` verdict, removes the
+- on Ctrl-C, `HUP` or `TERM`, first reports the suites that had already
+  ended, with their own verdicts. It then sends `TERM` to every running
+  suite's process group and waits until the group is empty, or until a
+  5-second grace period is over, when what is left gets `KILL` (a second
+  Ctrl-C skips the rest of the wait). Waiting for the whole group, not only
+  for its main process, lets a suite that runs a nested runner stop that
+  runner's own suites. It prints each stopped suite's output with an
+  `INTERRUPTED` verdict and the time until its main process ended, which
+  includes the grace period for a suite that ignored `TERM`, removes the
   scratch root and exits 130, 129 or 143. A process that left its suite's
-  group (`setsid`, a daemon) is out of reach.
+  group (`setsid`, a `set -m` job, a daemon) is out of reach.
 
 A suite that must not run beside any other carries the line
 `# run_suites: serial`, with the reason under it. Serial suites run first,
@@ -1036,6 +1041,7 @@ is until its trigger fires. The ones about the framework's behaviour are in
 | Close the refspec-source LF forgery in the identity guard: a source holding an LF splits its ref line, and the first half can name any oid as one the remote holds, so the guard skips the commits behind it | Not closed (decided on 2026-10-09): only the pusher can do it, it is self-inflicted, and it is harder than `git push --no-verify`, which the guard already allows. The module docstring of `.githooks/commit_identity.py` states it, and `ref_lines()` cannot undo the split | The guard runs where the pusher is not trusted, such as CI or a server hook. Sketch of the fix: refuse an excluded oid that no remote-tracking ref reaches |
 | Split `lib/host_identity.py` into parts | One file (decided on 2026-10-11). A refutation found that a split buys little review relief (4 of 6 doctor commits also touched the core), adds about seven concepts, and opens a fail-open class in every consumer that reads the whole file. A split, if chosen, ships with: the concatenation of the parts and a coverage floor in every whole-file consumer, `rb` reads, ASCII-only parts, a gate that no name is bound twice, the parts list checked against `git ls-files`, and a byte-identity proof of the move | The doctor section passes 1500 lines (1133 on 2026-10-12), counted from its `# --- doctor: read-only checks` heading up to `def run(`: `awk '/^# --- doctor: read-only checks/{f=1} /^def run\(/{f=0} f' lib/host_identity.py \| wc -l` |
 | Isolate two `make test` runs in one checkout from each other | The suites of one run are isolated from each other, and runs in different checkouts share nothing. Two runs in the same checkout share its `.smoke/` and the plugins' `.zwc` files | Two runs in one checkout at once are needed |
+| Tell an out-of-memory kill apart from an expected failure in `make test` | A suite that asserts a command fails could pass when the kernel kills that command for memory instead; only the suite's own `done` line shows a kill by signal 9, and only for its main process | A `done` line shows a peak RSS near the 384 MiB budget, or a suite is reported killed by signal 9 |
 | Give each `make test` suite a time limit | No per-suite limit: a hung suite runs until it is interrupted, and the `start` line without a matching `done` names it | A hung suite eats the CI timeout |
 | Read a container's cgroup memory limit when `make test` picks its job count | The runner reads `MemAvailable` (Linux) or `vm_stat` (macOS), which a container with a memory limit may overstate | `make test` runs out of memory in a container, or CI moves into one |
 | Start the slowest suites first in `make test` | Suites start in file order. The slowest suite (`check_patterns_test.sh`) sorts early, so it starts with the first wave | The time summary shows the run ending well after its slowest suite, because that suite started late |

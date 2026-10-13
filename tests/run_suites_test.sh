@@ -36,9 +36,31 @@ fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/run_suites_test.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# On a signal, stop the runners this file started, and wait for them, before
+# exiting: a runner keeps its suites in sessions of their own, so only the
+# runner itself can stop them, and one cut short leaves them running forever.
+# A runner from start_bg shares this file's process group, so a signal sent
+# to the group has reached it already; the TERM sent here is its second
+# signal, which skips its grace period. One under bounded_run has a group of
+# its own and gets both TERMs from here, 0.2s apart: two identical signals
+# arriving together reach a Python handler once.
+rpid=""
+forward() {
+  local i=0
+  if [ -n "$rpid" ]; then
+    kill -TERM "$rpid" 2>/dev/null || true; sleep 0.2; kill -TERM "$rpid" 2>/dev/null || true
+    while kill -0 "$rpid" 2>/dev/null && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done
+  fi
+  i=0
+  if [ -n "${br_pgid:-}" ]; then
+    kill -TERM -"$br_pgid" 2>/dev/null || true; sleep 0.2; kill -TERM -"$br_pgid" 2>/dev/null || true
+    while kill -0 -"$br_pgid" 2>/dev/null && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done
+  fi
+  exit "$1"
+}
+trap 'forward 129' HUP
+trap 'forward 130' INT
+trap 'forward 143' TERM
 
 # fresh - a new suite directory ($s), shared state directory ($SHARED, which
 # the suites see) and TMPDIR parent ($tp) for one case.
@@ -214,8 +236,9 @@ start_bg() {
 }
 # finish SECS - wait up to SECS for the background runner; its exit code in $rc.
 finish() {
-  gone "$rpid" "$1" || { kill -KILL "$rpid" 2>/dev/null || true; fail "the runner did not exit within $1s: $(cat "$work/out")"; }
+  gone "$rpid" "$1" || { kill -KILL "$rpid" 2>/dev/null || true; rpid=""; fail "the runner did not exit within $1s: $(cat "$work/out")"; }
   rc=0; wait "$rpid" || rc=$?
+  rpid=""
 }
 
 # --- 6. A signal stops every running suite, its own children included (one
@@ -231,7 +254,11 @@ echo "$!" > "$SHARED/child.pid"
 echo "$!" > "$SHARED/ignorer.pid"
 wait'
   suite other.sh 'echo OTHER-OUT; sleep 300'
+  # The TERM-ignoring child keeps the group alive for the whole grace
+  # period: 1s keeps the case short.
+  extra_env=(RUN_SUITES_GRACE_SECONDS=1)
   start_bg 2 slow.sh other.sh
+  extra_env=()
   wait_file "$SHARED/ignorer.pid" || { kill -KILL "$rpid" 2>/dev/null || true; fail "test bug: slow.sh never started ($sig)"; }
   kill -"$sig" "$rpid"
   finish 30
@@ -287,6 +314,32 @@ finish 30
 [ "$rc" = 143 ] && ok || fail "a second signal must end the run at once with 143 (rc $rc): $(cat "$work/out")"
 gone "$(cat "$SHARED/leader.pid")" 10 && ok || fail "a second signal must KILL the TERM-ignoring suite"
 
+# --- 6c. A suite that runs a nested runner: on a signal, the outer runner
+# waits for the suite's whole group, not only its main process, so the inner
+# runner (in that group) has time to stop its own suites, which sit in
+# sessions of their own. KILLing the group as soon as the main process
+# exited would leave the inner suite running forever, orphaned.
+fresh
+mkdir -p "$SHARED/inner" "$SHARED/itp"
+printf '#!/usr/bin/env bash\ntrap "echo TERM > \\"\\$SHARED/got-term\\"" TERM\necho "$$" > "$SHARED/leader.pid"\nwhile :; do sleep 0.1; done\n' \
+  > "$SHARED/inner/stubborn.sh"
+suite nest.sh 'cd "$SHARED/inner" || exit 1
+RUN_SUITES_GRACE_SECONDS=1 TEST_JOBS=1 TMPDIR="$SHARED/itp" "$PY" -I "$RUNNER" stubborn.sh > "$SHARED/inner.log" 2>&1 &
+wait'
+extra_env=(RUN_SUITES_GRACE_SECONDS=30 PY="$py" RUNNER="$runner")
+start_bg 1 nest.sh
+extra_env=()
+wait_file "$SHARED/leader.pid" || { kill -KILL "$rpid" 2>/dev/null || true; fail "test bug: the inner suite never started: $(cat "$work/out")"; }
+inner_leader="$(cat "$SHARED/leader.pid")"
+kill -TERM "$rpid"
+finish 40
+[ "$rc" = 143 ] && ok || fail "the outer runner must exit 143 (rc $rc): $(cat "$work/out")"
+gone "$inner_leader" 10 && ok \
+  || { kill -KILL "$inner_leader" 2>/dev/null || true; fail "an interrupted nested runner must not orphan its suite (pid $inner_leader alive): $(cat "$SHARED/inner.log")"; }
+grep -q "test: interrupted by SIGTERM" "$SHARED/inner.log" && ok \
+  || fail "the inner runner must get to stop its own suites: $(cat "$SHARED/inner.log")"
+[ -z "$(ls -A "$SHARED/itp")" ] && ok || fail "the inner runner must remove its scratch root: $(ls -A "$SHARED/itp")"
+
 # --- 7. Serial suites run alone and before the pool: no pool suite is
 # running while one runs, and every pool suite starts after it ended.
 fresh
@@ -334,13 +387,15 @@ for bad in 0 abc -1 "2 " 1.5 10000; do
     || fail "TEST_JOBS='$bad' must say why: $err"
   [ ! -e "$SHARED/ran" ] && ok || fail "no suite may run with TEST_JOBS='$bad'"
 done
-fresh
-suite m.sh ': > "$SHARED/ran"'
-extra_env=(RUN_SUITES_GRACE_SECONDS=-1)
-run 1 m.sh
-extra_env=()
-[ "$rc" = 1 ] && grep -q "^ERROR: test: RUN_SUITES_GRACE_SECONDS must be" <<<"$err" && [ ! -e "$SHARED/ran" ] && ok \
-  || fail "a bad grace period must fail closed before any suite runs (rc $rc): $err"
+for bad in -1 1000 1234.5 1.2345 abc; do
+  fresh
+  suite m.sh ': > "$SHARED/ran"'
+  extra_env=(RUN_SUITES_GRACE_SECONDS="$bad")
+  run 1 m.sh
+  extra_env=()
+  [ "$rc" = 1 ] && grep -q "^ERROR: test: RUN_SUITES_GRACE_SECONDS must be" <<<"$err" && [ ! -e "$SHARED/ran" ] && ok \
+    || fail "the grace period '$bad' must fail closed before any suite runs (rc $rc): $err"
+done
 fresh
 suite m.sh ': > "$SHARED/ran"'
 tp="$work/missing"
@@ -393,6 +448,190 @@ grep -q '^BAD' <<<"$units" && fail "job count units: $(grep '^BAD' <<<"$units")"
 [ -z "$(find "$repo_root/tests" -name '__pycache__' -prune -newer "$work/units.stamp" -print 2>/dev/null)" ] && \
   [ -z "$(find "$repo_root/tests" -path '*/__pycache__/run_suites*' -newer "$work/units.stamp" -print 2>/dev/null)" ] && ok \
   || fail "the units must not write tests/__pycache__ into the checkout"
+
+# --- 10b. Paths a shell cannot stage on demand, driven in-process: a suite
+# that ended just before the signal keeps its own verdict; a launch failure
+# with a suite already running stops and reports it; a signal during startup
+# ends the run before any suite; the grace period's both bounds; a signal
+# mid-step starts nothing; the first signal names the exit; a main process
+# that cannot be reaped after KILL is left behind, named, within the bound.
+# Each prints `ok NAME` or `BAD NAME: why`.
+fresh
+printf '#!/usr/bin/env bash\nexit 3\n' > "$s/e.sh"
+printf '#!/usr/bin/env bash\necho SLOW-OUT\nsleep 300\n' > "$s/slow.sh"
+printf '#!/usr/bin/env bash\n: > "$SHARED/ran"\n' > "$s/m.sh"
+printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\nwhile :; do sleep 0.1; done\n' > "$s/deaf.sh"
+printf '#!/usr/bin/env bash\n: > "$SHARED/obey.sh.ready"\nsleep 300\n' > "$s/obey.sh"
+cat > "$work/harness.py" <<'PY'
+import importlib.util, io, os, signal, sys, time
+spec = importlib.util.spec_from_file_location("run_suites", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+class Cap:
+    def __init__(self):
+        self.buffer = io.BytesIO()
+    def flush(self):
+        pass
+    def text(self):
+        return self.buffer.getvalue().decode()
+
+def captured(fn):
+    out, err = Cap(), Cap()
+    real = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    try:
+        rc = fn()
+    finally:
+        sys.stdout, sys.stderr = real
+    return rc, out.text(), err.text()
+
+def check(name, cond, why):
+    print(("ok %s" % name) if cond else ("BAD %s: %s" % (name, why)))
+
+def runner(paths, jobs, grace):
+    r = m.Runner(paths, jobs, grace, m.Stop())
+    assert r.setup() == 0
+    return r
+
+# 1. e.sh ends (exit 3) before the signal is acted on: FAILED, not INTERRUPTED.
+r = runner(["e.sh", "slow.sh"], 2, 5.0)
+def wait_exited(pid):
+    # Exited, but not reaped: the runner still has to collect it.
+    if not m.HAVE_WAITID:
+        time.sleep(1.0)
+        return
+    for _ in range(3000):
+        if os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            return
+        time.sleep(0.01)
+def h1():
+    r.launch(r.runs[0]); r.launch(r.runs[1])
+    wait_exited(r.runs[0].proc.pid)
+    r.stop.signum = signal.SIGTERM
+    return r.interrupted()
+rc, out, err = captured(h1)
+m.remove_tree(r.root)
+check("verdict kept", "done e.sh: FAILED (exit 3) in " in out, out)
+check("other interrupted", "done slow.sh: INTERRUPTED (by SIGTERM) in " in out, out)
+check("verdict rc", rc == 143, rc)
+
+# 2. The second launch fails while the first suite runs: rc 1, the running
+# suite stopped and reported, the scratch root removed.
+real_popen = m.subprocess.Popen
+calls = [0]
+def popen(*a, **k):
+    calls[0] += 1
+    if calls[0] == 2:
+        raise OSError("simulated launch failure")
+    return real_popen(*a, **k)
+m.subprocess.Popen = popen
+os.environ["TEST_JOBS"] = "2"
+rc, out, err = captured(lambda: m.main(["slow.sh", "m.sh"]))
+m.subprocess.Popen = real_popen
+check("launch rc", rc == 1, rc)
+check("launch named", "could not start m.sh (simulated launch failure)" in err, err)
+check("launch stops the running", "done slow.sh: INTERRUPTED (the run stopped: a suite could not start) in " in out, out)
+check("launch cleans", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
+
+# 3. A signal during startup (here: while the job count is read) ends the
+# run with its own code before any suite starts, and leaves no root behind.
+real_jc = m.job_count
+def jc():
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(0.2)
+    return real_jc()
+m.job_count = jc
+rc, out, err = captured(lambda: m.main(["m.sh"]))
+m.job_count = real_jc
+for sig in m.EXIT_ON_SIGNAL:
+    signal.signal(sig, signal.SIG_DFL)
+check("startup rc", rc == 143, rc)
+check("startup no suite", not os.path.exists(os.path.join(os.environ["SHARED"], "ran")), "m.sh ran")
+check("startup no root", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
+
+# 4. The grace period, on a clock that moves only when the runner sleeps, so
+# the bounds are exact on any machine: a suite that ignores TERM gets KILL
+# once the grace period is over, never later; one that obeys TERM ends the
+# wait as soon as its group is empty, with no KILL at all, and keeps the
+# status it was reaped with.
+T0 = 1000.0
+class Clock:
+    def __init__(self):
+        self.t = T0
+    def monotonic(self):
+        return self.t
+    def sleep(self, s):
+        self.t += s
+        time.sleep(0.005)
+real_time, real_kg = m.time, m.kill_group
+def stopped_on_clock(path, grace):
+    r = runner([path], 1, grace)
+    r.launch(r.runs[0])
+    ready = os.path.join(os.environ["SHARED"], path + ".ready")
+    for _ in range(3000):
+        if os.path.exists(ready):
+            break
+        time.sleep(0.01)
+    clock, kills = Clock(), []
+    def kg(pgid, sig):
+        kills.append((sig, clock.t))
+        real_kg(pgid, sig)
+    m.time, m.kill_group = clock, kg
+    try:
+        captured(lambda: r.stop_all())
+    finally:
+        m.time, m.kill_group = real_time, real_kg
+    m.remove_tree(r.root)
+    return kills, r.runs[0]
+kills, _ = stopped_on_clock("deaf.sh", 2.0)
+at = [t for sig, t in kills if sig == signal.SIGKILL]
+check("grace TERM first", kills and kills[0] == (signal.SIGTERM, T0), kills)
+check("grace KILL at its end", len(at) == 1 and 2.0 <= at[0] - T0 <= 2.0 + m.POLL_SECONDS + 1e-6, kills)
+kills, run = stopped_on_clock("obey.sh", 120.0)
+check("grace no KILL for an obeyer", [s for s, _ in kills] == [signal.SIGTERM], kills)
+# Reaped once, inside the wait: its status is the TERM that ended it.
+check("grace obeyer status kept", run.code == -signal.SIGTERM, run.code)
+
+# 5. A signal that lands while the scheduler reaps starts no new suite: the
+# launch loop checks for it too, not only the top of the loop.
+r = runner(["m.sh"], 1, 1.0)
+def reap_signalled():
+    r.stop.signum = signal.SIGTERM
+    return []
+r.reap = reap_signalled
+rc, out, err = captured(r.schedule)
+m.remove_tree(r.root)
+check("mid-step rc", rc == 143, rc)
+check("mid-step no launch", "start m.sh" not in out, out)
+
+# 6. The first signal names the run's exit; a later one only counts.
+st = m.Stop()
+st.handler(signal.SIGINT, None)
+st.handler(signal.SIGTERM, None)
+check("first signal kept", (st.signum, st.count) == (signal.SIGINT, 2), (st.signum, st.count))
+
+# 7. A main process that never becomes reapable: after KILL the reap gives
+# up at the bound, names it, and the run goes on.
+m.REAP_SECONDS = 0.3
+r = runner(["slow.sh"], 1, 0.2)
+r.launch(r.runs[0])
+pid = r.runs[0].proc.pid
+r.collect = lambda run: False
+t0 = time.monotonic()
+rc, out, err = captured(lambda: r.stop_all())
+took = time.monotonic() - t0
+os.waitpid(pid, 0)
+m.remove_tree(r.root)
+check("reap bound named", "slow.sh (pid %d) did not exit after KILL; left behind" % pid in err, err)
+check("reap bound held", took < 5, took)
+PY
+bounded_run 60 "$work/harness" sh -c 'cd "$1" && shift && exec "$@"' sh "$s" \
+  env TMPDIR="$tp" "$py" -I -B "$work/harness.py" "$runner"
+harness="$(cat "$work/harness")"
+[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "the in-process harness hung: $harness"
+grep -q '^BAD' <<<"$harness" && fail "in-process cases: $(grep '^BAD' <<<"$harness")" || ok
+[ "$(grep -c '^ok' <<<"$harness")" = 19 ] && ok || fail "test bug: the in-process cases did not all run: $harness"
 
 # --- 11. Verdicts, launch and input edge cases.
 # A suite killed by a signal is a failure that names the signal.
