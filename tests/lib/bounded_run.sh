@@ -80,7 +80,10 @@ bounded_run() {
       case "$self" in ''|*[!0-9]*|0*|1) exit 1 ;; esac
       if kill -0 "$cmd" 2>/dev/null; then kill -KILL -"$self"; fi
     ) </dev/null >/dev/null 2>&1 &
-    wait "$cmd"
+    # stderr off for the wait alone: bash prints a status line when it reaps
+    # a child killed by a signal (`CPU time limit exceeded` for SIGXCPU),
+    # which is noise: br_rc carries the signal as 128+N.
+    wait "$cmd" 2>/dev/null
   ) &
   br_pgid=$!
   [ "$had_m" = 1 ] || set +m
