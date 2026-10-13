@@ -78,8 +78,15 @@ import time
 # sum. Measured on Linux (2026-10-12): the largest peak was 303 MiB
 # (tests/check_patterns_test.sh), the next 130 MiB, most suites under 20 MiB,
 # and all 60 suites at 10 at a time drew MemAvailable down by about 350 MiB in
-# total. The budget sits above the largest single peak, so even a pool of only
-# the heaviest suites fits. Raise it when a `done` line shows a peak near it.
+# total. On Linux the budget sits above the largest single peak, so even a
+# pool of only the heaviest suites fits there. Not on every host: on the macOS
+# arm64 CI leg (2026-10-13) tests/linkcheck_test.sh peaked at 1271 MiB, from a
+# regex backtracking stack on its hostile input. A peak above the budget is
+# fixed in the suite that has it, not by raising the budget, which would
+# lower the job count of every run on every host for one suite. That case,
+# its remedy (the pending item linkcheck-tag-scanner) and what reopens it are
+# in the docs/development.md Deferred decisions row "Tell an out-of-memory
+# kill apart from an expected failure in `make test`".
 SUITE_MEMORY_MIB = 384
 
 # A suite holding this exact line runs alone. A comment, so bash ignores it.
