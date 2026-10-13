@@ -26,9 +26,22 @@ branch and GitHub links the PRs into a native stack (the `gh-stack` extension
 does this; `gh stack --help` and <https://gh.io/stacks> document it). It is
 allowed only while both conditions hold:
 
-1. `gh stack view` shows a stack number for the stack on GitHub. Linking is
-   best-effort, so a stack that is not linked remotely falls back to the
-   default: retarget every PR to `main`.
+1. GitHub reports a stack number for the stack. `gh stack link` prints it
+   (`Created stack with N PRs (stack #M)`, `Added N PRs to stack #M` or
+   `Updated stack to N PRs (stack #M)`), and so does `gh stack submit`
+   (for example `Stack created on GitHub with N PRs (stack #M)`; it has four
+   such messages). `gh stack view` shows it
+   when the local record carries the remote stack. `gh stack init`, and
+   `gh stack add` on an untracked branch, record no remote id, so a `view`
+   without a number after either does not prove the stack is missing: take the
+   number from the `link` or `submit` output. `view` can also keep showing a
+   number after the stack was unstacked on the web, because `view` alone does
+   not clear it. So the merge is the re-check: `gh stack merge` asks GitHub
+   for the stack first and fails on a 404 instead of merging. Never re-check
+   with `gh stack link`: it prints no number for an existing stack ("already up
+   to date"), and when the stack was dissolved it creates a new one and can
+   retarget bases. Linking is best-effort, so a stack that is not linked
+   remotely falls back to the default: retarget every PR to `main`.
 2. The maintainer merges it as a stack: `gh stack merge --merge`, or the stacked
    PR's Merge button with **Create a merge commit**. That is one atomic
    operation, and GitHub retargets the remaining PRs as part of it.
@@ -78,8 +91,8 @@ One change is one branch off `main`. Each entry earns the full workflow.
    branch below the one under review, so batch parent amendments until the
    child's review is done, or accept that the reviewer re-reads.
 4. `gh pr create --base main`, with the dependency stated in the body. For a
-   GitHub stack, `gh stack submit` opens the chain instead, and `gh stack view`
-   must then show the stack number before the exception applies.
+   GitHub stack, `gh stack submit` opens the chain instead, and the stack
+   number must then be known (condition 1) before the exception applies.
 5. Repeat for the next change.
 
 Keep stacks shallow and land the bottom fast. Every change requested on a parent
@@ -268,7 +281,18 @@ by step 5.
 
 `gh stack sync` and `gh stack rebase` also cascade-rebase a stack, but they are
 not part of this recipe: it needs the explicit signed commands above, and the
-verification, to stay auditable.
+verification, to stay auditable. If they are used anyway, signing has to come
+from git config or the environment (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_0` and
+`GIT_CONFIG_VALUE_0` for `commit.gpgsign`), never from `-c`: they sign nothing
+on their own and take no git options. They also rewrite the stack branches
+they rebase (`rebase` takes `--upstack`, `--downstack` and `[branch]`),
+including those checked out in other linked worktrees, and move those
+worktrees' HEADs and files. They fetch first, so remote-tracking refs can
+move. They refuse, changing no branch, with "uncommitted changes in worktree
+<path>" when any of those worktrees has a modified, staged or untracked file,
+and when a merge, rebase or cherry-pick is in progress. `gh stack rebase` runs
+a plain `git rebase` without `--force-rebase`, so a rebase git treats as up to
+date signs nothing: run the signature verification afterwards.
 
 ### Signing must survive the rebase
 
@@ -302,11 +326,23 @@ gh extension install --pin <tag> -- github/gh-stack
 gh stack view
 ```
 
-`gh stack view` shows the chain and whether GitHub knows it as a stack. Use
-`gh stack submit` or `gh stack link` only for a stack that will be merged as a
-stack: both base each PR on the branch below it, which is the base-chaining the
-default rule rejects. For a stack that will not be, open the PRs with
-`gh pr create --base main` instead.
+An unpinned install checks the latest-release endpoint of
+`api.github.com/repos/github/gh-stack` with the user's token at most once every
+24 hours; a `--pin` install never does. `GH_STACK_NO_UPDATE_NOTIFIER=1` opts
+out.
+
+`gh stack view` shows the chain, and the stack number when the local record
+carries the remote stack (see condition 1). Use `gh stack submit` or
+`gh stack link` only for a stack that will be merged as a stack: both base each
+PR on the branch below it, which is the base-chaining the default rule rejects.
+For a stack that will not be, open the PRs with `gh pr create --base main`
+instead.
+
+Stack tracking lives in the repository's common git directory
+(`<common-dir>/gh-stack`), so every linked worktree sees the same stacks. From
+one worktree, `gh stack checkout` by default refuses a branch that another
+worktree holds and names that worktree; with its print-path option it prints
+that worktree's path and exits 0.
 
 ## Requirements
 

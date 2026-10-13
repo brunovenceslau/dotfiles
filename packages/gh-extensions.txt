@@ -31,4 +31,9 @@
 # gh-stack: GitHub's native stacked-PR CLI (github org). It is the workflow every
 # host uses to open large PR stacks and land them bottom-up with
 # minimal blocking (see docs/stacked-prs.md). Pin bump = review + edit here.
-github/gh-stack v0.1.0  # 2026-07-29; commit a1b4a3d4d0bcde9ec3a78ab99b2d63af121857a9
+# The pin is the latest release, reviewed on 2026-10-12 as the diff from v0.1.0
+# (release notes and tagged source). Its release attestation was verified with
+# `gh attestation verify` (signer release.yml@refs/tags/v0.2.1, source digest
+# 29a36d3). The date and commit after the pin are informational: no gate reads
+# them.
+github/gh-stack v0.2.1  # 2026-10-09; commit 29a36d314be664583705f18e41cebdf2b61ad514
