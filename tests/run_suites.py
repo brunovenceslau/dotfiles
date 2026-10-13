@@ -24,9 +24,11 @@ shell waiting on it. What it does, in order:
   - runs every suite as `bash -- <suite>`, at most JOBS at a time, each in a
     session of its own (so its process group can be signalled as one), stdin
     from /dev/null (suites running at once cannot share a terminal), stdout
-    and stderr into one log file per suite, outside every suite's TMPDIR. A
-    `start <suite>` line says when each one starts, so a suite that hangs
-    until a CI timeout can still be named;
+    and stderr into one log file per suite, outside every suite's TMPDIR,
+    always a new file: a name already there (a symlink an earlier suite
+    planted, say) is never written through, and the run stops as for a
+    suite that could not start. A `start <suite>` line says when each one
+    starts, so a suite that hangs until a CI timeout can still be named;
   - prints each suite's log as one block when it ends, opened by
     `run <suite>` and closed by a `done <suite>:` line with its verdict, its
     wall time and a peak RSS, so the output of suites running at once never
@@ -49,7 +51,7 @@ shell waiting on it. What it does, in order:
     their sessions and the scratch root stays;
   - when its stdout is closed (its reader, such as `head`, went away),
     stops every running suite, removes the scratch root and says so on
-    stderr, exit 1.
+    stderr (unless stderr went to the same reader), exit 1.
 
 A suite that must not run alongside any other says so with a line that is
 exactly SERIAL_MARK (below). Serial suites run first, one at a time, with
@@ -118,6 +120,13 @@ def emit(stream, text):
     stream.flush()
     stream.buffer.write(os.fsencode(text))
     stream.buffer.flush()
+
+
+def to_devnull(stream):
+    """Point STREAM's descriptor at /dev/null, so no later write can raise."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, stream.fileno())
+    os.close(devnull)
 
 
 def err(msg):
@@ -356,8 +365,16 @@ class Runner:
         # descriptor: logs/ sits beside every suite's TMPDIR, and a suite
         # that swapped its log for a symlink or another file would print
         # whatever that names, were it opened again by its path. Read and
-        # write, so that one descriptor serves both.
-        run.log = open(os.path.join(self.root, "logs", run.index + ".log"), "w+b")
+        # write, so that one descriptor serves both. Created, never reused:
+        # an earlier suite can plant a symlink or a file at a later suite's
+        # log path, and opening it would write through to whatever it names.
+        # O_EXCL fails on any existing name, a symlink included (O_NOFOLLOW
+        # is a second guard), and the FileExistsError fails the run closed
+        # through the "could not start" path, before that suite runs.
+        fd = os.open(os.path.join(self.root, "logs", run.index + ".log"),
+                     os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC,
+                     0o600)
+        run.log = os.fdopen(fd, "w+b")
         try:
             # `--`: a suite path starting with `-` is a file, never an option.
             run.proc = subprocess.Popen(
@@ -597,11 +614,16 @@ def main(argv):
         # Whoever read stdout is gone (`head`, say). Point stdout at
         # /dev/null, so the cleanup below and the interpreter's own flush at
         # exit cannot raise again, and say why on stderr.
-        devnull = os.open(os.devnull, os.O_WRONLY)
-        os.dup2(devnull, sys.stdout.fileno())
-        os.close(devnull)
-        return err("stdout was closed (a broken pipe); stopping the run "
-                   "and its running suites")
+        to_devnull(sys.stdout)
+        try:
+            return err("stdout was closed (a broken pipe); stopping the run "
+                       "and its running suites")
+        except BrokenPipeError:
+            # stderr went to the same reader (`2>&1 | head`): point it at
+            # /dev/null too, so the WARN lines of the cleanup and the flush
+            # at exit cannot raise, and the exit stays 1, never Python's 120.
+            to_devnull(sys.stderr)
+            return 1
     finally:
         # Runs on every path, a failed setup and an exception included. A
         # signal during cleanup only sets a flag, so it cannot cut it short.

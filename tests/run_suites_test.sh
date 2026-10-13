@@ -784,6 +784,21 @@ rm -f "$log" && echo FORGED > "$log"'
 run 1 swap.sh
 [ "$rc" = 0 ] && grep -qx REAL-OUT <<<"$out" && ! grep -q FORGED <<<"$out" && ok \
   || fail "a suite that swaps its log file must still get its own output printed (rc $rc): $out"
+# A suite cannot make the runner write through a later suite's log path: a
+# symlink planted there is never followed. The runner fails closed, as for a
+# suite that could not start: the later suite never runs, the run exits 1 and
+# names it, and the file the symlink names keeps its content.
+fresh
+printf 'ORIG\n' > "$SHARED/outside"
+suite plant.sh 'ln -s "$SHARED/outside" "$TMPDIR/../../logs/2.log"'
+suite victim.sh 'echo VICTIM-OUT; : > "$SHARED/victim.ran"'
+run 1 plant.sh victim.sh
+[ "$rc" = 1 ] && grep -q "^ERROR: test: could not start victim.sh (.*File exists" <<<"$err" && ok \
+  || fail "a symlink planted at a later suite's log path must fail the run, naming that suite (rc $rc): $out $err"
+[ "$(cat "$SHARED/outside")" = ORIG ] && ok \
+  || fail "the runner must not write through a planted log symlink: outside now holds $(cat "$SHARED/outside")"
+[ ! -e "$SHARED/victim.ran" ] && ok || fail "a suite whose log path was planted must not run"
+empty_tp && ok || fail "a planted log symlink must still leave no scratch root: $(ls -A "$tp")"
 # What a suite leaves running in its process group dies with it.
 fresh
 suite leave.sh 'sleep 300 &
@@ -823,23 +838,41 @@ else
 fi
 # A closed stdout (its reader, such as `head`, went away) is a broken pipe,
 # reported as one: the run stops its suites, removes the scratch root and
-# exits 1. It is never a suite that "could not start". The reader here goes
-# away once p1.sh runs, and p2.sh's block, a second later, is the first write
-# to fail.
-fresh
-suite p1.sh 'echo "$$" > "$SHARED/p1.pid"; sleep 300'
-suite p2.sh 'sleep 1; echo P2'
+# exits 1. It is never a suite that "could not start". The reader here closes
+# the pipe once p1.sh runs and only then writes the `gone` marker, which p2.sh
+# waits for, so p2.sh's block is the first write to fail, however loaded the
+# host: a write that beat the reader's exit would leave the runner waiting on
+# p1.sh until the 60s bound. The second shape sends stderr to the same reader
+# (`make test 2>&1 | head`): the message is lost with it, and the exit must
+# still be 1, never the 120 of a Python that cannot flush stderr at exit.
+bp_suites() {
+  fresh
+  suite p1.sh 'echo "$$" > "$SHARED/p1.pid"; sleep 300'
+  suite p2.sh 'i=0; while [ ! -s "$SHARED/gone" ]; do i=$((i + 1)); [ "$i" -le 300 ] || exit 9; sleep 0.1; done; echo P2'
+}
+bp_reader='{ IFS= read -r _ || :; while [ ! -s "$SHARED/p1.pid" ]; do sleep 0.1; done; exec 0<&-; echo gone > "$SHARED/gone"; }'
+bp_check() {
+  [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "a runner with a closed stdout must not hang ($1): $err"
+  empty_tp && ok || fail "a closed stdout must still remove the scratch root ($1): $(ls -A "$tp")"
+  p1="$(cat "$SHARED/p1.pid")"
+  gone "$p1" 10 && ok || { kill -KILL "$p1" 2>/dev/null || true; fail "a closed stdout must stop the running suites ($1, pid $p1 alive)"; }
+}
+bp_suites
 bounded_run 60 "$work/bp" bash -c 'cd "$1" && shift && "$@" 2>"$0" \
-  | { IFS= read -r _ || :; while [ ! -s "$SHARED/p1.pid" ]; do sleep 0.1; done; }; exit "${PIPESTATUS[0]}"' \
+  | '"$bp_reader"'; exit "${PIPESTATUS[0]}"' \
   "$work/err" "$s" env TEST_JOBS=2 TMPDIR="$tp" "$py" -I "$runner" p1.sh p2.sh
 err="$(cat "$work/err")"
-[ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "a runner with a closed stdout must not hang: $err"
+bp_check "stdout only"
 [ "$br_rc" = 1 ] && grep -q "^ERROR: test: stdout was closed (a broken pipe)" <<<"$err" && ok \
   || fail "a closed stdout must be reported as a broken pipe, exit 1 (rc $br_rc): $err"
 grep -q "could not start" <<<"$err" && fail "a closed stdout is not a suite that could not start: $err" || ok
-empty_tp && ok || fail "a closed stdout must still remove the scratch root: $(ls -A "$tp")"
-p1="$(cat "$SHARED/p1.pid")"
-gone "$p1" 10 && ok || { kill -KILL "$p1" 2>/dev/null || true; fail "a closed stdout must stop the running suites (pid $p1 alive)"; }
+bp_suites
+bounded_run 60 "$work/bp" bash -c 'cd "$0" && "$@" 2>&1 \
+  | '"$bp_reader"'; exit "${PIPESTATUS[0]}"' \
+  "$s" env TEST_JOBS=2 TMPDIR="$tp" "$py" -I "$runner" p1.sh p2.sh
+err="$(cat "$work/bp")"
+bp_check "stdout and stderr"
+[ "$br_rc" = 1 ] && ok || fail "a closed stdout and stderr must still exit 1 (rc $br_rc): $err"
 # A suite path that is not UTF-8 is printed as its bytes, never a traceback.
 # macOS file systems refuse such names, so the case runs where they exist.
 # The braces carry the 2>/dev/null: a failing redirection reports its error

@@ -760,11 +760,12 @@ ok "a heading's code span is read verbatim up to 2048 characters and as prose pa
 # 60 s, while its CPU time grew only 1.6x to 1.9x under that load. So each
 # shape is measured twice, at 1x and at 8x, in this process's CPU time
 # (time.process_time; load inflates it far less than wall time, and alike at
-# both sizes, so their ratio holds), with the collector off, each call repeated until it has used 20 ms of CPU so a fast
-# scan needs no timer floor. A linear scan costs about 8x to 11x more at 8x,
-# a quadratic one 64x: a ratio past RATIO (23) is re-measured, best of three
-# for each size, before it fails. cpu_cost.py holds that rule, once, for
-# every growth check in this file.
+# both sizes, so their ratio holds), with the collector off, each call
+# repeated until it has used 20 ms of CPU so a fast scan needs no timer floor.
+# A linear scan costs about 8x to 11x more at 8x, a quadratic one 64x: a ratio
+# past RATIO (23) is re-measured, best of three for each size, before it
+# fails. cpu_cost.py holds that rule, once, for every growth check in this
+# file.
 cat >"$work/cpu_cost.py" <<'PY'
 import gc
 import time
@@ -832,6 +833,7 @@ cat >"$work/growth_hostile.py" <<'PY'
 import math
 import os
 import resource
+import signal
 import subprocess
 import sys
 
@@ -932,6 +934,10 @@ def shapes(n):
     }
 
 
+# SIGXCPU's default action, never an inherited one: a parent that ignored it
+# (SIG_IGN survives exec) would turn the CPU budget below into no limit at all,
+# since an ignored SIGXCPU at the soft limit does nothing until the hard one.
+signal.signal(signal.SIGXCPU, signal.SIG_DFL)
 # A SIGXCPU death must not leave a core file in the fixture or in /cores.
 resource.setrlimit(resource.RLIMIT_CORE, (0, resource.getrlimit(resource.RLIMIT_CORE)[1]))
 SOFT, HARD = resource.getrlimit(resource.RLIMIT_CPU)
