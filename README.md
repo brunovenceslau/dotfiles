@@ -9,10 +9,10 @@ SPDX-License-Identifier: GPL-3.0-or-later
 [![CI](https://github.com/brunovenceslau/dotfiles/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/brunovenceslau/dotfiles/actions/workflows/ci.yml)
 [![REUSE status](https://api.reuse.software/badge/github.com/brunovenceslau/dotfiles)](https://api.reuse.software/info/github.com/brunovenceslau/dotfiles)
 
-A zsh configuration framework for macOS, on Apple Silicon and Intel. It installs
-by symlinking this repository into your home directory, keeps `$HOME` clean by
-following the XDG base directory layout, and carries no plugin manager and no
-runtime downloads.
+A zsh configuration framework for macOS, on Apple Silicon (Intel best effort).
+It installs by symlinking this repository into your home directory, keeps
+`$HOME` clean by following the XDG base directory layout, and carries no plugin
+manager and no runtime downloads.
 
 The repository is the install. You clone it to `~/.config/dotfiles`, run
 `./install.sh`, and that same clone is what every shell loads, so editing it is
@@ -133,7 +133,7 @@ adapt it.
 
 | Requirement | Why |
 | --- | --- |
-| macOS on arm64 or x86_64 | The only supported platform. |
+| macOS on arm64, or x86_64 best effort | The only supported platform. Intel is best effort: CI runs it once a week, not on pull requests. |
 | zsh | The login shell. macOS ships a recent one, and the Brewfile deliberately does not install a second copy. |
 | git | Clone plus submodules. Xcode Command Line Tools provide it (`xcode-select --install`). |
 | Homebrew | Only for `./install.sh packages`. Linking works without it. |

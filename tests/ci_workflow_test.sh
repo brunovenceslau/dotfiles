@@ -5,9 +5,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 #
-# Contract tests for .github/workflows/ci.yml - the verification gate. The
-# workflow runs ONE gate, `make local-ci`, on both macOS legs, every leg on a
-# GITHUB-HOSTED runner (macOS arm64 + Intel); forbids self-hosted runners and
+# Contract tests for .github/workflows/ci.yml - the verification gate - and
+# .github/workflows/intel.yml, which calls it. The workflow runs ONE gate,
+# `make local-ci`, on two macOS legs, every leg on a GITHUB-HOSTED runner
+# (macOS arm64 on every push and pull request, Intel on intel.yml's weekly
+# schedule, best effort since 2026-10-17); forbids self-hosted runners and
 # QEMU/container emulation, and runs no leg for any other OS (macOS is the only
 # platform the framework installs on). This asserts the properties that keep the
 # workflow honest: the gate is
@@ -22,10 +24,12 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 wf="$repo_root/.github/workflows/ci.yml"
+intel_wf="$repo_root/.github/workflows/intel.yml"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # --- Existence ----------------------------------------------------------------
 [ -f "$wf" ] || fail "workflow not found: .github/workflows/ci.yml"
+[ -f "$intel_wf" ] || fail "workflow not found: .github/workflows/intel.yml"
 
 # Non-comment lines only, so an explanatory comment naming a gate/tool is never
 # mistaken for a command (e.g. the header comment explaining why no leg is
@@ -89,8 +93,8 @@ PATS
 
 # --- Well-formedness + gate shape (PyYAML; loud skip when absent) --------------
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
-  python3 - "$wf" <<'PY' || fail "PyYAML structural checks failed (see above)"
-import sys, yaml
+  python3 - "$wf" "$intel_wf" <<'PY' || fail "PyYAML structural checks failed (see above)"
+import json, re, sys, yaml
 
 with open(sys.argv[1]) as f:
     doc = yaml.safe_load(f)
@@ -116,10 +120,19 @@ assert gate_jobs, "no job runs `make local-ci`"
 
 # runs-on may be a matrix expression (`${{ matrix.runs-on }}`); resolve the
 # concrete runner values from strategy.matrix.include so every leg is checked.
+# The include list is the expression `fromJSON(inputs.legs || '<default>')`:
+# a push or pull request runs the default literal, read here.
+def default_legs(inc):
+    if isinstance(inc, list):
+        return inc
+    m = re.fullmatch(r"\$\{\{ *fromJSON\(inputs\.legs \|\| '(\[.*\])'\) *\}\}", inc.strip())
+    assert m, f"matrix include is neither a list nor fromJSON(inputs.legs || '<legs>'): {inc!r}"
+    return json.loads(m.group(1))
+
 def label_sets(job):
     ro = job.get("runs-on")
     if isinstance(ro, str) and "matrix." in ro:
-        inc = ((job.get("strategy") or {}).get("matrix") or {}).get("include") or []
+        inc = default_legs(((job.get("strategy") or {}).get("matrix") or {}).get("include") or [])
         out = []
         for e in inc:
             r = e.get("runs-on")
@@ -151,8 +164,29 @@ for name, job in gate_jobs.items():
     assert job.get("continue-on-error") is not True, \
         f"gate job {name!r} must NOT set continue-on-error (it is the blocking gate)"
 
-want = {("macOS", "ARM64"), ("macOS", "X64")}
-assert want <= platforms, f"2-leg macOS matrix incomplete - missing {sorted(want - platforms)}"
+assert platforms == {("macOS", "ARM64")}, \
+    f"a push or pull request must run the arm64 leg alone: {sorted(platforms)}"
+
+# intel.yml: on a schedule and on demand, never on a push or pull request,
+# calling ci.yml (one definition of the steps) with Intel legs only.
+with open(sys.argv[2]) as f:
+    intel = yaml.safe_load(f)
+on = intel.get(True, intel.get("on"))
+assert isinstance(on, dict) and set(on) == {"schedule", "workflow_dispatch"}, \
+    f"intel.yml must run on schedule and workflow_dispatch only: {on!r}"
+assert on["schedule"] and all("cron" in c for c in on["schedule"]), "intel.yml has no cron"
+assert intel.get("permissions") == {"contents": "read"}, "intel.yml must read the repo only"
+calls = list((intel.get("jobs") or {}).values())
+assert len(calls) == 1 and calls[0].get("uses") == "./.github/workflows/ci.yml", \
+    "intel.yml must have one job, calling ./.github/workflows/ci.yml"
+legs = json.loads(calls[0]["with"]["legs"])
+assert legs, "intel.yml passes no legs"
+for leg in legs:
+    assert platform(str(leg["runs-on"])) == ("macOS", "X64"), \
+        f"intel.yml leg is not a GitHub-hosted Intel macOS image: {leg!r}"
+platforms.add(("macOS", "X64"))
+legs_input = (doc.get(True, doc.get("on")) or {}).get("workflow_call", {}).get("inputs", {}).get("legs")
+assert legs_input and legs_input.get("type") == "string", "ci.yml must take workflow_call input legs"
 assert not [p for p in platforms if p[0] != "macOS"], \
     f"a non-macOS leg crept back (Linux withdrawn 2026-09-13): {sorted(platforms)}"
 

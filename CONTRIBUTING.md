@@ -137,8 +137,9 @@ shows.
   commits". That workflow, its reasoning and the re-sync commands are in
   [stacked pull requests](docs/stacked-prs.md); it does not apply to a
   fork-based contribution.
-- **Both CI legs must be green**: `local-ci (macos-arm64)` and
-  `local-ci (macos-intel)` are required status checks in the `main` ruleset.
+- **The CI gate must be green**: `local-ci (macos-arm64)` is the required
+  status check in the `main` ruleset. Intel is best effort: its leg runs
+  weekly on `main`, not on pull requests, and is not required.
 - **Merges use a merge commit.** Squash and rebase merging are off, because both
   rewrite your commits: GitHub signs a squash commit with its own key instead of
   yours, and does not sign a rebase-merged commit at all. The head branch is

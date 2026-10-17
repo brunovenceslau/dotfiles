@@ -56,9 +56,6 @@
       "required_status_checks": [
         {
           "context": "local-ci (macos-arm64)"
-        },
-        {
-          "context": "local-ci (macos-intel)"
         }
       ],
       "status_check_policy": {

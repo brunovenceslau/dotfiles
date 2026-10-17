@@ -701,7 +701,9 @@ that enforces each property.
 
 ## Platform differences
 
-Apple Silicon and Intel are both first-class targets. Architecture differences
+Apple Silicon is the first-class target. Intel is best effort since 2026-10-17:
+the code still supports it, and CI runs it once a week rather than on every pull
+request (see [CI](development.md#ci)). Architecture differences
 never appear in link names. They are allowed in four places:
 
 - shell guards that call `is-arm64` or `is-amd64` from `lib/os.sh` (no tracked
