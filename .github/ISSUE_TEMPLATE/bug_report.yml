@@ -54,7 +54,7 @@ body:
         architecture, so this decides where the bug can even happen.
       options:
         - Apple Silicon (arm64)
-        - Intel (x86_64)
+        - Intel (x86_64, best effort)
         - Not macOS (unsupported, see the README)
     validations:
       required: true

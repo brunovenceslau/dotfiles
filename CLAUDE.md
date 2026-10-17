@@ -14,7 +14,8 @@ what you do. The detail behind these rules lives in `docs/` and in
 
 ## What this repo is
 
-A self-built zsh dotfiles framework for macOS, Apple Silicon and Intel.
+A self-built zsh dotfiles framework for macOS, Apple Silicon, with Intel best
+effort (a weekly CI run, not a pull request gate, since 2026-10-17).
 
 `~/.config/dotfiles` is the install location and the dev workspace at the same
 time, by design of the single-repo model. A second checkout under

@@ -93,9 +93,18 @@ ok "settings file is well-formed (approval_policy and enforcement are documented
 # or the job id when there is no `name:`. PyYAML is a CI prerequisite.
 if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null; then
   generated="$(python3 - "$wf" <<'PY'
-import re, sys, yaml
+import json, re, sys, yaml
 with open(sys.argv[1]) as f:
     jobs = yaml.safe_load(f)["jobs"]
+# The include list may be `fromJSON(inputs.legs || '<default>')`: a push or
+# pull request, the events a required check gates, runs the default literal.
+def default_legs(inc):
+    if isinstance(inc, list):
+        return inc
+    m = re.fullmatch(r"\$\{\{ *fromJSON\(inputs\.legs \|\| '(\[.*\])'\) *\}\}", inc.strip())
+    if not m:
+        sys.exit(f"matrix include is neither a list nor fromJSON(inputs.legs || '<legs>') - extend this test")
+    return json.loads(m.group(1))
 expr = re.compile(r"\$\{\{ *matrix\.([A-Za-z0-9_-]+) *\}\}")
 for jid, job in jobs.items():
     name = str(job.get("name", jid))
@@ -109,7 +118,7 @@ for jid, job in jobs.items():
                  "GitHub then appends the matrix values to the check name - extend this test")
     if axes:
         sys.exit(f"job {jid!r}: matrix axes {axes} are not expanded by this test - extend it")
-    for leg in matrix.get("include") or []:
+    for leg in default_legs(matrix.get("include") or []):
         print(expr.sub(lambda m: str(leg[m.group(1)]), name))
 PY
 )" || fail "could not derive the check names from ci.yml"
@@ -140,7 +149,7 @@ def on_main: (branch_ruleset.enforcement == "active")
 def pvr: .private_vulnerability_reporting.enabled == true;'
 anchors='CONTRIBUTING.md|Every commit on `main` must carry a valid signature. A branch ruleset on `main` enforces it on the server, with no bypass actors|on_main and rule("required_signatures") and branch_ruleset.bypass_actors == []
 CONTRIBUTING.md|The same ruleset blocks force pushes to `main` and blocks deleting it|on_main and rule("non_fast_forward") and rule("deletion")
-CONTRIBUTING.md|are required status checks in the `main` ruleset.|on_main and rule("required_status_checks")
+CONTRIBUTING.md|is the required status check in the `main` ruleset.|on_main and rule("required_status_checks")
 CONTRIBUTING.md|Merges use a merge commit.** Squash and rebase merging are off|.repo.allow_merge_commit == true and .repo.allow_squash_merge == false and .repo.allow_rebase_merge == false
 CONTRIBUTING.md|The head branch is deleted automatically after the merge.|.repo.delete_branch_on_merge == true
 CONTRIBUTING.md|Actions setting requires maintainer approval before any workflow runs on a pull request from an outside collaborator (anyone without write access).|.fork_pr_contributor_approval.approval_policy == "all_external_contributors"
@@ -154,7 +163,7 @@ docs/architecture.md|The live `main-protection` branch ruleset on GitHub (`requi
 docs/signing-key.md|The `main` ruleset refuses a force push to `main`|on_main and rule("non_fast_forward")
 docs/stacked-prs.md|With `delete_branch_on_merge` on, merging the parent deletes its head branch|.repo.delete_branch_on_merge == true
 docs/development.md|the repository'"'"'s Actions settings require SHA pinning|.actions_permissions.sha_pinning_required == true
-docs/development.md|Both legs are required status checks on `main`|on_main and rule("required_status_checks") and (branch_ruleset.required_status_checks | length) == 2
+docs/development.md|The arm64 leg is the only required status check on `main`|on_main and rule("required_status_checks") and (branch_ruleset.required_status_checks | length) == 1
 docs/development.md|the requirement lives in the branch ruleset rather than in the workflow|rule("required_status_checks")'
 n=0
 while IFS='|' read -r file phrase pred; do

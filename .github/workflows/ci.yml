@@ -6,20 +6,18 @@
 #
 # Runs the single locally-runnable gate - `make local-ci STRICT=1` (lint +
 # test-env-scrub + test + reuse + gitleaks + secret-scan + smoke + forkgate +
-# linkcheck + commit-identity + check-patterns-gawk) - on both macOS legs,
-# every leg on a GITHUB-HOSTED runner: macOS arm64 + Intel. macOS is the only
-# platform the framework installs on, so there is no leg for any other OS.
-# There is deliberately NO QEMU/container emulation: each leg is real hardware
-# of its own architecture, which is what the Brewfile on_arm/on_intel blocks,
-# the Homebrew-prefix detection and the bash 3.2 + BSD-tools assumptions
-# actually exercise.
+# linkcheck + commit-identity + check-patterns-gawk) - on a GITHUB-HOSTED macOS
+# runner. macOS is the only platform the framework installs on, so there is no
+# leg for any other OS. There is deliberately NO QEMU/container emulation: each
+# leg is real hardware of its own architecture, which is what the Brewfile
+# on_arm/on_intel blocks, the Homebrew-prefix detection and the bash 3.2 +
+# BSD-tools assumptions actually exercise.
 #
-# Runner images: `macos-latest` is Apple Silicon. Intel has no rolling alias, so
-# that leg names `macos-15-intel` - GitHub's Intel image - explicitly; if it is
-# ever retired the leg fails loudly rather than silently dropping the Intel
-# coverage. Loudly is the right failure, but while the leg is a REQUIRED check a
-# retirement also deadlocks merging: see docs/development.md, "When a runner
-# image is retired", for the one manual step that breaks the deadlock.
+# Legs: a push or pull request runs the arm64 leg (`macos-latest`, Apple
+# Silicon), the required check. Intel support is best effort since 2026-10-17:
+# its leg is slow and GitHub is retiring its images, so it runs on a schedule,
+# not on pull requests. .github/workflows/intel.yml calls this workflow with
+# the Intel leg in `legs`; the steps below are the one definition of both.
 #
 # The gate is a `make` target (`make local-ci`), never inline YAML
 #   logic; setup steps only install the tools that target needs.
@@ -30,14 +28,23 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The scheduled Intel leg (.github/workflows/intel.yml) calls this workflow.
+  workflow_call:
+    inputs:
+      legs:
+        description: JSON list of {name, runs-on} legs to run instead of arm64.
+        type: string
+        required: true
 
 # Least privilege: the workflow only reads the repo to verify it.
 permissions:
   contents: read
 
 # Cancel superseded runs on rapid re-pushes/PR updates (each ref keeps its group).
+# The event is in the group so a scheduled Intel run on main and a push run on
+# main never cancel each other.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -48,11 +55,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: macos-arm64
-            runs-on: macos-latest
-          - name: macos-intel
-            runs-on: macos-15-intel
+        # A push or pull request has no inputs, so it runs the default: the
+        # arm64 leg alone. tests/ci_workflow_test.sh and
+        # tests/repo_settings_test.sh read this default literal.
+        include: ${{ fromJSON(inputs.legs || '[{"name":"macos-arm64","runs-on":"macos-latest"}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

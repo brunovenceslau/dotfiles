@@ -44,9 +44,9 @@ maintainer decision, and last the step-by-step recipes for common changes.
 
 ## Prerequisites
 
-- macOS, Apple Silicon or Intel. `install.sh` and `lib/` target bash 3.2, the
-  version macOS ships. Linux is not a supported platform: the installer still
-  creates the links there, but CI runs only on macOS (see
+- macOS, Apple Silicon, or Intel best effort. `install.sh` and `lib/` target
+  bash 3.2, the version macOS ships. Linux is not a supported platform: the
+  installer still creates the links there, but CI runs only on macOS (see
   [Who this is for](../README.md#who-this-is-for)).
 - Xcode Command Line Tools, for git and the compiler toolchain:
   `xcode-select --install`.
@@ -726,17 +726,28 @@ holds. The backstop on GitHub is the signed-commits rule of the
 
 `.github/workflows/ci.yml` is a thin matrix of `make` calls.
 
-| Leg | Runner image | Gate |
-| --- | --- | --- |
-| `macos-arm64` | `macos-latest` | `make local-ci STRICT=1` |
-| `macos-intel` | `macos-15-intel` | `make local-ci STRICT=1` |
+| Leg | Runner image | Gate | When |
+| --- | --- | --- | --- |
+| `macos-arm64` | `macos-latest` | `make local-ci STRICT=1` | Every push to `main` and every pull request; a required check |
+| `macos-intel` | `macos-15-intel` | `make local-ci STRICT=1` | Mondays 06:00 UTC on `main`, and on demand; not a required check |
+
+Intel support is best effort since 2026-10-17. Its leg took about 14 minutes
+against 8 for arm64, and GitHub is retiring its Intel images, so it left the
+pull request path: `.github/workflows/intel.yml` runs it on a schedule by
+calling `ci.yml` with the Intel leg, so the steps have one definition. A
+failed weekly run is a signal to read, not a gate: GitHub notifies the account
+that last edited the cron line, and it disables a scheduled workflow after 60
+days without activity in the repository, so a quiet period can end the Intel
+runs until the workflow is enabled again. The code keeps supporting
+Intel (Homebrew prefix detection, `is-amd64`, `on_intel` blocks); what is lost
+is the guarantee that a pull request does not break it.
 
 Both legs are real hardware of their own architecture. There is no emulation,
 because what these legs exercise is exactly the part that emulation would hide:
 Homebrew prefix detection, `on_arm` and `on_intel` Brewfile blocks, bash 3.2 and
 the BSD toolchain. Intel has no rolling image alias, so that leg names
-`macos-15-intel` explicitly. If the image is retired, the leg fails loudly
-rather than dropping the coverage.
+`macos-15-intel` explicitly. If the image is retired, the weekly run fails
+loudly rather than dropping the coverage quietly.
 
 The workflow checks out submodules recursively, so smoke exercises the real
 plugin path. It does not persist credentials on the runner.
@@ -797,33 +808,28 @@ pull request, change the live setting after it merges, and run
 
 ### When a runner image is retired
 
-Naming `macos-15-intel` explicitly is what keeps the Intel leg honest, and it
-has one known cost. GitHub retires a numbered image eventually. Both legs are
-required status checks on `main`, so from the day the image goes away the Intel
-leg fails on every pull request, including the one that would fix it: the fix
-changes the image name, and the check that has to pass before it can merge is
-the check the dead image makes impossible. Nothing in the repository can break
-that cycle, because the requirement lives in the branch ruleset rather than in
-the workflow.
-
-Breaking it is the one manual step in this project, and it is deliberately off
-the success path:
+The arm64 leg runs on `macos-latest`, a rolling alias, so GitHub replaces a
+retired arm64 image under it with no change here. The arm64 leg is the only
+required status check on `main`, and the requirement lives in the branch
+ruleset rather than in the workflow, so renaming that leg or its check is the
+one change that needs a manual step:
 
 1. In the repository's branch ruleset for `main`, remove `local-ci
-   (macos-intel)` from the required status checks. That is the check name the
+   (macos-arm64)` from the required status checks. That is the check name the
    matrix produces: `local-ci (${{ matrix.name }})`.
-2. Open and merge the pull request that renames the image to the current Intel
-   runner. The arm64 leg still gates it.
-   The same pull request renames the check in `.github/repo-settings.json`,
-   because `tests/repo_settings_test.sh` holds the file's required checks to the
-   job names `ci.yml` generates.
-3. Add the required check back under whatever name the renamed leg now reports,
-   and run `make repo-settings-check`. Between step 1 and this step it reports
-   the missing check as drift, which is expected.
+2. Open and merge the pull request that renames the leg. The same pull request
+   renames the check in `.github/repo-settings.json`, because
+   `tests/repo_settings_test.sh` holds the file's required checks to the job
+   names `ci.yml` generates.
+3. Add the required check back under the new name, and run `make
+   repo-settings-check`. Between step 1 and this step it reports the missing
+   check as drift, which is expected.
 
-Do not solve it by deleting the Intel leg, and do not solve it by making the
-check non-required. The point of the explicit image name is that losing Intel
-coverage is a decision someone takes, never something that happens quietly.
+The Intel leg names `macos-15-intel` and is not a required check, so its
+retirement blocks nothing: the weekly run fails, and what follows is a
+decision, never a quiet loss. Either the image in `.github/workflows/intel.yml`
+is renamed to the current Intel runner, or the leg is retired and the
+documentation stops claiming Intel support.
 
 ## Hard rules
 

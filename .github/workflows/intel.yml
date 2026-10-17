@@ -1,0 +1,30 @@
+# SPDX-FileCopyrightText: 2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>
+#
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+# Intel - the best-effort leg.
+#
+# Intel support is best effort since 2026-10-17: the leg is slow and GitHub is
+# retiring its Intel images, so it no longer runs on pull requests and is not
+# a required check. It runs `make local-ci STRICT=1` on main once a week, and
+# on demand, through ci.yml, so the steps have one definition. A failure here
+# is a signal to read, not a gate. Intel has no rolling image alias, so the
+# leg names `macos-15-intel` explicitly; when GitHub retires it, this run
+# fails loudly and the image is renamed or the leg retired, by decision.
+
+name: Intel
+
+on:
+  schedule:
+    # Mondays 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  intel:
+    uses: ./.github/workflows/ci.yml
+    with:
+      legs: '[{"name":"macos-intel","runs-on":"macos-15-intel"}]'
