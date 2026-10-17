@@ -821,13 +821,14 @@ PY
 # before each run, RLIMIT_CPU is set to the CPU this process has used plus a
 # budget, so the kernel ends it with SIGXCPU once the run overspends. The 1x
 # run gets FIRST seconds (10 here: linear 1x runs take well under 0.2 s), the
-# 8x run 40 times the 1x cost (KILL_RATIO, past RATIO, and at least 2 s), and
-# `shape hN.md 1x` or `8x` is printed and flushed before each, so a SIGXCPU
+# 8x run 40 times the 1x cost (KILL_RATIO, past RATIO, and at least FLOOR
+# seconds, 2 for the real check), and `shape hN.md 1x` or `8x` is printed
+# and flushed before each, so a SIGXCPU
 # death names its shape. Load inflates CPU time by 1.9x at most (measured),
 # well inside these budgets, and the 8x budget scales with a 1x cost taken
 # under the same load. bounded_run's 300 s is only the backstop for a kernel
 # that never sends SIGXCPU.
-# Usage: growth_hostile.py LINKCHECK_DIR ROOT FIRST [SHAPE...]; the mutants
+# Usage: growth_hostile.py LINKCHECK_DIR ROOT FIRST FLOOR [SHAPE...]; the mutants
 # below run it on a copy of the gate, limited to one shape.
 cat >"$work/growth_hostile.py" <<'PY'
 import math
@@ -837,14 +838,15 @@ import signal
 import subprocess
 import sys
 
-lc_dir, root, FIRST = sys.argv[1], os.path.realpath(sys.argv[2]), float(sys.argv[3])
-only = sys.argv[4:]
+lc_dir, root = sys.argv[1], os.path.realpath(sys.argv[2])
+FIRST, KILL_FLOOR = float(sys.argv[3]), float(sys.argv[4])
+only = sys.argv[5:]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, lc_dir)
 import linkcheck
 from cpu_cost import RATIO, growth
 
-KILL_RATIO, KILL_FLOOR = 40, 2.0
+KILL_RATIO = 40
 
 
 def shapes(n):
@@ -992,13 +994,13 @@ print("growth: every shape within %dx" % RATIO)
 PY
 # shellcheck source=tests/lib/bounded_run.sh
 . "$repo_root/tests/lib/bounded_run.sh"
-# hostile_growth DIR OUT FIRST [SHAPE...] - the growth check on the gate in
+# hostile_growth DIR OUT FIRST FLOOR [SHAPE...] - the growth check on the gate in
 # DIR, bounded at 300 s; sets rc and hostile_shape (the shape it was on).
 hostile_growth() {
-  local dir="$1" out="$2" first="$3"
-  shift 3
+  local dir="$1" out="$2" first="$3" floor="$4"
+  shift 4
   new_tree
-  bounded_run 300 "$out" python3 -I -B "$work/growth_hostile.py" "$dir" "$work/r" "$first" "$@" \
+  bounded_run 300 "$out" python3 -I -B "$work/growth_hostile.py" "$dir" "$work/r" "$first" "$floor" "$@" \
     || fail "hostile input: bounded_run could not turn job control on"
   [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] \
     || fail "hostile input: the growth check outlived its 300 s backstop (hung $br_hung, stuck $br_stuck) on $(grep '^shape ' "$out" | tail -n 1)"
@@ -1007,7 +1009,7 @@ hostile_growth() {
 }
 # SIGXCPU's number, for telling a CPU-limit death from any other.
 xcpu=$(( 128 + $(kill -l XCPU) ))
-hostile_growth "$repo_root/tests" "$work/hostile.out" 10
+hostile_growth "$repo_root/tests" "$work/hostile.out" 10 2
 case "$rc" in
   0) ;;
   "$xcpu") fail "hostile input: shape $hostile_shape overspent its CPU budget (SIGXCPU): it is far from linear" ;;
@@ -1026,16 +1028,19 @@ ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs
 # measured 42x on Linux and stayed under 23x on macOS arm64, where the
 # interpreter loop is cheaper next to the regex scan). Measured on h26 on
 # 4 CPUs shared with 11 CPU hogs, 78 runs: a median first-shot ratio of 50x
-# and 1.9 s of CPU at 8x at most, under the 3 s or more that allow() makes
-# of its 2 s floor, so the ratio, not SIGXCPU, has to catch it. One of the
-# 78 measured 18x: a 1x cost inflated by the load, which growth() does not
+# and 1.9 s of CPU at 8x at most. Its true ratio, about 53x, is past
+# KILL_RATIO, so its 8x run is held only by the floor: the 2 s floor of the
+# real check was overspent on a slower macOS Intel runner (SIGXCPU, exit
+# 152, on 2026-10-17), so this run gets a 20 s floor, ten times that worst
+# 8x cost, and the ratio, not SIGXCPU, has to catch it. One of the 78
+# measured 18x: a 1x cost inflated by the load, which growth() does not
 # re-measure, since it re-measures only a ratio past RATIO.
 mut="$work/mut-lookahead"
 mkdir -p "$mut"
 sed 's/ + r"|(?!" + _WS + r"\*=))")$/ + r"|)")/' "$gate" >"$mut/linkcheck.py"
 [ "$(diff "$gate" "$mut/linkcheck.py" | grep -c '^[<>]')" = 2 ] \
   || fail "test bug: the lookahead mutant must change exactly one line of the gate"
-hostile_growth "$mut" "$work/mut-lookahead.out" 2 h53.md
+hostile_growth "$mut" "$work/mut-lookahead.out" 2 2 h53.md
 [ "$rc" = "$xcpu" ] && [ "$hostile_shape" = "h53.md 1x" ] \
   || fail "an exponential scan (no lookahead in _hattr) must die of SIGXCPU on h53.md 1x (exit $rc, shape '$hostile_shape'): $(cat "$work/mut-lookahead.out")"
 ok "an exponential scan is stopped by its CPU budget and its shape is named"
@@ -1055,7 +1060,7 @@ def check_file(tree, rel):   # mutant: a quadratic term
     return _check_file(tree, rel)
 PY
 } >"$mut/linkcheck.py"
-hostile_growth "$mut" "$work/mut-quadratic.out" 10 h26.md
+hostile_growth "$mut" "$work/mut-quadratic.out" 10 20 h26.md
 [ "$rc" = 1 ] && grep -q '^BAD: h26\.md: 8x cost ' "$work/mut-quadratic.out" \
   || fail "a quadratic scan must fail the growth ratio on h26.md (exit $rc): $(cat "$work/mut-quadratic.out")"
 ok "a quadratic scan fails the growth ratio and its shape is named"
