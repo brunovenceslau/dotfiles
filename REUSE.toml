@@ -40,3 +40,12 @@ path = ".github/repo-settings.json"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
 SPDX-License-Identifier = "GPL-3.0-or-later"
+
+[[annotations]]
+# The handoff notes. The layout checked by the sandbox payload's
+# handoff_check.py requires line 1 of every file to be its "# <title>", so a
+# comment header cannot come first.
+path = "docs/handoff/**"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Bruno Marques Venceslau de Souza <b@venceslau.dev>"
+SPDX-License-Identifier = "GPL-3.0-or-later"
