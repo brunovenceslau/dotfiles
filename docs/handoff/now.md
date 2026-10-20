@@ -3,10 +3,12 @@
 ## Where we stopped
 
 State at 2026-10-17. The flakes seen on main on 2026-10-13 are fixed and
-main is green (done/0005.md). Intel macOS support is best effort: its CI leg
-runs weekly and on demand, not on pull requests
-(decisions/intel-macos-support-is-best-effort.md). The earlier efforts are
-all merged. Their records are in done/.
+main is green, see
+`done/00000000000000000000000005-parallel-runner-flakes-fixed-intel-ci-made-best-effort.md`.
+Intel macOS support is best effort: its CI leg runs weekly and on demand, not
+on pull requests, see
+`decisions/0000000000f1mnr5ztbsyqyajf-intel-macos-support-is-best-effort.md`.
+The earlier efforts are all merged. Their records are in done/.
 
 ## Next steps
 
