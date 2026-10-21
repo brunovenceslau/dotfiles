@@ -917,8 +917,9 @@ def shapes(n):
         "h50.md": "<a =x" * (n // 5),
         "h51.md": "<a x<y" * (n // 6),
         "h52.md": "<a x<a " * (n // 7),
-        # One tag with a long run of `name =value` pairs: without the lookahead
-        # in _hattr each pair parses two ways and the scan is exponential.
+        # One tag with a long run of `name =value` pairs: a reader that let
+        # each pair parse two ways (`x` with value `y`, or `x` and then `=y`)
+        # would be exponential; _tag_walk gives a name followed by `=` its value.
         "h53.md": "<a " + "x =y " * (n // 5),
         "h54.md": "<a x</ =" * (n // 8),
         "h55.md": "<a href=x=" * (n // 10),
@@ -1017,12 +1018,52 @@ case "$rc" in
 esac
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) grows near-linearly in CPU time"
 
+# Memory, not only time: one open tag of 800 KB (many attributes, closed or
+# not, one long value, one long run of whitespace) must not hold memory in
+# proportion to the tag. The single regex the tag reader replaced held about
+# 300 bytes of backtracking stack per character of one tag: 212 to 295 MiB
+# on these shapes, and 1271 MiB for the whole suite on the macOS arm64 CI
+# leg. tracemalloc sees re's stack, so the peak is measured the same way on
+# every platform; the reader peaks under 1 MiB here, and the budget leaves
+# room for the copies blank_spans makes of the text.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "an open tag's memory must be bounded by one token, not by the tag"
+import sys
+import tracemalloc
+sys.path.insert(0, sys.argv[1])
+import linkcheck
+n, budget = 800000, 16 * 2 ** 20
+shapes = {
+    # name: (text, the number of attributes given a value it must yield),
+    # so a reader that stops early cannot pass on a low peak.
+    "unclosed attributes": ("<a " + 'x="y" ' * (n // 6), 0),
+    "closed attributes": ("<a " + 'x="y" ' * (n // 6) + ">", n // 6),
+    "bare values": ("<a " + "x=y " * (n // 4) + ">", n // 4),
+    "one long value": ('<a t="' + "x" * n + '">', 1),
+    "one long whitespace run": ("<a =" + " " * n + "x", 0),
+}
+bad = []
+for name, (text, want) in shapes.items():
+    tracemalloc.start()
+    count = sum(1 for _ in linkcheck.html_attrs(text))
+    linkcheck.blank_spans(text, True)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    if peak > budget or count != want:
+        bad.append("%s: %.1f MiB, %d attributes (want %d)" % (name, peak / 2 ** 20, count, want))
+if bad:
+    sys.exit("over %d MiB or a wrong count: %s" % (budget // 2 ** 20, "; ".join(bad)))
+PY
+ok "an open tag's memory is bounded by one token, not by the tag"
+
 # The check itself, proven against mutants of the gate, each on the one
 # shape that catches it: an exponential scan is stopped by SIGXCPU and
-# named, and a quadratic one fails the ratio. The exponential mutant drops
-# the lookahead from _hattr (h53), with a 2 s 1x budget to keep the case
-# short. The quadratic one makes check_file scan the file again 4 times per
-# 25 KB of it: 5 scans at 1x, 33 at 8x, each as long as the file. Its
+# named, and a quadratic one fails the ratio. Both prove the budget
+# machinery, not the gate's grammar: each is a term appended to check_file,
+# since the tag reader has no regex left to mutate. The exponential mutant
+# doubles its work per `x =y` pair of h53, the cost of a reading in which
+# each pair parses two ways, with a 2 s 1x budget to keep the case short.
+# The quadratic one makes check_file scan the file again 4 times per 25 KB
+# of it: 5 scans at 1x, 33 at 8x, each as long as the file. Its
 # quadratic term is the gate's own scan, so the ratio is about 6.6 times
 # the gate's linear one wherever it runs (a counting loop instead once
 # measured 42x on Linux and stayed under 23x on macOS arm64, where the
@@ -1035,14 +1076,27 @@ ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs
 # 8x cost, and the ratio, not SIGXCPU, has to catch it. One of the 78
 # measured 18x: a 1x cost inflated by the load, which growth() does not
 # re-measure, since it re-measures only a ratio past RATIO.
-mut="$work/mut-lookahead"
+mut="$work/mut-exponential"
 mkdir -p "$mut"
-sed 's/ + r"|(?!" + _WS + r"\*=))")$/ + r"|)")/' "$gate" >"$mut/linkcheck.py"
-[ "$(diff "$gate" "$mut/linkcheck.py" | grep -c '^[<>]')" = 2 ] \
-  || fail "test bug: the lookahead mutant must change exactly one line of the gate"
-hostile_growth "$mut" "$work/mut-lookahead.out" 2 2 h53.md
+{
+  cat "$gate"
+  cat <<'PY'
+
+
+_check_file = check_file
+
+
+def check_file(tree, rel):   # mutant: an exponential term
+    with open(os.path.join(tree.root, rel)) as fh:
+        pairs = fh.read().count(" =y ")
+    for _ in range(2 ** min(pairs, 64)):
+        pass
+    return _check_file(tree, rel)
+PY
+} >"$mut/linkcheck.py"
+hostile_growth "$mut" "$work/mut-exponential.out" 2 2 h53.md
 [ "$rc" = "$xcpu" ] && [ "$hostile_shape" = "h53.md 1x" ] \
-  || fail "an exponential scan (no lookahead in _hattr) must die of SIGXCPU on h53.md 1x (exit $rc, shape '$hostile_shape'): $(cat "$work/mut-lookahead.out")"
+  || fail "an exponential scan must die of SIGXCPU on h53.md 1x (exit $rc, shape '$hostile_shape'): $(cat "$work/mut-exponential.out")"
 ok "an exponential scan is stopped by its CPU budget and its shape is named"
 mut="$work/mut-quadratic"
 mkdir -p "$mut"

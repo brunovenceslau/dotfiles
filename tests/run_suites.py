@@ -84,8 +84,8 @@ import time
 # regex backtracking stack on its hostile input. A peak above the budget is
 # fixed in the suite that has it, not by raising the budget, which would
 # lower the job count of every run on every host for one suite. That case,
-# its remedy (the planned change linkcheck-tag-scanner, described in that row)
-# and what reopens it are in the docs/development.md Deferred decisions row
+# its remedy (a tag scanner in tests/linkcheck.py, landed 2026-10-21) and
+# what reopens it are in the docs/development.md Deferred decisions row
 # "Tell an out-of-memory kill apart from an expected failure in `make test`".
 SUITE_MEMORY_MIB = 384
 
