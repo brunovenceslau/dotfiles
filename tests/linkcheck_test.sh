@@ -1018,50 +1018,70 @@ case "$rc" in
 esac
 ok "hostile input (unclosed comments, tags, quotes, links, labels, backtick runs, brackets, escapes, nested destinations, long titles and ids, in prose and headings) grows near-linearly in CPU time"
 
-# Memory, not only time: one open tag of 800 KB (many attributes, closed or
-# not, one long value, one long run of whitespace) must not hold memory in
-# proportion to the tag. The single regex the tag reader replaced held about
-# 300 bytes of backtracking stack per character of one tag: 212 to 295 MiB
-# on these shapes, and 1271 MiB for the whole suite on the macOS arm64 CI
-# leg. tracemalloc sees re's stack, so the peak is measured the same way on
-# every platform; the reader peaks under 1 MiB here, and the budget leaves
-# room for the copies blank_spans makes of the text.
-python3 -I -B - "$repo_root/tests" <<'PY' || fail "an open tag's memory must be bounded by one token, not by the tag"
+# Memory, not only time: one open tag or one link of 800 KB (many
+# attributes, closed or not, one long value, one long run of whitespace; a
+# destination of many parenthesis pairs, one unclosed after a long run of
+# spaces, one long title, in a link, a heading and a definition) must not
+# hold memory in proportion to its length. The regexes the code readers
+# replaced held about 240 to 300 bytes of backtracking stack per character:
+# 212 to 295 MiB on the tag shapes, 160 to 190 MiB on the link ones, and
+# 1294 MiB for the whole suite on the macOS arm64 CI leg (670 MiB once the
+# tags alone were read by code). tracemalloc sees re's stack, so the peak is
+# measured the same way on every platform; the readers peak under 1 MiB
+# here, and the budget leaves room for the copies blank_spans makes of the
+# text. Each shape also has the count it must yield, so a reader that stops
+# early cannot pass on a low peak.
+python3 -I -B - "$repo_root/tests" <<'PY' || fail "an open tag's or a link's memory must be bounded by one token, not by its length"
 import sys
 import tracemalloc
 sys.path.insert(0, sys.argv[1])
 import linkcheck
 n, budget = 800000, 16 * 2 ** 20
+
+
+def attrs(text):
+    linkcheck.blank_spans(text, True)
+    return sum(1 for _ in linkcheck.html_attrs(text))
+
+
+def matches(rx):
+    return lambda text: sum(1 for _ in rx.finditer(text))
+
+
 shapes = {
-    # name: (text, the number of attributes given a value it must yield),
-    # so a reader that stops early cannot pass on a low peak.
-    "unclosed attributes": ("<a " + 'x="y" ' * (n // 6), 0),
-    "closed attributes": ("<a " + 'x="y" ' * (n // 6) + ">", n // 6),
-    "bare values": ("<a " + "x=y " * (n // 4) + ">", n // 4),
-    "one long value": ('<a t="' + "x" * n + '">', 1),
-    "one long whitespace run": ("<a =" + " " * n + "x", 0),
+    # name: (text, its reader, the count it must yield)
+    "unclosed attributes": ("<a " + 'x="y" ' * (n // 6), attrs, 0),
+    "closed attributes": ("<a " + 'x="y" ' * (n // 6) + ">", attrs, n // 6),
+    "bare values": ("<a " + "x=y " * (n // 4) + ">", attrs, n // 4),
+    "one long value": ('<a t="' + "x" * n + '">', attrs, 1),
+    "one long whitespace run": ("<a =" + " " * n + "x", attrs, 0),
+    "parenthesis pairs": ("[a](x" + "(y)" * (n // 3) + ")", matches(linkcheck.LINK), 1),
+    "unclosed after spaces": ("[a](x " + " " * n + '"', matches(linkcheck.LINK), 0),
+    "one long title": ('[a](x "' + "t" * n + '")', matches(linkcheck.LINK), 1),
+    "heading pairs": ("[a](x" + "(y)" * (n // 3) + ")", matches(linkcheck.HEADING_LINK), 1),
+    "definition pairs": ("[a]: x" + "(y)" * (n // 3), matches(linkcheck.REFDEF), 1),
 }
 bad = []
-for name, (text, want) in shapes.items():
+for name, (text, read, want) in shapes.items():
     tracemalloc.start()
-    count = sum(1 for _ in linkcheck.html_attrs(text))
-    linkcheck.blank_spans(text, True)
+    count = read(text)
     peak = tracemalloc.get_traced_memory()[1]
     tracemalloc.stop()
     if peak > budget or count != want:
-        bad.append("%s: %.1f MiB, %d attributes (want %d)" % (name, peak / 2 ** 20, count, want))
+        bad.append("%s: %.1f MiB, count %d (want %d)" % (name, peak / 2 ** 20, count, want))
 if bad:
     sys.exit("over %d MiB or a wrong count: %s" % (budget // 2 ** 20, "; ".join(bad)))
 PY
-ok "an open tag's memory is bounded by one token, not by the tag"
+ok "an open tag's or a link's memory is bounded by one token, not by its length"
 
 # The check itself, proven against mutants of the gate, each on the one
 # shape that catches it: an exponential scan is stopped by SIGXCPU and
 # named, and a quadratic one fails the ratio. Both prove the budget
 # machinery, not the gate's grammar: each is a term appended to check_file,
-# since the tag reader has no regex left to mutate. The exponential mutant
-# doubles its work per `x =y` pair of h53, the cost of a reading in which
-# each pair parses two ways, with a 2 s 1x budget to keep the case short.
+# since the tag and link readers have no regex left to mutate. The
+# exponential mutant doubles its work per `x =y` pair of h53, the cost of a
+# reading in which each pair parses two ways, with a 2 s 1x budget to keep
+# the case short.
 # The quadratic one makes check_file scan the file again 4 times per 25 KB
 # of it: 5 scans at 1x, 33 at 8x, each as long as the file. Its
 # quadratic term is the gate's own scan, so the ratio is about 6.6 times

@@ -115,33 +115,24 @@ ATX_OPEN = re.compile(r"^ {0,3}#{1,6}(?=[ \t]|$)")
 ATX_NESTED = re.compile(
     r"^(?:[ \t]*(?:>|[-*+]|[0-9]+[.)])(?=[ \t]|$))*[ \t]*#{1,6}(?=[ \t]|$)")
 SETEXT = re.compile(r"^ {0,3}(=+|-+)[ \t]*$")
-# A line break that is not a blank line, and the whitespace that may sit
-# between the parts of a link or a tag: never a blank line (a paragraph,
-# and an HTML block, ends there), and ASCII only. Python's `\s` also
-# matches U+00A0, U+0085 and U+2028, which CommonMark reads as ordinary
-# characters inside a destination.
+# A line break that is not a blank line: a paragraph, and an HTML block,
+# ends at a blank line. The whitespace that may sit between the parts of a
+# link or a tag (_skip_ws) is this, a space, a tab, CR, FF or VT: ASCII
+# only. Python's `\s` also matches U+00A0, U+0085 and U+2028, which
+# CommonMark reads as ordinary characters inside a destination.
 _PARA = r"\n(?![ \t]*\n)"
-_WS = r"(?:[ \t\r\f\v]|" + _PARA + r")"
 # A link destination follows CommonMark, in the body and in a heading alike:
 # no ASCII whitespace; a backslash escapes only ASCII punctuation (`\(` and
 # `\)` included), else it is a literal; balanced parentheses nest; it never
 # starts with `<`, since that opens the other form, `<...>`, which may hold
-# spaces and an escaped `\>`.
+# spaces and an escaped `\>`. _dest_end reads both forms.
 # Nesting stops at 32 levels, GitHub's own limit (cmark-gfm inlines.c,
 # manual_scan_link_url_2: a 33rd open parenthesis ends the destination, and
-# the link with it). Linear in size and in time: the alternatives of every
-# starred group start on different characters (a lookahead splits the two
-# backslash forms), so a string splits into units one way only and a failed
-# match gives each position back once; each level adds one copy of the
-# units, not a power of the one below.
+# the link with it).
 _PUNCT = r"[!-/:-@\[-`{-~]"
-_DEST_CHAR = r"\\" + _PUNCT + r"|\\(?!" + _PUNCT + r")|[^()\\ \t\n\r\f\v]"
+_PUNCT_SET = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+_DEST_PLAIN_RUN = re.compile(r"[^()\\ \t\n\r\f\v]*")
 _MAX_NEST = 32
-_NEST = r"\((?:" + _DEST_CHAR + r")*\)"
-for _ in range(_MAX_NEST - 1):
-    _NEST = r"\((?:" + _DEST_CHAR + r"|" + _NEST + r")*\)"
-_DEST_BARE = r"(?!<)(?:" + _DEST_CHAR + "|" + _NEST + r")+"
-_DEST_ANGLE = r"<((?:[^<>\n\\]|\\[^\n])*)>"
 # Either form is read the way the renderer reads it (md_dest), in one
 # left-to-right pass as CommonMark does: a backslash escape is undone, and
 # an entity or numeric character reference (CommonMark 2.5: always closed by
@@ -165,6 +156,15 @@ def _span_char(c):
     return r"[^" + c + r"\\\n]|\\[^\n]|\\(?=\n)|" + _PARA
 
 
+def _span_run(c, extra=""):
+    """Any number of _span_char(c), unrolled: a plain run, then units that
+    each open on a backslash or a line break (or extra, an alternative that
+    opens on a character of c) followed by another plain run."""
+    plain = r"[^" + c + r"\\\n]*"
+    return (plain + r"(?:(?:\\[^\n]|\\(?=\n)|" + _PARA + extra + r")"
+            + plain + r")*")
+
+
 # Link text, a label and a title end at their own closer, never at an
 # escaped one, and never cross a blank line.
 _LABEL_CHAR = r"(?:" + _span_char(r"\[\]") + r")"
@@ -177,17 +177,216 @@ _OPEN = r"(?<!\\)(?:\\\\)*\["
 # line) and may hold one level of nested brackets, which covers an image
 # inside a link (a badge). The title is double-quoted, single-quoted or
 # parenthesized. The destination is either form above, captured as group 2
-# (`<...>`, without its brackets) or 3 (bare). The bare form is ATOMIC (a
-# lookahead captures it, a backreference consumes it, so it is never
-# backtracked into): nothing it could give back would let the match
-# succeed, since a destination never ends where a dest character follows.
-TEXT = r"((?:" + _span_char(r"\[\]") + r"|\[" + _LABEL_CHAR + r"*\])*)"
-_TITLE = (r"(?:\"(?:" + _span_char(r"\"") + r")*\"|'(?:" + _span_char("'") + r")*'"
-          r"|\((?:" + _span_char(r"()") + r")*\))")
-LINK = re.compile(_OPEN + TEXT + r"\]\(" + _WS + r"*(?:" + _DEST_ANGLE
-                  + r"|(?=(" + _DEST_BARE + r"))\3)(?:" + _WS + r"+" + _TITLE + r")?"
-                  + _WS + r"*\)")
-REFLINK = re.compile(r"(?<!\])" + _OPEN + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]")
+# (`<...>`, without its brackets) or 3 (bare).
+# A regex reads only the head, `[text](`; LinkPattern reads the rest with
+# code (_link_tail), which takes the one parse the grammar allows: a bare
+# destination is read whole (nothing it could give back would let the
+# match succeed, since a destination never ends where a dest character
+# follows), and a title, a destination and the blanks between them start on
+# different characters. No regex holds that in bounded memory: re keeps
+# about 290 bytes of stack for each repetition of a group, so one
+# destination of 70000 `(y)` pairs took 42 MiB and a 200 KB unclosed one
+# 48 MiB. The code reader keeps a depth count instead, and every run it
+# reads is a single character class or a str.find. Linear: an opener's
+# destination crosses at most 32 later openers, since each brings an
+# unclosed parenthesis and a 33rd level ends it, and a title ends at the
+# next quote of its kind (for a parenthesized one, the next unescaped `(` or
+# `)`) or at a blank line.
+TEXT = r"(" + _span_run(r"\[\]", r"|\[" + _span_run(r"\[\]") + r"\]") + r")"
+_ANGLE_RUN = re.compile(r"[^<>\n\\]*")
+_TITLE_RUN = {"\"": re.compile(r"[^\"\\\n]*"), "'": re.compile(r"[^'\\\n]*"),
+              "(": re.compile(r"[^()\\\n]*")}
+
+
+def _nest_end(text, i):
+    """The end of the balanced parentheses opening at i, inside a bare
+    destination, or None: a 33rd open level, ASCII whitespace (a line
+    break included) or the end of the text first. A backslash escapes the punctuation after it, else is literal."""
+    n, depth = len(text), 0
+    while True:
+        i = _DEST_PLAIN_RUN.match(text, i).end()
+        if i >= n:
+            return None
+        c = text[i]
+        if c == "\\":
+            i += 2 if i + 1 < n and text[i + 1] in _PUNCT_SET else 1
+        elif c == "(":
+            depth += 1
+            if depth > _MAX_NEST:
+                return None
+            i += 1
+        elif c == ")":
+            depth -= 1
+            i += 1
+            if depth == 0:
+                return i
+        else:
+            return None   # whitespace
+
+
+def _dest_end(text, i):
+    """(end, angle) of the destination at i, angle True for the `<...>`
+    form, or None when none is there."""
+    n = len(text)
+    if i < n and text[i] == "<":
+        j = i + 1
+        while True:
+            j = _ANGLE_RUN.match(text, j).end()
+            if j >= n or text[j] != "\\":
+                return (j + 1, True) if j < n and text[j] == ">" else None
+            if j + 1 >= n or text[j + 1] == "\n":
+                return None
+            j += 2
+    j = i
+    while True:
+        j = _DEST_PLAIN_RUN.match(text, j).end()
+        c = text[j] if j < n else ""
+        if c == "\\":
+            j += 2 if j + 1 < n and text[j + 1] in _PUNCT_SET else 1
+        elif c == "(":
+            e = _nest_end(text, j)
+            if e is None:
+                break   # unbalanced: the destination ends before it
+            j = e
+        else:
+            break
+    return (j, False) if j > i else None
+
+
+def _title_end(text, i):
+    """The end of the title opening at i (with `"`, `'` or `(`), or None:
+    an unescaped opener of a parenthesized title, a blank line or the end
+    of the text first."""
+    n, close = len(text), ")" if text[i] == "(" else text[i]
+    run = _TITLE_RUN[text[i]]
+    j = i + 1
+    while True:
+        j = run.match(text, j).end()
+        if j >= n:
+            return None
+        c = text[j]
+        if c == close:
+            return j + 1
+        if c == "\\":
+            if j + 1 >= n:
+                return None
+            j += 2 if text[j + 1] != "\n" else 1
+        elif c == "\n" and not BLANK_LINE.match(text, j):
+            j += 1
+        else:
+            return None
+
+
+def _link_tail(text, i, optional):
+    """(end, dest start, dest end, angle) of the tail after `(` at i: the
+    destination (with optional, none at all), an optional title after
+    whitespace, then `)`. None when the text there is no tail. dest start
+    is -1 when there is no destination."""
+    n = len(text)
+    j = _skip_ws(text, i, False)
+    d = _dest_end(text, j)
+    if d is None:
+        if optional and j < n and text[j] == ")":
+            return j + 1, -1, -1, False
+        return None
+    e, angle = d
+    k = _skip_ws(text, e, False)
+    if k > e and k < n and text[k] in "\"'(":
+        t = _title_end(text, k)
+        if t is not None:
+            # A title that reads leaves nothing else: without it, the text
+            # at k is its opener, never the `)` that would end the tail.
+            k = _skip_ws(text, t, False)
+    if k < n and text[k] == ")":
+        if angle:
+            return k + 1, j + 1, e - 1, True
+        return k + 1, j, e, False
+    return None
+
+
+class _LinkMatch(object):
+    """The parts of an re match object the link passes read."""
+    __slots__ = ("string", "_spans")
+
+    def __init__(self, string, spans):
+        self.string, self._spans = string, spans
+
+    def span(self, g=0):
+        return self._spans[g] or (-1, -1)
+
+    def start(self, g=0):
+        return self.span(g)[0]
+
+    def end(self, g=0):
+        return self.span(g)[1]
+
+    def group(self, g=0):
+        sp = self._spans[g]
+        return None if sp is None else self.string[sp[0]:sp[1]]
+
+    def groups(self):
+        return tuple(self.group(g) for g in range(1, len(self._spans)))
+
+
+_BLANKS = re.compile(r"[ \t]*")
+
+
+def _def_tail(text, i):
+    """_link_tail's form for a definition, whose destination starts at i:
+    an optional title after blanks or one line break, then only blanks to
+    the end of its line. A title that fails that leaves the definition
+    ending at the destination."""
+    n = len(text)
+    d = _dest_end(text, i)
+    if d is None:
+        return None
+    e, angle = d
+    dest = (i + 1, e - 1) if angle else (i, e)
+    s = _BLANKS.match(text, e).end()
+    k = -1
+    if s < n and text[s] == "\n":
+        k = _BLANKS.match(text, s + 1).end()
+    elif s > e:
+        k = s
+    if 0 <= k < n and text[k] in "\"'(":
+        t = _title_end(text, k)
+        if t is not None:
+            r = _BLANKS.match(text, t).end()
+            if r == n or text[r] == "\n":
+                return (r,) + dest + (angle,)
+    if s == n or text[s] == "\n":
+        return (s,) + dest + (angle,)
+    return None
+
+
+class LinkPattern(object):
+    """A link pattern with a regex head that ends where its tail starts,
+    and tail(text, i) for the rest. Its matches are those of the single
+    regex it replaced: group 1 the head's text or label, 2 an angle
+    destination, and with bare, 3 a bare one."""
+
+    def __init__(self, head, tail, bare):
+        self.head, self.tail, self.bare = head, tail, bare
+
+    def finditer(self, text):
+        m = self.head.search(text)
+        while m:
+            t = self.tail(text, m.end())
+            if t is None:
+                m = self.head.search(text, m.start() + 1)
+                continue
+            end, ds, de, angle = t
+            dest = (ds, de) if ds >= 0 else None
+            spans = [(m.start(), end), m.span(1), dest if angle else None]
+            if self.bare:
+                spans.append(None if angle else dest)
+            yield _LinkMatch(text, spans)
+            m = self.head.search(text, end)
+
+
+LINK = LinkPattern(re.compile(_OPEN + TEXT + r"\]\("),
+                   lambda text, i: _link_tail(text, i, False), True)
+REFLINK = re.compile(r"(?<!\])" + _OPEN + TEXT + r"\]\[(" + _span_run(r"\[\]") + r")\]")
 # A definition (CommonMark 4.7): a label of at most 999 characters (an
 # escape pair counts as one here, so the bound is loose by at most half;
 # unbounded, each line opening with `[` scanned the rest of the file for a
@@ -196,9 +395,8 @@ REFLINK = re.compile(r"(?<!\])" + _OPEN + TEXT + r"\]\[(" + _LABEL_CHAR + r"*)\]
 # itself on the same line or the next. Only spaces may follow on its last
 # line; a title that fails that leaves the definition ending at the
 # destination, and anything else after the destination is no definition.
-REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*)?(?:"
-                    + _DEST_ANGLE + r"|(?=(" + _DEST_BARE + r"))\3)(?:(?:[ \t]+|[ \t]*\n[ \t]*)"
-                    + _TITLE + r"[ \t]*$|[ \t]*$)", re.M)
+REFDEF = LinkPattern(re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*)?",
+                                re.M), _def_tail, True)
 # An `<a>` or `<img>` open tag. In a paragraph CommonMark (6.6) reads raw
 # HTML strictly, but in an HTML block (4.6, under a `<div>`) GitHub's HTML5
 # parser takes what 6.6 refuses, such as an attribute run straight onto a
@@ -611,18 +809,17 @@ def atx_text(rest):
 
 
 # A link inside a heading, for slugify: it renders as its text, whatever its
-# destination and title (the rules above LINK). The optional group holds
-# the whole destination-title-spaces tail, so a run of spaces is retried at
-# most once per part, never once per start position.
-_TAIL = (r"\(" + _WS + r"*(?:(?:" + _DEST_ANGLE + "|" + _DEST_BARE + r")"
-         r"(?:" + _WS + r"+" + _TITLE + r")?" + _WS + r"*)?\)")
+# destination and title (the rules above LINK). Unlike a body link, its
+# destination may be absent (`[a]()`), so its tail is read with optional set.
 # An image shares the link's tail, else the `[alt](...)` part of an image with
 # a title would match as a link and leak its alt text; an escaped `!` makes it
 # a plain link.
-HEADING_IMAGE = re.compile(r"(?<!\\)!\[([^\[\]]*)\]" + _TAIL)
+HEADING_IMAGE = LinkPattern(re.compile(r"(?<!\\)!\[([^\[\]]*)\]\("),
+                            lambda text, i: _link_tail(text, i, True), False)
 # An opening bracket counts after an even run of backslashes only (_OPEN), so
 # the match may start with that run: heading_link_text puts it back.
-HEADING_LINK = re.compile(_OPEN + r"([^\[\]]*)\]" + _TAIL)
+HEADING_LINK = LinkPattern(re.compile(_OPEN + r"([^\[\]]*)\]\("),
+                           lambda text, i: _link_tail(text, i, True), False)
 
 
 def heading_link_text(m, text):
