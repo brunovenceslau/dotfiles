@@ -36,9 +36,9 @@ same tracked set:
     none of them crosses a blank line. A shortcut `[ref]` is not checked:
     it cannot be told apart from bracketed prose;
   - an `<a>` or `<img>` tag is read much the way GitHub's HTML5 parser
-    reads an HTML block (HTML_OPEN names the known misses): a `>` inside a
-    quoted value does not end it, and one that crosses a blank line is text,
-    so a tag inside it is still found;
+    reads an HTML block (the comment above HTML_OPENER names the known
+    misses): a `>` inside a quoted value does not end it, and one that
+    crosses a blank line is text, so a tag inside it is still found;
   - an `#anchor` into a Markdown file must match one of its headings under
     GitHub's slug rule (see slugify), repeats numbered -1, -2 the way
     github-slugger numbers them, or an explicit anchor, an `<a>` tag's
@@ -69,7 +69,8 @@ level ends it); everything else is a str.find loop or a lookup built in
 one pass. No destination, title or attribute value has a length limit:
 each of the others was bounded once, which silently skipped a long link,
 and the test's hostile shapes, measured at 800 KB each, run in well under
-a second without one. HTML_OPEN says why an open tag's scan stays linear.
+a second without one. The comment above HTML_OPENER says why an open
+tag's scan stays linear, and its memory bounded by one token.
 
 Exit: 0 every link resolves; 1 a broken link (each printed as
 FILE:LINE: reason: target, in sorted file order); 2 the gate itself could not
@@ -216,29 +217,112 @@ REFDEF = re.compile(r"^ {0,3}\[(" + _LABEL_CHAR + r"{1,999})\]:[ \t]*(?:\n[ \t]*
 # id or name after the inner opener is credited to the inner tag, where
 # HTML5 gives it to the outer one. That keeps the scans of openers from
 # overlapping, so unclosed tags stay linear.
-# html_attrs walks the attributes of a matched tag with HTML_ATTR.
-# Linear: a name, a bare value and a quoted value start on different
-# characters, and a name follows whitespace and `/` or a closing quote only,
-# so a tag parses one way only; a `<` outside a quoted value or a name ends
-# an opener's scan, and an opener inside another's quoted value runs on only
-# through a value of the other quote kind, so scans overlap at most two deep.
+# _tag_walk reads a tag left to right, one token at a time, and takes the
+# one parse there is: a name, a bare value and a quoted value start on
+# different characters, a name follows whitespace and `/` or a closing quote
+# only, a name followed by `=` always takes a value, and the end of the tag
+# and the next attribute never both fit. Linear: a `<` outside a quoted value
+# or a name ends an opener's scan, and an opener inside another's quoted
+# value runs on only through a value of the other quote kind, so scans
+# overlap at most two deep; a quoted value is found by str.find, which ends
+# at the next quote of its kind, so the values of one kind never overlap.
+# Memory stays bounded by one token: every run is one character class, which
+# re repeats with no backtracking stack, or a str.find, never a repeated
+# group. The single regex this replaced held about 300 bytes of stack per
+# character of one tag (an unclosed tag of 130000 attributes took 200 MiB).
+HTML_OPENER = re.compile(r"<(a|img)", re.I)
+_SPACE_RUN = re.compile(r"[ \t\r\f\v]*")
+_SEP_RUN = re.compile(r"[ \t\r\f\v/]*")
+_NAME_RUN = re.compile(r"[^ \t\n\r\f\v\"'=<>/]*")
+_BARE_VALUE = re.compile(r"[^ \t\n\r\f\v\"'<>]+")
+_INNER_OPENER = re.compile(r"(?i:a|img)[ \t\n\r\f\v/>]")
+_NOT_NAME_START = " \t\n\r\f\v\"'<>/"
 
 
-def _hattr(group):
-    """One attribute after its separator; group is "(" to capture the name
-    and the value (2 double-quoted, 3 single-quoted, 4 bare), "(?:" for
-    the copy inside HTML_OPEN. A name followed by `=` takes a value (the
-    lookahead), else `a =b` would parse as `a=b` and as `a`, `=b`."""
-    value = (r"(?:\"" + group + r"(?:[^\"\n]|" + _PARA + r")*)\"|'" + group
-             + r"(?:[^'\n]|" + _PARA + r")*)'|" + group + r"[^ \t\n\r\f\v\"'<>]+))")
-    plain = r"[^ \t\n\r\f\v\"'=<>/]"
-    name = (r"(?:=|" + plain + r")(?:" + plain + r"|<(?!(?i:a|img)[ \t\n\r\f\v/>]))*")
-    return (r"(?:(?:" + _WS + r"|/)+|(?<=[\"']))" + group + name + r")(?:"
-            + _WS + r"*=" + _WS + r"*" + value + r"|(?!" + _WS + r"*=))")
+def _skip_ws(text, i, slash):
+    """The end of the run of whitespace (with slash, of whitespace and `/`)
+    at i. A newline that opens a blank line ends the run: no tag crosses
+    one."""
+    run = _SEP_RUN if slash else _SPACE_RUN
+    while True:
+        i = run.match(text, i).end()
+        if i < len(text) and text[i] == "\n" and not BLANK_LINE.match(text, i):
+            i += 1
+        else:
+            return i
 
 
-HTML_ATTR = re.compile(_hattr("("))
-HTML_OPEN = re.compile(r"<(a|img)((?:" + _hattr("(?:") + r")*)" + _WS + r"*/?>", re.I)
+def _tag_walk(text, m):
+    """Walk the `<a` or `<img` open tag that HTML_OPENER matched as m: yield
+    (name, offset, value) for each attribute given a value, name lowercased
+    and offset where the value starts in text, then, last, the tag's end, or
+    -1 when the text there is no tag. A generator, so no list of a long
+    tag's attributes is ever held: html_tags walks a tag once to find its
+    end, and html_attrs walks a tag again only once it is known to be one."""
+    n = len(text)
+    i = m.end()
+    while True:
+        # The tag's end: whitespace, an optional `/`, then `>`.
+        j = _skip_ws(text, i, False)
+        if j < n and text[j] == "/":
+            j += 1
+        if j < n and text[j] == ">":
+            yield j + 1
+            return
+        # Else one more attribute, after a separator, or right after a
+        # closing quote with none.
+        j = _skip_ws(text, i, True)
+        if j == i and text[i - 1] not in "\"'":
+            break
+        # Its name: one character other than whitespace, a quote, `<`, `>`
+        # or `/` (so it may open with `=`), then a run that may also hold a
+        # `<` that does not open another `<a` or `<img`.
+        if j >= n or text[j] in _NOT_NAME_START:
+            break
+        k = j + 1
+        while True:
+            k = _NAME_RUN.match(text, k).end()
+            if k < n and text[k] == "<" and not _INNER_OPENER.match(text, k + 1):
+                k += 1
+            else:
+                break
+        e = _skip_ws(text, k, False)
+        if e >= n or text[e] != "=":
+            i = k   # no value
+            continue
+        v = _skip_ws(text, e + 1, False)
+        if v < n and text[v] in "\"'":
+            close = text.find(text[v], v + 1)
+            if close < 0 or BLANK_LINE.search(text, v + 1, close):
+                break
+            yield text[j:k].lower(), v + 1, text[v + 1:close]
+            i = close + 1
+            continue
+        # A bare value is read whole, `/` included, as HTML5 reads one. The
+        # regex this replaced could also end it before a `/` when the whole
+        # reading failed, a second parse its attribute walk did not follow.
+        b = _BARE_VALUE.match(text, v)
+        if b is None:
+            break
+        yield text[j:k].lower(), v, b.group()
+        i = b.end()
+    yield -1
+
+
+def html_tags(text, i=0):
+    """(start, end, tag) of every `<a` or `<img` open tag from i on, left to
+    right, none inside another, tag lowercased."""
+    m = HTML_OPENER.search(text, i)
+    while m:
+        for end in _tag_walk(text, m):
+            pass
+        if end < 0:
+            m = HTML_OPENER.search(text, m.start() + 1)
+        else:
+            yield m.start(), end, m.group(1).lower()
+            m = HTML_OPENER.search(text, end)
+
+
 SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 BLANK_LINE = re.compile(r"\n[ \t]*\n")
 MODE_SYMLINK, MODE_GITLINK = "120000", "160000"
@@ -431,22 +515,22 @@ def blank_spans(text, spans):
         last[runs[k][1]] = k
     pieces, i, e, r = [], 0, 0, 0
     c = text.find("<!--")
-    tag = HTML_OPEN.search(text) if spans else None
-    t = tag.start() if tag else -1
+    tag = next(html_tags(text), None) if spans else None
+    t = tag[0] if tag else -1
     while i < n:
         if 0 <= c < i:
             c = text.find("<!--", i)
         if 0 <= t < i:
-            tag = HTML_OPEN.search(text, i)
-            t = tag.start() if tag else -1
+            tag = next(html_tags(text, i), None)
+            t = tag[0] if tag else -1
         while r < len(runs) and runs[r][0] < i:
             r += 1
         a = runs[r][0] if r < len(runs) else -1
         if a < 0 and c < 0 and t < 0:
             break
         if t >= 0 and (a < 0 or t < a) and (c < 0 or t < c):
-            pieces.append(text[i:tag.end()])
-            i = tag.end()
+            pieces.append(text[i:tag[1]])
+            i = tag[1]
             continue
         if c >= 0 and (a < 0 or c < a):
             close = text.find("-->", c + 4)
@@ -701,16 +785,11 @@ def html_url(s):
 
 def html_attrs(text):
     """(tag, name, offset, value) of every attribute given a value in an
-    `<a>` or `<img>` open tag, tag and name lowercased. The attributes tile
-    HTML_OPEN's group 2 with no gap, one parse only, so HTML_ATTR's walk is
-    the parse HTML_OPEN matched."""
-    for m in HTML_OPEN.finditer(text):
-        tag = m.group(1).lower()
-        for a in HTML_ATTR.finditer(text, m.start(2), m.end(2)):
-            for g in (2, 3, 4):
-                if a.group(g) is not None:
-                    yield tag, a.group(1).lower(), a.start(g), a.group(g)
-                    break
+    `<a>` or `<img>` open tag, tag and name lowercased."""
+    for start, _, tag in html_tags(text):
+        for a in _tag_walk(text, HTML_OPENER.match(text, start)):
+            if isinstance(a, tuple):
+                yield (tag,) + a
 
 
 def ref_label(s):
