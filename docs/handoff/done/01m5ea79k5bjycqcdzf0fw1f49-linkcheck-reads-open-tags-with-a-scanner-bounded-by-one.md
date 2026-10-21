@@ -7,7 +7,10 @@ Session of 2026-10-21. Closes pending `0000000000p5zw6r8s287k3net`
   generator that reads one token at a time, instead of the HTML_OPEN
   regex, whose backtracking stack held about 300 bytes per character of
   one tag. On 800 KB tags the peak fell from 212 to 295 MiB to under
-  1 MiB; the suite's peak RSS on Linux from 143 MiB to about 85 MiB.
+  1 MiB; the suite's peak RSS from 143 MiB to about 85 MiB on Linux and
+  from 1294 MiB to 670 MiB on the macOS arm64 leg, still above its
+  384 MiB budget there: the rest is pending `01m5eay3d4hjt2za8pd184jyj2`
+  ("linkcheck-link-scanner").
 - A differential fuzz of the old and new readers (about 2.6 million random
   inputs) agreed everywhere except where the old regex took a second
   parse, a bare value shortened before a `/`; the scanner reads a bare

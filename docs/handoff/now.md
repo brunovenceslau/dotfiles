@@ -12,15 +12,17 @@ are in done/.
 
 ## Next steps
 
-1. The Ghostty items (`ghostty-test-message`, `ghostty-allowlist-breadth`,
+1. `01m5eay3d4hjt2za8pd184jyj2` ("linkcheck-link-scanner"): the macOS
+   arm64 peak of `tests/linkcheck_test.sh` is still above its budget.
+2. The Ghostty items (`ghostty-test-message`, `ghostty-allowlist-breadth`,
    `gotham-autosuggest-contrast`).
-2. Then the packages and stack-docs items (`packages-test-filter`,
+3. Then the packages and stack-docs items (`packages-test-filter`,
    `stack-condition-api` and the `ghstack-*` items).
-3. The `runner-*` and remaining `linkcheck-*` items, as the runner or
+4. The `runner-*` and remaining `linkcheck-*` items, as the runner or
    linkcheck are next touched.
-4. `0000000000qpgraw9h5qqw1vdy` ("handoff-check-gate"), now that the layout
+5. `0000000000qpgraw9h5qqw1vdy` ("handoff-check-gate"), now that the layout
    has its ids.
-5. Check the Intel leg's weekly run each Monday until it has a track
+6. Check the Intel leg's weekly run each Monday until it has a track
    record.
 
 ## Open for the operator
