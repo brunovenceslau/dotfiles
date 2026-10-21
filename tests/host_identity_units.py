@@ -58,6 +58,16 @@ def stub(directory, name, body):
     os.chmod(path, stat.S_IRWXU)
 
 
+def _read_or_empty(path):
+    # A poll loop calls this: the file is closed on every call, not left to
+    # the garbage collector.
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
 def default_signals():
     """A signal child's preexec_fn: SIGINT, SIGHUP and SIGQUIT at their
     defaults. A suite run under nohup, or as a `&` job of a shell without
@@ -2115,7 +2125,7 @@ def doctor_deps_units(mod, scratch):
                 def __init__(self, *args, **kwargs):
                     real_popen.__init__(self, *args, **kwargs)
                     end = time.monotonic() + 30
-                    while time.monotonic() < end and not (os.path.exists(pidfile) and open(pidfile).read().strip()):
+                    while time.monotonic() < end and not _read_or_empty(pidfile):
                         time.sleep(0.01)
                     status = "/proc/%d/status" % self.pid
                     if os.path.exists(status):
@@ -2144,7 +2154,11 @@ def doctor_deps_units(mod, scratch):
             left = alive(child)
             if left:
                 os.kill(child, signal.SIGKILL)
+            # Linux has /proc, so SigBlk MUST be read there: an empty list
+            # would pass the mask half of this check vacuously. macOS has no
+            # /proc, and that half is not checked there.
             check(got == signal.SIGTERM and not left and os.listdir(tmpdir) == []
+                  and (blocked or not sys.platform.startswith("linux"))
                   and not any(b & unwinding_bits for b in blocked),
                   "a SIGTERM at gh's %s ends gh, which never starts with it blocked "
                   "(%r, gh left %r, left in TMPDIR %r, SigBlk %s)"

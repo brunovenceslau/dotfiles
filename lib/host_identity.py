@@ -2755,7 +2755,8 @@ def gh_token(path):
     unwind with gh's Popen unassigned or unguarded, and leave gh running.
     gh itself starts with the signal mask this process had before the
     hold: a mask is inherited across exec, and gh must not keep the
-    unwinding signals blocked."""
+    unwinding signals blocked. The cost: a ^C or SIGTERM while gh's exec
+    hangs (a stuck mount on its path) waits until the exec returns."""
     state = None
     try:
         with _Held():
@@ -2774,10 +2775,15 @@ def gh_token(path):
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         start_new_session=True,
+                        # A blocked mask survives exec: gh gets back the mask
+                        # from before the hold. preexec_fn is safe only while
+                        # this module starts no thread.
                         preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, held.old),
                     )
-                except OSError as e:
-                    return "unknown", e.strerror or str(e)
+                except (OSError, subprocess.SubprocessError) as e:
+                    # A failing preexec_fn surfaces as SubprocessError, not
+                    # OSError, and has no strerror.
+                    return "unknown", getattr(e, "strerror", None) or str(e)
             with p.stdout, p.stderr:
                 out, err = _bounded_output(p, GH_TIMEOUT, GH_OUTPUT_CAP)
         except BaseException:
