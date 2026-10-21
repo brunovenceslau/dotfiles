@@ -58,6 +58,16 @@ def stub(directory, name, body):
     os.chmod(path, stat.S_IRWXU)
 
 
+def _read_or_empty(path):
+    # A poll loop calls this: the file is closed on every call, not left to
+    # the garbage collector.
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return ""
+
+
 def default_signals():
     """A signal child's preexec_fn: SIGINT, SIGHUP and SIGQUIT at their
     defaults. A suite run under nohup, or as a `&` job of a shell without
@@ -2073,12 +2083,86 @@ def doctor_deps_units(mod, scratch):
                 waited -= float(sent)
             with open(pidfile) as fh:
                 child = int(fh.read())
-            check(got == signal.SIGTERM and waited is not None and waited < 2 and not alive(child)
+            left = alive(child)
+            check(got == signal.SIGTERM and waited is not None and waited < 2 and not left
                   and os.listdir(tmpdir) == [],
-                  "without os.waitid, a SIGTERM while gh runs on unwinds within one poll and ends gh (%r, %s s)"
-                  % (got, "%.3f" % waited if waited is not None else None))
+                  "without os.waitid, a SIGTERM while gh runs on unwinds within one poll and ends gh "
+                  "(%r, %s s, gh left %r, left in TMPDIR %r)"
+                  % (got, "%.3f" % waited if waited is not None else None, left, os.listdir(tmpdir)))
         finally:
             mod._CAN_WAIT_UNREAPED = real_unreaped
+        # A SIGTERM that lands while gh starts, or before the try that ends
+        # its group, ends gh all the same. Under load it does land there:
+        # this process, woken by gh's exec, can wait to run while gh runs on
+        # and the signal arrives (measured: the case above left gh running
+        # in 17 of 40 runs with this process at nice 19 on a CPU that 11
+        # others kept busy). Both points are reached here in-process, once
+        # gh has written its pid: a Popen that signals this process before
+        # it returns, and one whose stdout signals it when entered. gh must
+        # not keep the unwinding signals blocked from its start either:
+        # SigBlk, where /proc shows it.
+        real_popen = subprocess.Popen
+        unwinding_bits = sum(1 << (int(s) - 1) for s in mod.UNWINDING)
+
+        class EnterSignals(object):
+            def __init__(self, f):
+                self.f = f
+
+            def __enter__(self):
+                os.kill(os.getpid(), signal.SIGTERM)
+                return self.f.__enter__()
+
+            def __exit__(self, *exc):
+                return self.f.__exit__(*exc)
+
+            def __getattr__(self, name):
+                return getattr(self.f, name)
+
+        for point in ("start", "enter"):
+            blocked = []
+
+            class SignalledPopen(real_popen):
+                def __init__(self, *args, **kwargs):
+                    real_popen.__init__(self, *args, **kwargs)
+                    end = time.monotonic() + 30
+                    while time.monotonic() < end and not _read_or_empty(pidfile):
+                        time.sleep(0.01)
+                    status = "/proc/%d/status" % self.pid
+                    if os.path.exists(status):
+                        with open(status) as fh:
+                            blocked.extend(int(line.split()[1], 16) for line in fh if line.startswith("SigBlk:"))
+                    if point == "start":
+                        os.kill(os.getpid(), signal.SIGTERM)
+                    else:
+                        self.stdout = EnterSignals(self.stdout)
+
+            os.unlink(pidfile)
+            old_term = signal.signal(signal.SIGTERM, mod._unwind)
+            mod._unwinding = False
+            got = None
+            subprocess.Popen = SignalledPopen
+            try:
+                mod.gh_token(os.path.join(ghdir, "gh-mute"))
+            except mod.Terminated as e:
+                got = e.signum
+            finally:
+                subprocess.Popen = real_popen
+                signal.signal(signal.SIGTERM, old_term)
+                mod._unwinding = False
+            with open(pidfile) as fh:
+                child = int(fh.read())
+            left = alive(child)
+            if left:
+                os.kill(child, signal.SIGKILL)
+            # Linux has /proc, so SigBlk MUST be read there: an empty list
+            # would pass the mask half of this check vacuously. macOS has no
+            # /proc, and that half is not checked there.
+            check(got == signal.SIGTERM and not left and os.listdir(tmpdir) == []
+                  and (blocked or not sys.platform.startswith("linux"))
+                  and not any(b & unwinding_bits for b in blocked),
+                  "a SIGTERM at gh's %s ends gh, which never starts with it blocked "
+                  "(%r, gh left %r, left in TMPDIR %r, SigBlk %s)"
+                  % (point, got, left, os.listdir(tmpdir), ["%x" % b for b in blocked] or "not shown"))
         mod.GH_TIMEOUT, mod.GH_OUTPUT_CAP = 20, 100
         stub(ghdir, "gh-loud", 'sleep 30 &\necho $! > "%s"\nprintf "%%0200d" 0\nwait\n' % pidfile)
         got = mod.gh_token(os.path.join(ghdir, "gh-loud"))
