@@ -26,7 +26,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 fail() { echo "FAIL: $*" >&2; exit 1; }
-refusal="install: refusing to run as root - run it as the owning user; sudo is never needed here"
+refusal="install: refusing to run as root - run it as the owning user; a step that needs root runs sudo itself"
 unknown="install: cannot tell who is running this (/usr/bin/id gave no uid) - refusing to run"
 
 if [ "$(/usr/bin/id -u)" -eq 0 ]; then

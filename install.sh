@@ -26,6 +26,10 @@
 #                                    plugin submodule, Homebrew, gh or
 #                                    credential helper problem in one line
 #                                    (--verbose: every check)
+#   install.sh maxfiles [--uninstall | --status]  macOS: raise the open-file
+#                                    limit at boot with a root LaunchDaemon,
+#                                    each privileged step run through sudo;
+#                                    --uninstall removes it, --status checks it
 #   install.sh -h | --help | help    print a short usage line
 #
 # reseed-settings is retired: kept as a no-op, cross-version ABI only (see
@@ -77,7 +81,7 @@ _install_refuse_root() {
   esac
   # A numeric compare, so "00" is root too.
   if [ "$uid" -eq 0 ]; then
-    printf '%s\n' "install: refusing to run as root - run it as the owning user; sudo is never needed here" >&2
+    printf '%s\n' "install: refusing to run as root - run it as the owning user; a step that needs root runs sudo itself" >&2
     return 1
   fi
   return 0
@@ -734,6 +738,19 @@ do_doctor() {
     --installer "$DOTFILES/install.sh" --mode doctor "$@"
 }
 
+# do_maxfiles --mode install|uninstall|status - `install.sh maxfiles`:
+# lib/host_maxfiles.py writes, checks or removes the LaunchDaemon that raises
+# the open-file limit at boot (macOS only; elsewhere it says so and exits 0).
+# This process stays unprivileged: each step that needs root is its own
+# printed /usr/bin/sudo command, so sudo asks the operator for each run.
+do_maxfiles() {
+  if ! _python_ok; then
+    log "maxfiles: python3 -I -c '' does not run here - install the Command Line Tools (xcode-select --install)"
+    return 1
+  fi
+  python3 -I "$DOTFILES/lib/host_maxfiles.py" "$@"
+}
+
 # authoring-side advisory, run by the `install` arm after the identity step.
 # What it says is decided in ONE place, lib/host_identity.py's advisory()
 # (`--mode check`): a host that cannot commit for want of a signing key, one
@@ -920,12 +937,30 @@ case "$cmd" in
     if [ -n "$doc_args" ]; then do_doctor --verbose || doc_rc=$?; else do_doctor || doc_rc=$?; fi
     exit "$doc_rc"
     ;;
+  maxfiles)
+    # Writes outside ~/.config/dotfiles (/Library/LaunchDaemons), so it runs
+    # only when asked, never from install or upgrade. One option at most.
+    shift
+    mf_mode=install
+    if [ $# -gt 0 ]; then
+      case "$1" in
+        --uninstall) mf_mode=uninstall ;;
+        --status) mf_mode=status ;;
+        *) warn "maxfiles: unknown option: $(_shell_word "$1") (expected: --uninstall | --status)"; exit 2 ;;
+      esac
+      shift
+      [ $# -eq 0 ] || { warn "maxfiles takes one option at most (got: $(_shell_word "$@"))"; exit 2; }
+    fi
+    mf_rc=0
+    do_maxfiles --mode "$mf_mode" || mf_rc=$?
+    exit "$mf_rc"
+    ;;
   -h | --help | help)
-    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]|identity [--name NAME] [--rotate]|doctor [--verbose]]"
+    printf '%s\n' "usage: install.sh [install|link|packages|upgrade|uninstall [--purge]|identity [--name NAME] [--rotate]|doctor [--verbose]|maxfiles [--uninstall|--status]]"
     printf '%s\n' "       (retired, kept for cross-version compatibility: reseed-settings)"
     ;;
   *)
-    warn "unknown command: $(_shell_word "$cmd") (expected: install | link | packages | upgrade | uninstall | identity | doctor | reseed-settings)"
+    warn "unknown command: $(_shell_word "$cmd") (expected: install | link | packages | upgrade | uninstall | identity | doctor | maxfiles | reseed-settings)"
     exit 2
     ;;
 esac

@@ -267,6 +267,20 @@ git -C ~/.config/dotfiles submodule status   # three lines, none prefixed with '
 
 If any check fails, see [troubleshooting](troubleshooting.md).
 
+## 8. Raise the open-file limit (optional)
+
+Do this step if you run tools that open many files at once, such as Docker,
+sbx or large builds. It installs a root-owned LaunchDaemon that raises the
+open-file limit at every boot, so `sudo` asks for your password:
+
+```sh
+~/.config/dotfiles/install.sh maxfiles
+```
+
+Then quit and reopen (Cmd+Q) the terminal app, Docker and sbx, so they pick up
+the new limit. To check it, or undo it, see
+[`install.sh maxfiles`](shell-reference.md#installsh-maxfiles).
+
 ## What to do next
 
 - Put host-specific settings in the

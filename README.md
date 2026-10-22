@@ -211,6 +211,7 @@ prerequisites, the signing key, and the cleanup of a legacy `~/.gitconfig`.
 | `./install.sh identity [--name "Full Name"] [--rotate]` | Set this machine's git identity and signing key from its allowed-signers file and ssh-agent; `--rotate` replaces a key that no longer verifies. |
 | `./install.sh doctor [--verbose]` | Check the identity, the signing key, the tools they need, the plugin submodules, Homebrew, gh and git's credential helper, without writing anything; it asks GitHub whether gh's token is valid. Prints only problems, and exits 1 when it finds one. |
 | `./install.sh packages` | `brew bundle` over `packages/Brewfile`, then the pinned `gh` extensions. |
+| `./install.sh maxfiles [--uninstall\|--status]` | macOS only: install the root LaunchDaemon that raises the open-file limit at boot, each privileged step through `sudo`; `--uninstall` removes it, `--status` checks it. See [`install.sh maxfiles`](docs/shell-reference.md#installsh-maxfiles). |
 | `./install.sh --help` | Print the usage (`-h` and `help` work too). |
 | `dotfiles-upgrade` | Fetch, fast-forward merge, update submodules, relink, recompile. Same as `./install.sh upgrade`. |
 | `dotfiles-uninstall [--purge]` | Remove the framework's links and restore backups. `--purge` also deletes generated cache and state, **including your shell history**. Same as `./install.sh uninstall [--purge]`. |
