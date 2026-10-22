@@ -32,8 +32,11 @@
 # host uses to open large PR stacks and land them bottom-up with
 # minimal blocking (see docs/stacked-prs.md). Pin bump = review + edit here.
 # The pin is the latest release, reviewed on 2026-10-12 as the diff from v0.1.0
-# (release notes and tagged source). Its release attestation was verified with
-# `gh attestation verify` (signer release.yml@refs/tags/v0.2.1, source digest
-# 29a36d3). The date and commit after the pin are informational: no gate reads
-# them.
+# (release notes and tagged source). In that review, the release attestation
+# of the linux-amd64 asset was checked once with `gh attestation verify`
+# (signer release.yml@refs/tags/v0.2.1, source digest 29a36d3). That was a
+# one-off check of one asset, not a standing guarantee: `gh extension install`
+# verifies no attestation ("Extensions are not verified, signed, or endorsed
+# by GitHub", gh 2.102.0). The date and commit after the pin are
+# informational: no gate reads them.
 github/gh-stack v0.2.1  # 2026-10-09; commit 29a36d314be664583705f18e41cebdf2b61ad514
