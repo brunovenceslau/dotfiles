@@ -233,11 +233,21 @@ ck "gh install failure -> packages_install still rc 0 (brew ok)" "$prc" "0"
 # Brewfile: every non-comment/non-blank line is a brew/cask/tap directive.
 bad="$(grep -vE '^[[:space:]]*(#|$)' "$repo_root/packages/Brewfile" | grep -vE '^(brew|cask|tap|mas) ' || true)"
 [ -z "$bad" ] || fail "Brewfile has a non-directive line: $bad"
-# gh-extensions.txt: every entry is a valid PINNED owner/repo, and gh-stack is present
+# gh-extensions.txt: every line is blank, a comment or a valid PINNED
+# owner/repo (an optional trailing comment after it), and gh-stack is present
 # pinned to a release tag or commit SHA (- no floating latest reaches a
 # host). gh-stack is a binary extension, so its pin is the vX.Y.Z release tag.
-bad="$(_packages_gh_ext_list "$repo_root/packages/gh-extensions.txt" | grep -vE '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]* ([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)$' || true)"
-[ -z "$bad" ] || fail "gh-extensions.txt has an invalid/unpinned owner/repo: $bad"
+# The RAW lines are checked, with a rule written here: a line read through
+# _packages_gh_ext_list has already passed the installer's own filter, which
+# drops a malformed line silently, so checking its output proved nothing.
+# The rule is stricter than the installer on purpose: one space between the
+# fields, no leading or trailing blanks and no CR in the tracked file.
+# grep exits 1 when every line is good, 2 when it cannot read the file.
+manifest="$repo_root/packages/gh-extensions.txt"
+[ -r "$manifest" ] || fail "packages/gh-extensions.txt is missing or unreadable"
+bad="$(LC_ALL=C grep -nvE '^([[:space:]]*(#.*)?|[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]* (v[0-9]+[.][0-9]+[.][0-9]+|[0-9a-f]{40})([[:space:]]+#.*)?)$' \
+  "$manifest" || true)"
+[ -z "$bad" ] || fail "gh-extensions.txt has a line that is neither blank, a comment nor a pinned owner/repo: $bad"
 grep -qE '^github/gh-stack (v[0-9]+\.[0-9]+\.[0-9]+|[0-9a-f]{40})$' <<<"$(_packages_gh_ext_list "$repo_root/packages/gh-extensions.txt")" \
   || fail "gh-extensions.txt: github/gh-stack must be present, pinned to a release tag or commit SHA"
 # The macOS-GUI terminal cask lives in the Brewfile. ghostty is the installed cask;
