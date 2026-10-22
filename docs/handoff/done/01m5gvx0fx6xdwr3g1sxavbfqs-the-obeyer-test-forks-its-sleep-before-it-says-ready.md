@@ -23,6 +23,15 @@ Session of 2026-10-22.
   fork can overlap the TERM. A KILL in the clocked cases now records the
   group's members, and the obeyer check prints them, so a repeat names
   what was left.
+- This PR's first CI run (39844046040) failed "exception stops the group"
+  instead, first seen there in the last 30 runs. `slowpid.sh` had the same
+  order (its pid, then the fork), and the test probed the group right after
+  the cleanup, reading any error, EPERM included, as alive, without naming
+  it. On Linux the probe always saw ESRCH, the missed TERM included, so the
+  errno on macOS is not known. Most likely a killed member still waited
+  for launchd. `slowpid.sh` now forks first, and the probe waits up to 5s
+  for ESRCH and otherwise prints the errno and the members left; a mutant
+  whose cleanup stops nothing still fails it.
 - `group_alive`'s EPERM handling stays: it rests on `kill_group`'s comment
   and is harmless; its docstring no longer cites these runs.
 

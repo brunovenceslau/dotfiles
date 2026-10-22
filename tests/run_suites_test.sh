@@ -510,7 +510,9 @@ printf '#!/usr/bin/env bash\necho SLOW-OUT\nsleep 300\n' > "$s/slow.sh"
 printf '#!/usr/bin/env bash\n: > "$SHARED/ran"\n' > "$s/m.sh"
 # e_wait.sh fails only once slowpid.sh has written its pid, the id of its group.
 printf '#!/usr/bin/env bash\ni=0\nwhile [ ! -s "$SHARED/pid.txt" ] && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done\nexit 3\n' > "$s/e_wait.sh"
-printf '#!/usr/bin/env bash\necho "$$" > "$SHARED/pid.txt"\nsleep 300\n' > "$s/slowpid.sh"
+# slowpid.sh forks its sleep before it writes its pid, for obey.sh's reason
+# below: e_wait.sh ends on that pid, and the TERM follows at once.
+printf '#!/usr/bin/env bash\nsleep 300 &\necho "$$" > "$SHARED/pid.txt"\nwait\n' > "$s/slowpid.sh"
 printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\n%s\n' "$deaf_loop" > "$s/deaf.sh"
 # obey.sh forks its sleep BEFORE it says ready, so no fork can overlap the
 # TERM. A group signal that lands while bash forks reaches bash but can miss
@@ -731,14 +733,22 @@ m.Runner.report = real_report
 for sig in m.EXIT_ON_SIGNAL:
     signal.signal(sig, signal.SIG_DFL)
 check("exception propagates", raised is not None, "main() returned")
-try:
-    os.killpg(int(open(pidfile).read()), 0)
-    gone = False
-except ProcessLookupError:
-    gone = True
-except OSError:
-    gone = False
-check("exception stops the group", gone, "slowpid.sh's group is alive")
+# Gone means ESRCH. A member killed by the cleanup can still be a zombie
+# waiting for launchd on macOS, which a probe sees as live or as EPERM, so the
+# probe waits up to 5s for ESRCH; a member left alive keeps it failing.
+pgid, probe = int(open(pidfile).read()), "no probe"
+for _ in range(100):
+    try:
+        os.killpg(pgid, 0)
+        probe = "signal 0 delivered"
+    except ProcessLookupError:
+        probe = None
+        break
+    except OSError as e:
+        probe = errno.errorcode.get(e.errno, str(e.errno))
+    time.sleep(0.05)
+check("exception stops the group", probe is None,
+      "slowpid.sh's group is alive after 5s (%s): %s" % (probe, members(pgid)))
 check("exception cleans", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
 
 # 9. stdout closes just as a `start` line is written, the one write inside
