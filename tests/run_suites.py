@@ -311,9 +311,8 @@ def group_alive(pgid):
     not one: macOS answers it for a group whose only member left is a zombie
     (a killed child launchd has not reaped yet), and every live member of a
     group this runner made is its own, so signals reach it. Read as live, a
-    stopped suite whose killed child waited for launchd held stop_all to the
-    grace's end and then took a pointless KILL (the hosted macOS arm64 leg,
-    runs 39488918611 and 39698323746)."""
+    stopped suite whose killed child waited for launchd would hold stop_all
+    to the grace's end and then take a pointless KILL."""
     try:
         os.killpg(pgid, 0)
     except (ProcessLookupError, PermissionError):

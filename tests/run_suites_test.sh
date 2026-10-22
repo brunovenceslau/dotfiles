@@ -357,8 +357,9 @@ grep -q "test: interrupted by SIGTERM" "$SHARED/inner.log" && ok \
 # --- 6d. An INTERRUPTED suite's time runs until its main process ended: one
 # that obeys TERM is not charged the grace period, one that ignores it is.
 # An order between the two, not a bound, so load cannot turn it red.
+# obey.sh forks its sleep BEFORE it says ready: see obey.sh in section 10.
 fresh
-suite obey.sh 'echo ready > "$SHARED/obey.ready"; sleep 300'
+suite obey.sh 'sleep 300 & echo ready > "$SHARED/obey.ready"; wait'
 suite deaf.sh "trap '' TERM
 echo ready > \"\$SHARED/deaf.ready\"
 $deaf_loop"
@@ -509,9 +510,18 @@ printf '#!/usr/bin/env bash\necho SLOW-OUT\nsleep 300\n' > "$s/slow.sh"
 printf '#!/usr/bin/env bash\n: > "$SHARED/ran"\n' > "$s/m.sh"
 # e_wait.sh fails only once slowpid.sh has written its pid, the id of its group.
 printf '#!/usr/bin/env bash\ni=0\nwhile [ ! -s "$SHARED/pid.txt" ] && [ "$i" -lt 300 ]; do i=$((i + 1)); sleep 0.1; done\nexit 3\n' > "$s/e_wait.sh"
-printf '#!/usr/bin/env bash\necho "$$" > "$SHARED/pid.txt"\nsleep 300\n' > "$s/slowpid.sh"
+# slowpid.sh forks its sleep before it writes its pid, for obey.sh's reason
+# below: e_wait.sh ends on that pid, and the TERM follows at once.
+printf '#!/usr/bin/env bash\nsleep 300 &\necho "$$" > "$SHARED/pid.txt"\nwait\n' > "$s/slowpid.sh"
 printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\n%s\n' "$deaf_loop" > "$s/deaf.sh"
-printf '#!/usr/bin/env bash\n: > "$SHARED/obey.sh.ready"\nsleep 300\n' > "$s/obey.sh"
+# obey.sh forks its sleep BEFORE it says ready, so no fork can overlap the
+# TERM. A group signal that lands while bash forks reaches bash but can miss
+# the new child on macOS: XNU's fork has no step like Linux's, which delays
+# such a signal until the child exists too (kernel/fork.c, v6.12, around line
+# 2185). The orphaned sleep then kept the group alive to the grace's end:
+# "grace no KILL for an obeyer" failed with a KILL at 1120.05 on the hosted
+# macOS arm64 leg (runs 39488918611, 39698323746 and 39718076907).
+printf '#!/usr/bin/env bash\nsleep 300 &\n: > "$SHARED/obey.sh.ready"\nwait\n' > "$s/obey.sh"
 cat > "$work/harness.py" <<'PY'
 import errno, importlib.util, io, os, signal, sys, time
 spec = importlib.util.spec_from_file_location("run_suites", sys.argv[1])
@@ -615,6 +625,16 @@ class Clock:
         self.t += s
         time.sleep(0.005)
 real_time, real_kg, real_killpg = m.time, m.kill_group, m.os.killpg
+# What a KILL found in the group, so a failure names the member that was left.
+left = []
+def members(pgid):
+    # Never raises: a failing diagnostic must not stop the KILL it precedes.
+    try:
+        ps = m.subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,command="],
+                              capture_output=True, text=True).stdout
+    except Exception as e:
+        return ["ps failed: %s" % e]
+    return [l.strip() for l in ps.splitlines() if l.split()[1:2] == [str(pgid)]]
 def stopped_on_clock(path, grace, zombie_eperm=False):
     r = runner([path], 1, grace)
     r.launch(r.runs[0])
@@ -624,8 +644,11 @@ def stopped_on_clock(path, grace, zombie_eperm=False):
             break
         time.sleep(0.01)
     clock, kills = Clock(), []
+    left.clear()
     def kg(pgid, sig):
         kills.append((sig, clock.t))
+        if sig == signal.SIGKILL:
+            left.append(members(pgid))
         real_kg(pgid, sig)
     def killpg(pgid, sig):
         # macOS answers a probe of a group whose only member left is a zombie
@@ -648,14 +671,12 @@ at = [t for sig, t in kills if sig == signal.SIGKILL]
 check("grace TERM first", kills and kills[0] == (signal.SIGTERM, T0), kills)
 check("grace KILL at its end", len(at) == 1 and 2.0 <= at[0] - T0 <= 2.0 + m.POLL_SECONDS + 1e-6, kills)
 kills, run = stopped_on_clock("obey.sh", 120.0)
-check("grace no KILL for an obeyer", [s for s, _ in kills] == [signal.SIGTERM], kills)
+check("grace no KILL for an obeyer", [s for s, _ in kills] == [signal.SIGTERM], (kills, left))
 # Reaped once, inside the wait: its status is the TERM that ended it.
 check("grace obeyer status kept", run.code == -signal.SIGTERM, run.code)
 # The same obeyer where its group's probe answers EPERM once bash is reaped,
-# as macOS does while the killed `sleep` waits for launchd: nothing is left
-# to stop, so no KILL and no wait to the grace's end. Read as live members,
-# it failed the case above twice on the hosted macOS arm64 leg (runs
-# 39488918611 and 39698323746): KILL at 1120.05 on this clock.
+# which kill_group's comment says macOS does for a zombie-only group: nothing
+# is left to stop, so no KILL and no wait to the grace's end.
 kills, run = stopped_on_clock("obey.sh", 120.0, zombie_eperm=True)
 check("grace no KILL for a zombie-only group", [s for s, _ in kills] == [signal.SIGTERM], kills)
 check("grace zombie-only status kept", run.code == -signal.SIGTERM, run.code)
@@ -712,14 +733,22 @@ m.Runner.report = real_report
 for sig in m.EXIT_ON_SIGNAL:
     signal.signal(sig, signal.SIG_DFL)
 check("exception propagates", raised is not None, "main() returned")
-try:
-    os.killpg(int(open(pidfile).read()), 0)
-    gone = False
-except ProcessLookupError:
-    gone = True
-except OSError:
-    gone = False
-check("exception stops the group", gone, "slowpid.sh's group is alive")
+# Gone means ESRCH. A member killed by the cleanup can still be a zombie
+# waiting for launchd on macOS, which a probe sees as live or as EPERM, so the
+# probe waits up to 5s for ESRCH; a member left alive keeps it failing.
+pgid, probe = int(open(pidfile).read()), "no probe"
+for _ in range(100):
+    try:
+        os.killpg(pgid, 0)
+        probe = "signal 0 delivered"
+    except ProcessLookupError:
+        probe = None
+        break
+    except OSError as e:
+        probe = errno.errorcode.get(e.errno, str(e.errno))
+    time.sleep(0.05)
+check("exception stops the group", probe is None,
+      "slowpid.sh's group is alive after 5s (%s): %s" % (probe, members(pgid)))
 check("exception cleans", os.listdir(os.environ["TMPDIR"]) == [], os.listdir(os.environ["TMPDIR"]))
 
 # 9. stdout closes just as a `start` line is written, the one write inside
