@@ -46,6 +46,7 @@ given.
 | `uninstall` | `[--purge]` | Removes manifest-listed links and restores backups. `--purge` also deletes generated cache and state, including your shell history (`$XDG_STATE_HOME/zsh/history`). |
 | `identity` | `[--name "Full Name"]` or `[--rotate]`, not both | Sets `user.email`, `user.signingkey`, `tag.gpgsign` and `gpg.ssh.allowedSignersFile` (and `user.name` with `--name`) in `~/.config/git/config.local` from this host's allowed-signers file and ssh-agent; `commit.gpgsign` comes from the tracked config. `--rotate` replaces a signing key that no longer verifies. See [`install.sh identity`](#installsh-identity). |
 | `doctor` | `[--verbose]` | Checks the identity, the signing key, the tools they need, the plugin submodules, Homebrew, gh and git's credential helper, and writes nothing that stays; it asks GitHub whether gh's token is valid. Prints only problems; `--verbose` prints every check. See [`install.sh doctor`](#installsh-doctor). |
+| `maxfiles` | `[--uninstall]` or `[--status]` | macOS only: installs the LaunchDaemon that raises the open-file limit at boot, each privileged step through `sudo`; `--uninstall` removes it, `--status` checks it and changes nothing. Elsewhere it does nothing and says so. See [`install.sh maxfiles`](#installsh-maxfiles). |
 | `reseed-settings` | none | Retired. It is kept because the previous release's installer invokes this name on the new tree. It succeeds and does nothing. |
 | `help`, `-h`, `--help` | none | Prints the usage. |
 
@@ -55,7 +56,8 @@ plugin: it then runs `git submodule update --init` to repair a non-recursive
 clone. On a healthy checkout it is a strict no-op.
 
 Exit codes: `2` for a usage error (unknown subcommand, an argument to a
-subcommand that takes none, unknown uninstall, identity or doctor option),
+subcommand that takes none, unknown uninstall, identity, doctor or
+maxfiles option),
 `1` when the work could not complete (or, for `doctor`, when it found a
 problem), `0` on success. A refused link makes `install`
 and `link` exit 1, but only after the other links and the cached integrations
@@ -430,6 +432,71 @@ The identity step's own lines follow the same rules.
 `install.sh doctor` exits `0` when it found no problem (a host that opted out
 included), `1` when it found one (a `python3` that does not run included),
 and `2` on a usage error.
+
+### `install.sh maxfiles`
+
+Raises the macOS open-file limit at boot. The value is `MAXFILES` in
+`lib/host_maxfiles.py`, the one place it is set; the daemon's plist is
+generated from it. It never runs from `install` or `upgrade`: it writes
+outside the checkout, so you run it when you want it. Scope: this host and
+any Mac of the maintainer that uses this framework. It does not change the
+limits inside a sandbox VM, which runs its own kernel.
+
+What it installs: `/Library/LaunchDaemons/local.limits.maxfiles.plist`,
+owned `root:wheel`, mode `0644`, with `RunAtLoad`. At each boot it runs one
+command line: `sysctl -w` of `kern.maxfiles` and `kern.maxfilesperproc`, then
+`launchctl limit maxfiles` with the same value as soft and hard limit. The
+`sysctl` comes first because `launchctl limit` does not go above
+`kern.maxfilesperproc`. `/etc/sysctl.conf` is not used: it did not apply
+reliably on the macOS host where this was measured.
+
+How it runs: the installer itself is never root. The plist is generated,
+checked with `plutil -lint`, and only then is `sudo` asked for anything. Each
+privileged command is printed before it runs, and `sudo` may ask for your
+password:
+
+1. `sudo /usr/bin/install -S -o root -g wheel -m 644 <checked plist> <path>`,
+   when the installed file is missing, different or not a single
+   `root:wheel 0644` file.
+2. `sudo /bin/launchctl bootout system/local.limits.maxfiles`, which may fail
+   when nothing is loaded.
+3. `sudo /bin/launchctl bootstrap system <path>`, only after the installed
+   file was read back and found to be the checked one. If it is not, it is
+   not loaded, and `sudo /bin/rm -f <path>` removes it, so no boot loads it.
+
+A plist at that path that this step did not generate, such as one from
+another recipe with the same label, is neither replaced nor removed: the
+command exits `1` and asks you to move it away first.
+
+A second run on a host where the file is current and the limits are in
+place prints `nothing to do` and runs no `sudo`. A changed `MAXFILES`
+replaces the plist and reloads the daemon. After the reload it waits up to
+five seconds for the new limits and exits `1` with the values it measured if
+they did not arrive.
+
+Check it, without `sudo`:
+
+```sh
+~/.config/dotfiles/install.sh maxfiles --status   # exit 0 when all is in place
+sysctl kern.maxfiles kern.maxfilesperproc
+launchctl limit maxfiles
+ulimit -n        # in a terminal app opened after the install
+```
+
+Running apps keep the limit they started with. Quit and reopen (Cmd+Q, not
+just close the window) the terminal app, Docker and sbx so they inherit the
+new one. The framework sets no `ulimit -n` in any zsh file, so a lower
+`ulimit -n` in a new shell comes from what started it, or from your own
+`.local` files.
+
+Undo it with `install.sh maxfiles --uninstall`: it runs `sudo launchctl
+bootout` and `sudo rm -f` on the plist, only when this step generated it.
+The limits stay in place until the next boot, which brings back the macOS
+defaults.
+
+`install.sh maxfiles` exits `0` when the limit is in place or there is
+nothing to do (on any other platform too), `1` when a step failed or, for
+`--status`, when the limit is not in place, and `2` on a usage error.
 
 ## Lifecycle commands
 

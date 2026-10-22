@@ -1846,7 +1846,7 @@ has "doctor: python3: python3 -I -c '' does not run here - install the Command L
 rc=0; out="$(python3 -I "$module" --config-local "$local_cfg" --mode check --verbose 2>&1)" || rc=$?
 expect_rc 2 "--verbose outside --mode doctor"
 rc=0; out="$("$installer" --help 2>&1)" || rc=$?
-expect_rc 0 "--help"; has "|doctor [--verbose]]" "the usage line names doctor and --verbose"
+expect_rc 0 "--help"; has "|doctor [--verbose]|maxfiles" "the usage line names doctor and --verbose"
 ok
 
 # --- doctor: each finding, and what an opt-out does and does not hide -------

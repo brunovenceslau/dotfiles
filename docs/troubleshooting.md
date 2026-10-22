@@ -1138,19 +1138,21 @@ Two things are left on purpose, with no message:
 ## Install refuses to run as root
 
 ```
-install: refusing to run as root - run it as the owning user; sudo is never needed here
+install: refusing to run as root - run it as the owning user; a step that needs root runs sudo itself
 install: cannot tell who is running this (<path> is missing) - refusing to run
 install: cannot tell who is running this (<path> gave no uid) - refusing to run
 ```
 
 **Cause.** `install.sh` refuses root for every subcommand, before it does
 anything else. As root it would act on files, directories and tools a normal
-user can change, and nothing it does needs root: Homebrew is user-scoped. The
+user can change. Homebrew is user-scoped, and the one step that needs root,
+[`install.sh maxfiles`](shell-reference.md#installsh-maxfiles), runs each
+root command through `sudo` itself. The
 other two messages mean the check could not read the uid from `/usr/bin/id` (the
 `<path>`), so it refuses rather than guess. NixOS has no `/usr/bin/id`, so the
 installer does not run there.
 
-**Fix.** Run the command as the owning user. Sudo is never needed.
+**Fix.** Run the command as the owning user, never under `sudo`.
 
 ## Manifest keeps an entry the framework may not act on
 

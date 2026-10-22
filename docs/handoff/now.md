@@ -27,7 +27,7 @@ Nothing.
 
 ## In flight
 
-- Branch `fix/packages-test-filter`: the test fix and this checkpoint,
+- Branch `feat/host-maxfiles`: `install.sh maxfiles` and this checkpoint,
   until its PR merges.
 
 Branch and PR state is not recorded here: measure it with
