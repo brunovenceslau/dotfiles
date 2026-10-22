@@ -45,9 +45,9 @@ There is no separate specification. The code and its comments are the spec.
   body ("stacked on #N, review only the last K commits"). A `--base <branch>`
   child races its parent's branch deletion on merge and can lose, which CLOSES
   it: a closed PR can be neither retargeted nor reopened. One exception: a
-  GitHub stack (each child based on its parent), only while GitHub reports a
-  stack number (`gh stack link` or `submit` prints it; `gh stack merge` fails
-  if GitHub has dropped the stack) and only merged as a stack
+  GitHub stack (each child based on its parent), only while GitHub's stack
+  API lists it as one open stack of the whole chain (`gh stack view` reads a
+  local record, not GitHub) and only merged as a stack
   (`gh stack merge --merge`), never by squash, rebase or `gh pr merge`.
   Conditions and re-sync recipes: [docs/stacked-prs.md](docs/stacked-prs.md).
 
