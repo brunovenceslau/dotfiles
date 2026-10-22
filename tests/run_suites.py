@@ -306,6 +306,23 @@ def kill_group(pgid, sig):
         pass
 
 
+def group_alive(pgid):
+    """True while the group has a member a signal can still stop. EPERM is
+    not one: macOS answers it for a group whose only member left is a zombie
+    (a killed child launchd has not reaped yet), and every live member of a
+    group this runner made is its own, so signals reach it. Read as live, a
+    stopped suite whose killed child waited for launchd held stop_all to the
+    grace's end and then took a pointless KILL (the hosted macOS arm64 leg,
+    runs 39488918611 and 39698323746)."""
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 class Stop:
     """What the signal handler records. Only flags: the scheduler acts on
     them between steps, so a signal can never land between a fork and the
@@ -497,24 +514,15 @@ class Runner:
                 if run.code is None and not self.collect(run):
                     still.append(run)       # the main process still runs
                     continue
-                try:
-                    os.killpg(run.proc.pid, 0)
-                except ProcessLookupError:
-                    continue                # the group is empty: done
-                except OSError:
-                    pass                    # EPERM: members, not ours
+                if not group_alive(run.proc.pid):
+                    continue                # nothing left to stop: done
                 still.append(run)
             live = still
             if live:
                 time.sleep(POLL_SECONDS)
         for run in live:
-            try:
-                os.killpg(run.proc.pid, 0)
-            except ProcessLookupError:
-                continue                    # emptied since the last poll
-            except OSError:
-                pass
-            kill_group(run.proc.pid, signal.SIGKILL)
+            if group_alive(run.proc.pid):   # else emptied since the last poll
+                kill_group(run.proc.pid, signal.SIGKILL)
         pending = [r for r in stopped if r.code is None]
         deadline = time.monotonic() + REAP_SECONDS
         while pending:

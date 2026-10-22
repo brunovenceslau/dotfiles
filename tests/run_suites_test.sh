@@ -513,7 +513,7 @@ printf '#!/usr/bin/env bash\necho "$$" > "$SHARED/pid.txt"\nsleep 300\n' > "$s/s
 printf '#!/usr/bin/env bash\ntrap "" TERM\n: > "$SHARED/deaf.sh.ready"\n%s\n' "$deaf_loop" > "$s/deaf.sh"
 printf '#!/usr/bin/env bash\n: > "$SHARED/obey.sh.ready"\nsleep 300\n' > "$s/obey.sh"
 cat > "$work/harness.py" <<'PY'
-import importlib.util, io, os, signal, sys, time
+import errno, importlib.util, io, os, signal, sys, time
 spec = importlib.util.spec_from_file_location("run_suites", sys.argv[1])
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
@@ -614,8 +614,8 @@ class Clock:
     def sleep(self, s):
         self.t += s
         time.sleep(0.005)
-real_time, real_kg = m.time, m.kill_group
-def stopped_on_clock(path, grace):
+real_time, real_kg, real_killpg = m.time, m.kill_group, m.os.killpg
+def stopped_on_clock(path, grace, zombie_eperm=False):
     r = runner([path], 1, grace)
     r.launch(r.runs[0])
     ready = os.path.join(os.environ["SHARED"], path + ".ready")
@@ -627,11 +627,20 @@ def stopped_on_clock(path, grace):
     def kg(pgid, sig):
         kills.append((sig, clock.t))
         real_kg(pgid, sig)
+    def killpg(pgid, sig):
+        # macOS answers a probe of a group whose only member left is a zombie
+        # (a killed child that launchd has not reaped yet) with EPERM, not
+        # ESRCH; Linux never does, so the hosted macOS leg alone hit it.
+        if sig == 0:
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        real_killpg(pgid, sig)
     m.time, m.kill_group = clock, kg
+    if zombie_eperm:
+        m.os.killpg = killpg
     try:
         captured(lambda: r.stop_all())
     finally:
-        m.time, m.kill_group = real_time, real_kg
+        m.time, m.kill_group, m.os.killpg = real_time, real_kg, real_killpg
     m.remove_tree(r.root)
     return kills, r.runs[0]
 kills, _ = stopped_on_clock("deaf.sh", 2.0)
@@ -642,6 +651,14 @@ kills, run = stopped_on_clock("obey.sh", 120.0)
 check("grace no KILL for an obeyer", [s for s, _ in kills] == [signal.SIGTERM], kills)
 # Reaped once, inside the wait: its status is the TERM that ended it.
 check("grace obeyer status kept", run.code == -signal.SIGTERM, run.code)
+# The same obeyer where its group's probe answers EPERM once bash is reaped,
+# as macOS does while the killed `sleep` waits for launchd: nothing is left
+# to stop, so no KILL and no wait to the grace's end. Read as live members,
+# it failed the case above twice on the hosted macOS arm64 leg (runs
+# 39488918611 and 39698323746): KILL at 1120.05 on this clock.
+kills, run = stopped_on_clock("obey.sh", 120.0, zombie_eperm=True)
+check("grace no KILL for a zombie-only group", [s for s, _ in kills] == [signal.SIGTERM], kills)
+check("grace zombie-only status kept", run.code == -signal.SIGTERM, run.code)
 
 # 5. A signal that lands while the scheduler reaps starts no new suite: the
 # launch loop checks for it too, not only the top of the loop.
@@ -738,7 +755,7 @@ bounded_run 60 "$work/harness" sh -c 'cd "$1" && shift && exec "$@"' sh "$s" \
 harness="$(cat "$work/harness")"
 [ "$br_hung" = 0 ] && [ "$br_stuck" = 0 ] || fail "the in-process harness hung: $harness"
 grep -q '^BAD' <<<"$harness" && fail "in-process cases: $(grep '^BAD' <<<"$harness")" || ok
-[ "$(grep -c '^ok' <<<"$harness")" = 25 ] && ok || fail "test bug: the in-process cases did not all run: $harness"
+[ "$(grep -c '^ok' <<<"$harness")" = 27 ] && ok || fail "test bug: the in-process cases did not all run: $harness"
 
 # --- 11. Verdicts, launch and input edge cases.
 # A suite killed by a signal is a failure that names the signal.
